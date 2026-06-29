@@ -1,0 +1,8 @@
+ddgs
+requests
+openpyxl
+phonenumbers
+rapidfuzz
+beautifulsoup4
+tqdm
+

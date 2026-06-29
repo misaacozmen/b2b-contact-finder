@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+input/*.xlsx
+input/*.xls
+input/*.csv
+input/*.ndjson
+!input/.gitkeep
+
+output/
+state/
+artifact_work/
+
+.env
+.env.*
+*.log
