@@ -11,6 +11,15 @@ input/*.ndjson
 output/
 state/
 artifact_work/
+.codex_work/
+
+# Generated workbook inspection and preview artifacts. Golden fixture
+# workbooks under outputs/ remain versioned because the regression runners
+# and tests depend on them.
+outputs/**/*.inspect.ndjson
+outputs/**/*.png
+outputs/**/formula_errors.ndjson
+prepare_final*.txt
 
 .env
 .env.*

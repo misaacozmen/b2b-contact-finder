@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "policy": {
+    "target_country": "TR",
+    "no_company_overlap": true,
+    "blind_must_use_unseen_fair": true
+  },
+  "sets": [
+    {
+      "name": "golden_1",
+      "role": "dev",
+      "expected": "outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx",
+      "readiness_mode": "legacy",
+      "status": "development_only_not_release_gate"
+    },
+    {
+      "name": "golden_2",
+      "role": "validation",
+      "expected": "outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx"
+    },
+    {
+      "name": "golden_3",
+      "role": "holdout",
+      "expected": "outputs/golden_3_20260715/golden_3_manual_validation_15.xlsx",
+      "status": "ready"
+    },
+    {
+      "name": "golden_4",
+      "role": "development_golden4",
+      "expected": "outputs/golden_4_20260715/golden_4_manual_validation_15.xlsx",
+      "source": "WIN EURASIA 2026",
+      "source_url": "https://platform.win-eurasia.com/participants/all",
+      "status": "development_after_blind_run"
+    },
+    {
+      "name": "golden_5",
+      "role": "blind",
+      "expected": "outputs/golden_5_20260716/golden_5_manual_validation_20_ready.xlsx",
+      "pipeline_input": "outputs/golden_5_20260716/golden_5_discovery_blind_input_20.xlsx",
+      "source_assisted_input": "outputs/golden_5_20260716/golden_5_pipeline_input_20.xlsx",
+      "discovery_protocol": "profile_url_removed_before_paid_run",
+      "source": "Expomed Eurasia 2026",
+      "source_url": "https://expomedistanbul.com/en/exhibitor-list",
+      "status": "ready_for_blind_run"
+    }
+  ]
+}

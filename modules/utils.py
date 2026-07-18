@@ -39,7 +39,11 @@ def random_delay(min_sec: float | None = None, max_sec: float | None = None) -> 
     time.sleep(random.uniform(min_sec or config.MIN_DELAY_SEC, max_sec or config.MAX_DELAY_SEC))
 
 
-def retry_with_backoff(max_retries: int | None = None, backoff_base: float | None = None):
+def retry_with_backoff(
+    max_retries: int | None = None,
+    backoff_base: float | None = None,
+    retry_if: Callable[[Exception], bool] | None = None,
+):
     retries = config.MAX_RETRIES if max_retries is None else max_retries
     base = config.RETRY_BACKOFF_BASE_SEC if backoff_base is None else backoff_base
 
@@ -52,7 +56,7 @@ def retry_with_backoff(max_retries: int | None = None, backoff_base: float | Non
                     return func(*args, **kwargs)
                 except Exception as exc:
                     last_error = exc
-                    if attempt >= retries:
+                    if attempt >= retries or (retry_if is not None and not retry_if(exc)):
                         break
                     sleep_for = (base ** attempt) + random.uniform(0.25, 1.0)
                     time.sleep(sleep_for)
@@ -61,4 +65,3 @@ def retry_with_backoff(max_retries: int | None = None, backoff_base: float | Non
         return wrapper
 
     return decorator
-

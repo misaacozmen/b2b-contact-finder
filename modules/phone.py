@@ -23,7 +23,7 @@ def normalize_phone(raw: str, default_country: str | None = None) -> str:
             parsed = phonenumbers.parse(candidate, country)
         except phonenumbers.NumberParseException:
             continue
-        if not phonenumbers.is_possible_number(parsed):
+        if not phonenumbers.is_possible_number(parsed) or not phonenumbers.is_valid_number(parsed):
             continue
         region = phonenumbers.region_code_for_number(parsed)
         if config.PHONE_ALLOWED_COUNTRIES and region not in config.PHONE_ALLOWED_COUNTRIES:
