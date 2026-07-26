@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from modules import evidence_ledger
+
 
 def _json_safe(value):
     if isinstance(value, set):
@@ -32,6 +34,15 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
                     "status": row.get("status", ""),
                     "confidence": row.get("confidence", ""),
                     "score": row.get("score", 0),
+                    "publication_policy": {
+                        "version": row.get("publication_policy_version", ""),
+                        "action": row.get("publication_policy_action", ""),
+                        "eligible": row.get("publication_eligible", False),
+                        "safety_score": row.get("publication_safety_score", 0),
+                        "risk_index": row.get("publication_risk_index", 100),
+                        "risk_tier": row.get("publication_risk_tier", ""),
+                        "blockers": row.get("publication_blockers", ""),
+                    },
                     "reason": row.get("reason", ""),
                 },
                 "candidates": row.get("__candidates", []),
@@ -39,5 +50,8 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
                 "source_health": row.get("__source_health", {}),
                 "evaluation": row.get("__evaluation", {}),
                 "candidate_evaluations": row.get("__candidate_evaluations", []),
+                "field_evidence": evidence_ledger.evaluation_claims(
+                    row.get("__evaluation", {})
+                ),
             }
             handle.write(json.dumps(_json_safe(record), ensure_ascii=False) + "\n")

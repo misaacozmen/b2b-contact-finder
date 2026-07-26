@@ -178,6 +178,116 @@ class GeneralImprovementPackageTests(unittest.TestCase):
         )
         self.assertEqual(role, "directory")
 
+    def test_uuid_company_profile_is_discovery_only_even_when_slug_matches(self) -> None:
+        role = search._candidate_role(
+            "Example Automotive",
+            "https://expo.example/company/123e4567-e89b-12d3-a456-426614174000/example-automotive",
+            "Example Automotive", "Company profile",
+        )
+        self.assertEqual(role, "directory")
+
+    def test_complete_legal_title_outranks_generic_matching_domain(self) -> None:
+        company = "Nova Kalip Uretim Sanayi AS"
+        generic = {
+            "candidate": {
+                "url": "https://novakalip.com", "role": "company_candidate",
+                "reason": "domain_hits:2/2", "score": 92,
+            },
+            "reasons": [
+                "page_identity_strong:2/2", "structured_identity_urls_only",
+                "legal_name_phrase_missing:0/3", "country_identity_tr_phone",
+            ],
+            "identity_assessment": {"support_count": 2, "provisionally_publishable": True},
+            "structured_identity": {}, "final_score": 100, "has_contact": True,
+            "context_failed": False, "email_failed": False,
+        }
+        legal = {
+            "candidate": {
+                "url": "https://nova-automotive.com.tr", "role": "unknown",
+                "reason": "search_text_identity:2/3", "score": 80,
+            },
+            "reasons": [
+                "page_identity_strong:3/3", "structured_identity_strong:3/3",
+                "legal_name_full_match:3", "country_identity_tr_tld",
+            ],
+            "identity_assessment": {"support_count": 1, "provisionally_publishable": True},
+            "structured_identity": {}, "final_score": 100, "has_contact": True,
+            "context_failed": False, "email_failed": False,
+        }
+        ranked = sorted(
+            [generic, legal], key=lambda item: main._evaluation_rank_key(company, item), reverse=True,
+        )
+        self.assertIs(ranked[0], legal)
+
+    def test_declared_owner_relationship_outranks_generic_compound_domain(self) -> None:
+        company = "Delta Otomotiv Ticaret Limited Sirketi"
+        generic = {
+            "candidate": {"url": "https://deltaotomotiv.com.tr", "role": "company_candidate", "reason": "domain_hits:2/2"},
+            "reasons": ["page_identity_strong:2/2", "legal_name_phrase_match:2", "country_identity_tr_tld"],
+            "identity_assessment": {"support_count": 2, "provisionally_publishable": True},
+            "structured_identity": {}, "final_score": 90, "has_contact": True,
+            "context_failed": False, "email_failed": False,
+        }
+        owned_brand = {
+            "candidate": {"url": "https://delta-exhaust.com", "role": "unknown", "reason": "search_text_identity:1/2"},
+            "reasons": [
+                "page_identity_strong:2/2",
+                "structured_identity_strong:1/1@scope=declared_relationship",
+                "legal_name_ownership_match:2", "country_identity_tr_phone",
+            ],
+            "identity_assessment": {"support_count": 1, "provisionally_publishable": True},
+            "structured_identity": {}, "final_score": 88, "has_contact": True,
+            "context_failed": False, "email_failed": False,
+        }
+        ranked = sorted(
+            [generic, owned_brand], key=lambda item: main._evaluation_rank_key(company, item), reverse=True,
+        )
+        self.assertIs(ranked[0], owned_brand)
+
+    def test_turkish_localized_mailbox_beats_global_root_mailbox(self) -> None:
+        selected = main._select_best_email_record(
+            "Example Automotive", "https://example-auto.com", [
+                {"value": "admin@example-auto.com", "source_url": "https://example-auto.com/contact"},
+                {"value": "info-tr@example-auto.com", "source_url": "https://example-auto.com/tr/contact"},
+            ],
+        )
+        self.assertEqual(selected["value"], "info-tr@example-auto.com")
+        same_site = main._select_best_email_record(
+            "Example Automotive", "https://example-auto.com", [
+                {"value": "sales@example-auto.com", "source_url": "https://example-auto.com/contact"},
+                {"value": "tr@example-mail.net", "source_url": "https://example-auto.com/tr/contact"},
+            ],
+        )
+        self.assertEqual(same_site["value"], "sales@example-auto.com")
+
+    def test_automotive_metadata_context_rejects_unrelated_packaging_site(self) -> None:
+        self.assertIn("otomotiv", scorer.metadata_contexts({"sector": "Otomotiv yan sanayi"}))
+        self.assertTrue(scorer.page_matches_metadata_context(
+            "Automotive spare parts and suspension", "otomotiv",
+        ))
+        self.assertFalse(scorer.page_matches_metadata_context(
+            "Pharmaceutical blister packaging", "otomotiv",
+        ))
+
+    def test_full_legal_phrase_does_not_accept_only_public_prefix(self) -> None:
+        company = "Nova Kalip Uretim Sanayi AS"
+        self.assertFalse(scorer.legal_name_full_phrase_match(company, "Nova Kalip products"))
+        self.assertTrue(scorer.legal_name_full_phrase_match(
+            company, "Nova Kalip ve Uretim Sanayi A.S.",
+        ))
+        assessment = identity.assess(
+            company,
+            {"url": "https://nova-automotive.com.tr", "role": "unknown", "reason": "search_text_identity:1/3"},
+            ["page_identity_strong:3/3", "legal_name_full_match:3", "country_identity_tr_tld"],
+        )
+        self.assertTrue(assessment["strong_first_party_bundle"])
+        distributor = identity.assess(
+            company,
+            {"url": "https://different-distributor.com.tr", "role": "unknown", "reason": "search_text_identity:3/3"},
+            ["page_identity_strong:3/3", "legal_name_full_match:3", "country_identity_tr_tld"],
+        )
+        self.assertFalse(distributor["strong_first_party_bundle"])
+
     def test_discovery_only_role_cannot_regress_when_search_hits_merge(self) -> None:
         search.reset_candidate_host_observations()
         candidates = {}

@@ -1,5 +1,6 @@
 import re
 import time
+import unicodedata
 from html import unescape
 from urllib.parse import urljoin
 
@@ -16,7 +17,13 @@ HEADERS = {
 
 
 def _clean(value: str) -> str:
-    return re.sub(r"\s+", " ", unescape(value or "")).strip()
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", unescape(value or ""))
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _fold(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", _clean(value)).casefold()
+    return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 def _absolute_url(base_url: str, href: str) -> str:
@@ -338,6 +345,175 @@ def scrape_beauty_eurasia(fetch_details: bool = True, delay_sec: float = 0.4) ->
             break
         time.sleep(delay_sec)
     return rows
+
+
+def _maktek_widget(soup: BeautifulSoup, title: str):
+    wanted = _fold(title)
+    for heading in soup.select("h4.widget-title"):
+        if _fold(heading.get_text(" ", strip=True)) == wanted:
+            return heading.find_parent(class_="widget")
+    return None
+
+
+def _cloudflare_email(encoded: str) -> str:
+    try:
+        key = int(encoded[:2], 16)
+        return "".join(
+            chr(int(encoded[index:index + 2], 16) ^ key)
+            for index in range(2, len(encoded), 2)
+        )
+    except (TypeError, ValueError):
+        return ""
+
+
+def _maktek_profile_details(html: str) -> dict:
+    soup = BeautifulSoup(html, "html.parser")
+    details = {
+        "company": "",
+        "website": "",
+        "listed_phone": "",
+        "listed_email": "",
+        "listed_address": "",
+        "hall": "",
+        "stand": "",
+        "brands": "",
+        "representations": "",
+        "description": "",
+    }
+    heading = soup.select_one("main h1")
+    description = soup.select_one("main .schedule-detail-info p.mb-20")
+    details["company"] = _clean(heading.get_text(" ", strip=True) if heading else "")
+    details["description"] = _clean(description.get_text(" ", strip=True) if description else "")
+
+    location = _maktek_widget(soup, "Konum Bilgisi")
+    if location:
+        location_text = _clean(location.get_text(" ", strip=True))
+        hall_match = re.search(r"Salon\s*:\s*([^:]+?)(?=\s+Stant\s*:|$)", location_text, re.I)
+        stand_match = re.search(r"Stant\s*:\s*(.+)$", location_text, re.I)
+        details["hall"] = _clean(hall_match.group(1) if hall_match else "")
+        details["stand"] = _clean(stand_match.group(1) if stand_match else "")
+
+    brands = _maktek_widget(soup, "Markalar")
+    if brands:
+        details["brands"] = "; ".join(dict.fromkeys(
+            _clean(item.get_text(" ", strip=True))
+            for item in brands.select("li")
+            if _clean(item.get_text(" ", strip=True))
+        ))
+
+    representations = _maktek_widget(soup, "Temsilcilikler")
+    if representations:
+        values = [
+            _clean(item.get_text(" ", strip=True))
+            for item in representations.select("h6")
+            if _clean(item.get_text(" ", strip=True))
+        ]
+        details["representations"] = "; ".join(dict.fromkeys(values))
+
+    contact = _maktek_widget(soup, "İletişim")
+    if contact:
+        for item in contact.select(".schedule-list > ul > li"):
+            text = _clean(item.get_text(" ", strip=True))
+            icon = item.find("i")
+            classes = set(icon.get("class", [])) if icon else set()
+            if any("phone" in name for name in classes):
+                details["listed_phone"] = text
+            elif any("location" in name for name in classes):
+                details["listed_address"] = text
+            elif any("globe" in name for name in classes):
+                link = item.find("a", href=True)
+                if link:
+                    details["website"] = _normalize_website(link["href"])
+            elif any("envelope" in name for name in classes):
+                link = item.find("a", href=True)
+                if link and link["href"].startswith("mailto:"):
+                    details["listed_email"] = _clean(link["href"][7:].split("?", 1)[0])
+                else:
+                    encoded = item.select_one("[data-cfemail]")
+                    if encoded:
+                        details["listed_email"] = _cloudflare_email(encoded.get("data-cfemail", ""))
+    return details
+
+
+def _maktek_list_rows(html: str, base_url: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[dict] = []
+    for card in soup.select('a.brand-link[href^="brand/"], a.brand-link[href*="/brand/"]'):
+        company_el = card.select_one(".brand-name")
+        company = _clean(company_el.get_text(" ", strip=True) if company_el else "")
+        href = card.get("href", "")
+        if not company or not href:
+            continue
+        country_el = card.select_one(".brand-country")
+        location_texts = [
+            _clean(item.get_text(" ", strip=True))
+            for item in card.select(".brand-location-info .location-item")
+        ]
+        hall = ""
+        stand = ""
+        for text in location_texts:
+            if _fold(text).startswith("salon:"):
+                hall = _clean(text.split(":", 1)[1])
+            elif _fold(text).startswith("stant:"):
+                stand = _clean(text.split(":", 1)[1])
+        rows.append({
+            "company": company,
+            "website": "",
+            "source": "maktek_avrasya_2026",
+            "country": _clean(country_el.get_text(" ", strip=True) if country_el else "Türkiye"),
+            "profile_url": _absolute_url(base_url, href),
+            "sector": "makine, takım tezgahları, metal işleme ve üretim teknolojileri",
+            "description": "",
+            "listed_phone": "",
+            "listed_email": "",
+            "listed_address": "",
+            "hall": hall,
+            "stand": stand,
+            "brands": "",
+            "representations": "",
+        })
+    return rows
+
+
+def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[dict]:
+    base_url = "https://www.maktekfuari.com"
+    list_url = f"{base_url}/katilimci-listesi?country=T%C3%9CRK%C4%B0YE"
+    session = requests.Session()
+    rows_by_profile: dict[str, dict] = {}
+    page = 1
+    max_page = 1
+
+    while page <= max_page:
+        url = list_url if page == 1 else f"{list_url}&page={page}"
+        html = _get(session, url)
+        soup = BeautifulSoup(html, "html.parser")
+        if page == 1:
+            page_numbers = []
+            for link in soup.select('a[href*="page="]'):
+                match = re.search(r"[?&]page=(\d+)", link.get("href", ""))
+                if match:
+                    page_numbers.append(int(match.group(1)))
+            max_page = max(page_numbers, default=1)
+
+        for row in _maktek_list_rows(html, base_url):
+            profile_url = row["profile_url"]
+            if profile_url in rows_by_profile:
+                continue
+            if fetch_details:
+                try:
+                    detail_html = _get(session, profile_url)
+                    details = _maktek_profile_details(detail_html)
+                    for field, value in details.items():
+                        if value:
+                            row[field] = value
+                    time.sleep(delay_sec)
+                except requests.RequestException:
+                    pass
+            rows_by_profile[profile_url] = row
+        page += 1
+        if page <= max_page:
+            time.sleep(delay_sec)
+    return list(rows_by_profile.values())
 
 
 def dedupe_rows(rows: list[dict]) -> list[dict]:

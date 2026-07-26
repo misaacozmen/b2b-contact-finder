@@ -1,6 +1,8 @@
 import logging
 import random
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from functools import wraps
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -9,6 +11,24 @@ import config
 
 
 T = TypeVar("T")
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    value = getattr(response, "headers", {}).get("Retry-After", "") if response is not None else ""
+    if not value:
+        return None
+    try:
+        seconds = max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return min(seconds, max(float(config.MAX_RETRY_AFTER_SEC), 0.0))
 
 
 def ensure_directories() -> None:
@@ -58,7 +78,12 @@ def retry_with_backoff(
                     last_error = exc
                     if attempt >= retries or (retry_if is not None and not retry_if(exc)):
                         break
-                    sleep_for = (base ** attempt) + random.uniform(0.25, 1.0)
+                    retry_after = _retry_after_seconds(exc)
+                    sleep_for = (
+                        retry_after
+                        if retry_after is not None
+                        else (base ** attempt) + random.uniform(0.25, 1.0)
+                    )
                     time.sleep(sleep_for)
             raise last_error  # type: ignore[misc]
 

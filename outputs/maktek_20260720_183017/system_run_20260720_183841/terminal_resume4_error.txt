@@ -1,0 +1,84 @@
+﻿2026-07-20 19:51:07,922 | INFO | Source profile preflight: host=maktekfuari.com status=cached_available server_errors=0 circuit_open=False
+2026-07-20 19:51:07,959 | INFO | Resuming from index 130
+2026-07-20 19:51:07,963 | INFO | Processing 131: FLY METAL SAN.TİC.LTD.ŞTİ
+2026-07-20 19:51:07,964 | INFO | Processing 133: FORM MAKİNE CNC TAKIM TEZG SAN VE TİC LTD ŞTİ
+2026-07-20 19:51:07,964 | INFO | Processing 134: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ.
+2026-07-20 19:51:07,964 | INFO | Processing 136: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ.
+2026-07-20 19:51:07,968 | INFO | Search cache hit: fly Turkiye official website
+2026-07-20 19:51:07,970 | INFO | Search cache hit: form cnc Turkiye official website
+2026-07-20 19:51:07,971 | INFO | Processing 134 with supplied website: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ. -> http://www.form-teknik.com/
+2026-07-20 19:51:07,974 | INFO | Processing 136 with supplied website: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ. -> https://www.gencomakina.com
+2026-07-20 19:51:07,989 | INFO | Search cache hit: fly metal san tic ltd sti Turkiye official website
+2026-07-20 19:51:07,990 | INFO | Search cache hit: form makine cnc takim tezg san ve tic ltd sti Turkiye official website
+2026-07-20 19:51:08,003 | INFO | Search cache hit: fly resmi sitesi
+2026-07-20 19:51:08,003 | INFO | Search cache hit: form cnc resmi sitesi
+2026-07-20 19:51:08,016 | INFO | Search cache hit: fly metal san tic ltd sti resmi sitesi
+2026-07-20 19:51:08,021 | INFO | Search cache hit: form makine cnc takim tezg san ve tic ltd sti resmi sitesi
+2026-07-20 19:51:08,021 | INFO | Search cache hit: fly makine
+2026-07-20 19:51:08,029 | INFO | Search cache hit: form cnc makine
+2026-07-20 19:51:08,029 | INFO | Search cache hit: fly metal san tic ltd sti makine
+2026-07-20 19:51:08,040 | INFO | Search cache hit: form makine cnc takim tezg san ve tic ltd sti makine
+2026-07-20 19:51:08,046 | INFO | Search cache hit: fly contact
+2026-07-20 19:51:08,052 | INFO | Search cache hit: form cnc contact
+2026-07-20 19:51:08,059 | INFO | Search cache hit: "form cnc" Turkiye resmi sitesi
+2026-07-20 19:51:08,077 | INFO | Search cache hit: "form makine cnc takim tezg san ve tic ltd sti" web sitesi
+2026-07-20 19:51:21,233 | INFO | Exhibitor profile could not be read: https://isinolsun.com/firma-profil/fly-metal-c82575 (HTTPSConnectionPool(host='isinolsun.com', port=443): Read timed out. (read timeout=10))
+2026-07-20 19:51:21,236 | INFO | Search cache hit: "fly" Turkiye resmi sitesi
+2026-07-20 19:51:21,248 | INFO | Search cache hit: "fly metal san tic ltd sti" web sitesi
+2026-07-20 19:51:21,250 | INFO | Search cache hit: "fly" makine Turkiye
+2026-07-20 19:52:17,409 | INFO | Processing 138: GERMAK MAKİNA SANAYİ TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:52:17,426 | INFO | Search cache hit: germak makina Turkiye official website
+2026-07-20 19:52:17,434 | INFO | Completed 137/369: FORM MAKİNE CNC TAKIM TEZG SAN VE TİC LTD ŞTİ
+2026-07-20 19:52:33,384 | INFO | Processing 139: GESKO CNC TAKIM TEZGAHLARI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 19:52:33,402 | INFO | Search cache hit: gesko cnc Turkiye official website
+2026-07-20 19:52:33,410 | INFO | Completed 138/369: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ.
+2026-07-20 19:52:34,471 | INFO | Processing 141: GNN CNC TAKIM TEZGAHLARI SAN. LTD. ŞTİ.
+2026-07-20 19:52:34,488 | INFO | Completed 139/369: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ.
+2026-07-20 19:52:34,489 | INFO | Search cache hit: gnn cnc Turkiye official website
+2026-07-20 19:52:34,503 | INFO | Search cache hit: gnn cnc takim tezgahlari san ltd sti Turkiye official website
+2026-07-20 19:52:34,518 | INFO | Search cache hit: gnn cnc resmi sitesi
+2026-07-20 19:52:34,533 | INFO | Search cache hit: gnn cnc takim tezgahlari san ltd sti resmi sitesi
+2026-07-20 19:52:34,549 | INFO | Search cache hit: gnn cnc makine
+2026-07-20 19:52:34,562 | INFO | Search cache hit: gnn cnc takim tezgahlari san ltd sti makine
+2026-07-20 19:52:34,576 | INFO | Search cache hit: gnn cnc contact
+2026-07-20 19:52:34,596 | INFO | Search cache hit: "gnn cnc" Turkiye resmi sitesi
+2026-07-20 19:52:34,607 | INFO | Search cache hit: "gnn cnc takim tezgahlari san ltd sti" web sitesi
+2026-07-20 19:52:34,614 | INFO | Search cache hit: "gnn cnc" makine Turkiye
+2026-07-20 19:52:39,892 | INFO | Processing 143: GRUP TEKNİK HIRDAVAT MAKİNA VE İNŞ. SAN. LTD. ŞTİ.
+2026-07-20 19:52:39,912 | INFO | Search cache hit: grup teknik Turkiye official website
+2026-07-20 19:52:39,921 | INFO | Completed 140/369: GERMAK MAKİNA SANAYİ TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:52:39,927 | INFO | Search cache hit: grup teknik hirdavat makina ve ins san ltd sti Turkiye official website
+2026-07-20 19:52:41,807 | INFO | Search cache hit: "grup teknik hirdavat makina ve ins san ltd sti" web sitesi
+2026-07-20 19:52:41,815 | INFO | Search cache hit: "grup teknik" makine Turkiye
+2026-07-20 19:52:41,826 | INFO | Search cache hit: "grup teknik" kvkk
+2026-07-20 19:52:54,733 | WARNING | Search query failed; continuing with remaining queries: gesko cnc takim tezgahlari sanayi ve ticaret limited sirketi Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:53:04,101 | INFO | Processing 144: GTECH KESİCİ TAKIMLAR SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:53:04,102 | INFO | Processing 144 with supplied website: GTECH KESİCİ TAKIMLAR SAN. VE TİC. LTD. ŞTİ. -> https://g-tech.com.tr/
+2026-07-20 19:53:04,118 | INFO | Completed 141/369: FLY METAL SAN.TİC.LTD.ŞTİ
+C:\Users\ISAAC\Documents\Python b2b\.venv\Lib\site-packages\urllib3\connectionpool.py:1110: InsecureRequestWarning: Unverified HTTPS request is being made to host 'www.grupteknik.com.tr'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#tls-warnings
+  warnings.warn(
+2026-07-20 19:53:15,782 | INFO | Search cache hit: gesko cnc takim tezgahlari sanayi ve ticaret limited sirketi resmi sitesi
+2026-07-20 19:53:15,800 | INFO | Search cache hit: gesko cnc makine
+2026-07-20 19:53:15,811 | INFO | Search cache hit: gesko cnc takim tezgahlari sanayi ve ticaret limited sirketi makine
+2026-07-20 19:54:18,298 | WARNING | Search query failed; continuing with remaining queries: "gesko cnc takim tezgahlari sanayi ve ticaret limited sirketi" web sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:54:27,203 | INFO | Processing 146: GUOHONG MAKİNA EKİPMANLARI İMALAT LİMİTED ŞİRKETİ
+2026-07-20 19:54:27,220 | INFO | Search cache hit: guohong makina Turkiye official website
+2026-07-20 19:54:27,229 | INFO | Completed 142/369: GNN CNC TAKIM TEZGAHLARI SAN. LTD. ŞTİ.
+2026-07-20 19:54:39,470 | INFO | Processing 147: GÜRİŞ İŞ MAKİNALARI END. A.Ş.
+2026-07-20 19:54:39,489 | INFO | Completed 143/369: GESKO CNC TAKIM TEZGAHLARI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 19:54:55,026 | INFO | Processing 148: GÜVENAL MAK.TİC.VE SAN.LTD.ŞTİ.
+2026-07-20 19:54:55,044 | INFO | Completed 144/369: GTECH KESİCİ TAKIMLAR SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:55:13,021 | INFO | Processing 149: HAIMER DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:55:13,021 | INFO | Processing 149 with supplied website: HAIMER DIŞ TİC. LTD. ŞTİ. -> https://www.haimer.com.tr/
+2026-07-20 19:55:13,040 | INFO | Completed 145/369: GRUP TEKNİK HIRDAVAT MAKİNA VE İNŞ. SAN. LTD. ŞTİ.
+2026-07-20 19:55:28,253 | WARNING | Search query failed; continuing with remaining queries: guris is resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:55:41,067 | INFO | Processing 150: HAİPAWA KESİCİ TAKIMLAR METİN AYDIN
+2026-07-20 19:55:41,068 | INFO | Processing 150 with supplied website: HAİPAWA KESİCİ TAKIMLAR METİN AYDIN -> https://www.haipawatech.com
+2026-07-20 19:55:41,086 | INFO | Completed 146/369: HAIMER DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:55:49,553 | INFO | Processing 151: HAKSAN TAKIM TEZGAHLARI MAKINA SAN. VE TIC.LTD.STI.
+2026-07-20 19:55:49,554 | INFO | Processing 151 with supplied website: HAKSAN TAKIM TEZGAHLARI MAKINA SAN. VE TIC.LTD.STI. -> https://www.haksanmakina.com.tr
+2026-07-20 19:55:49,838 | INFO | Completed 147/369: HAİPAWA KESİCİ TAKIMLAR METİN AYDIN
+2026-07-20 19:55:52,579 | INFO | Processing 152: HAN ELEKTRONİK VE MEKANİK SANAYİ İÇ VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:55:52,580 | INFO | Processing 152 with supplied website: HAN ELEKTRONİK VE MEKANİK SANAYİ İÇ VE DIŞ TİC. LTD. ŞTİ. -> http://www.hanelectronic.com/
+2026-07-20 19:55:52,604 | INFO | Completed 148/369: HAKSAN TAKIM TEZGAHLARI MAKINA SAN. VE TIC.LTD.STI.
+

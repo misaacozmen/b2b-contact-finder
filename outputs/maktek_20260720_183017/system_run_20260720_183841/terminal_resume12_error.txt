@@ -1,0 +1,59 @@
+﻿2026-07-20 19:48:15,226 | INFO | Source profile preflight: host=maktekfuari.com status=cached_available server_errors=0 circuit_open=False
+2026-07-20 19:48:15,261 | INFO | Resuming from index 128
+2026-07-20 19:48:15,266 | INFO | Processing 129: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:48:15,266 | INFO | Processing 131: FLY METAL SAN.TİC.LTD.ŞTİ
+2026-07-20 19:48:15,266 | INFO | Processing 133: FORM MAKİNE CNC TAKIM TEZG SAN VE TİC LTD ŞTİ
+2026-07-20 19:48:15,266 | INFO | Processing 134: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ.
+2026-07-20 19:48:15,267 | INFO | Processing 136: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ.
+2026-07-20 19:48:15,267 | INFO | Processing 138: GERMAK MAKİNA SANAYİ TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:48:15,267 | INFO | Processing 139: GESKO CNC TAKIM TEZGAHLARI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 19:48:15,267 | INFO | Processing 140: GNC CNC MAKİNA TEKNOLOJİLERİ A.Ş.
+2026-07-20 19:48:15,268 | INFO | Processing 141: GNN CNC TAKIM TEZGAHLARI SAN. LTD. ŞTİ.
+2026-07-20 19:48:15,268 | INFO | Processing 142: GRİNDTEC MAKİNA SAN VE TİC LTD ŞTİ
+2026-07-20 19:48:15,268 | INFO | Processing 143: GRUP TEKNİK HIRDAVAT MAKİNA VE İNŞ. SAN. LTD. ŞTİ.
+2026-07-20 19:48:15,268 | INFO | Processing 144: GTECH KESİCİ TAKIMLAR SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:48:15,269 | INFO | Processing 129 with supplied website: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ. -> https://www.eyinovasyon.com.tr
+2026-07-20 19:48:15,274 | INFO | Search cache hit: fly Turkiye official website
+2026-07-20 19:48:15,276 | INFO | Search cache hit: form cnc Turkiye official website
+2026-07-20 19:48:15,278 | INFO | Processing 134 with supplied website: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ. -> http://www.form-teknik.com/
+2026-07-20 19:48:15,278 | INFO | Processing 136 with supplied website: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ. -> https://www.gencomakina.com
+2026-07-20 19:48:15,279 | INFO | Processing 140 with supplied website: GNC CNC MAKİNA TEKNOLOJİLERİ A.Ş. -> https://gncmak.com/
+2026-07-20 19:48:15,280 | INFO | Processing 142 with supplied website: GRİNDTEC MAKİNA SAN VE TİC LTD ŞTİ -> https://grindtec.com.tr/
+2026-07-20 19:48:15,280 | INFO | Processing 144 with supplied website: GTECH KESİCİ TAKIMLAR SAN. VE TİC. LTD. ŞTİ. -> https://g-tech.com.tr/
+2026-07-20 19:48:15,289 | INFO | Supplied website failed, falling back to search: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:48:15,297 | INFO | Search cache hit: fly metal san tic ltd sti Turkiye official website
+2026-07-20 19:48:15,308 | INFO | Search cache hit: form makine cnc takim tezg san ve tic ltd sti Turkiye official website
+2026-07-20 19:48:15,308 | INFO | Search cache hit: fly resmi sitesi
+2026-07-20 19:48:15,315 | INFO | Search cache hit: eym inovasyon Turkiye official website
+2026-07-20 19:48:15,327 | INFO | Search cache hit: fly metal san tic ltd sti resmi sitesi
+2026-07-20 19:48:15,327 | INFO | Search cache hit: form cnc resmi sitesi
+2026-07-20 19:48:15,338 | INFO | Search cache hit: fly makine
+2026-07-20 19:48:15,342 | INFO | Search cache hit: eym inovasyon makina san tic ltd sti Turkiye official website
+2026-07-20 19:48:15,342 | INFO | Search cache hit: fly metal san tic ltd sti makine
+2026-07-20 19:48:15,355 | INFO | Search cache hit: form makine cnc takim tezg san ve tic ltd sti resmi sitesi
+2026-07-20 19:48:15,444 | INFO | Search cache hit: fly contact
+2026-07-20 19:48:15,536 | INFO | Search cache hit: form cnc makine
+2026-07-20 19:48:15,564 | INFO | Search cache hit: form makine cnc takim tezg san ve tic ltd sti makine
+2026-07-20 19:48:15,656 | INFO | Search cache hit: form cnc contact
+2026-07-20 19:48:15,919 | INFO | Search cache hit: "form cnc" Turkiye resmi sitesi
+2026-07-20 19:48:36,377 | INFO | Exhibitor profile could not be read: https://isinolsun.com/firma-profil/fly-metal-c82575 (HTTPSConnectionPool(host='isinolsun.com', port=443): Read timed out. (read timeout=10))
+2026-07-20 19:48:36,379 | INFO | Search cache hit: "fly" Turkiye resmi sitesi
+2026-07-20 19:48:36,387 | INFO | Search cache hit: "fly metal san tic ltd sti" web sitesi
+2026-07-20 19:48:36,390 | INFO | Search cache hit: "fly" makine Turkiye
+2026-07-20 19:48:42,897 | WARNING | Search query failed; continuing with remaining queries: gesko cnc takim tezgahlari sanayi ve ticaret limited sirketi Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:48:50,895 | WARNING | Search query failed; continuing with remaining queries: "form cnc" makine Turkiye (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:49:05,533 | WARNING | Search query failed; continuing with remaining queries: gesko cnc resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:49:19,122 | WARNING | Search query failed; continuing with remaining queries: "grup teknik" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:49:22,157 | INFO | Processing 145: GÜNEY TALAŞLI İMALAT MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:49:22,158 | INFO | Processing 145 with supplied website: GÜNEY TALAŞLI İMALAT MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ -> https://guney-muhendislik.com/
+2026-07-20 19:49:22,183 | INFO | Completed 133/369: GRİNDTEC MAKİNA SAN VE TİC LTD ŞTİ
+2026-07-20 19:49:50,907 | WARNING | Search query failed; continuing with remaining queries: gesko cnc contact (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:49:58,328 | INFO | Processing 146: GUOHONG MAKİNA EKİPMANLARI İMALAT LİMİTED ŞİRKETİ
+2026-07-20 19:49:58,345 | INFO | Completed 134/369: GNC CNC MAKİNA TEKNOLOJİLERİ A.Ş.
+2026-07-20 19:50:29,633 | WARNING | Search query failed; continuing with remaining queries: "gesko cnc" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:50:35,753 | INFO | Processing 147: GÜRİŞ İŞ MAKİNALARI END. A.Ş.
+2026-07-20 19:50:35,771 | INFO | Completed 135/369: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:50:36,516 | INFO | Processing 148: GÜVENAL MAK.TİC.VE SAN.LTD.ŞTİ.
+2026-07-20 19:50:36,534 | INFO | Completed 136/369: GÜNEY TALAŞLI İMALAT MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:50:37,912 | WARNING | Search query failed; continuing with remaining queries: guohong makina ekipmanlari imalat limited sirketi Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+

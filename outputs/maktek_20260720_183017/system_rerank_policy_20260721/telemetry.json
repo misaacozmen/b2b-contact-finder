@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-07-21T10:58:50+00:00",
+  "elapsed_seconds": 404.765,
+  "counters": {
+    "cache.mx.hit": 427,
+    "cache.serp.hit": 752,
+    "cache.serp.miss": 1348,
+    "cache.site.hit": 950,
+    "cache.site.miss": 313,
+    "cache.site.security_interstitial_rejected": 71,
+    "cache.source_profile.miss": 19,
+    "cache.source_profile_links_v2.miss": 19,
+    "cache.source_profile_links_v3.miss": 19,
+    "cache.source_profile_links_v4.hit": 249,
+    "cache.source_profile_links_v4.miss": 19,
+    "pipeline.candidates_discovered": 700,
+    "pipeline.companies": 369,
+    "pipeline.full_candidates_evaluated": 257,
+    "pipeline.identity_candidates_evaluated": 464,
+    "source_profile.preflight_hosts": 1
+  },
+  "budgets": {
+    "brightdata": 0,
+    "google_places": 0,
+    "hunter": 0,
+    "hunter_domain_finder": 0,
+    "brandfetch": 0
+  },
+  "per_company": {
+    "search_candidates": 1.897,
+    "identity_candidates_evaluated": 1.257,
+    "full_candidates_evaluated": 0.696,
+    "crawler_http_requests": 0.0,
+    "brightdata_requests": 0.0
+  }
+}

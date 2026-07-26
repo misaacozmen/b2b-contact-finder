@@ -1,0 +1,65 @@
+﻿2026-07-20 19:59:25,769 | INFO | Source profile preflight: host=maktekfuari.com status=cached_available server_errors=0 circuit_open=False
+2026-07-20 19:59:25,811 | INFO | Resuming from index 145
+2026-07-20 19:59:25,815 | INFO | Processing 146: GUOHONG MAKİNA EKİPMANLARI İMALAT LİMİTED ŞİRKETİ
+2026-07-20 19:59:25,816 | INFO | Processing 148: GÜVENAL MAK.TİC.VE SAN.LTD.ŞTİ.
+2026-07-20 19:59:25,816 | INFO | Processing 152: HAN ELEKTRONİK VE MEKANİK SANAYİ İÇ VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:59:25,816 | INFO | Processing 154: HARDE KALIP ELEMANLARI ÇELİK VE TEKNİK HIRDAVAT İTHALAT İHRACAT SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:59:25,816 | INFO | Processing 157: HERMAKİNA CNC TAK.TEZ.VE BİL.SİS.İTH.İHR.SA.Tİ.LTD.ŞTİ.
+2026-07-20 19:59:25,816 | INFO | Processing 158: HİCO MAKİNA VE MÜH.LTD.ŞTİ.
+2026-07-20 19:59:25,817 | INFO | Processing 159: HİDKOM MÜHENDİSLİK MÜMES. TAAHHÜT MAK. VE TİC. LTD. ŞTİ.
+2026-07-20 19:59:25,817 | INFO | Processing 160: HİDROLİKSAN HALİM USTA HİDROLİK PRES İML .SAN. TİC.LTD.ŞTİ.
+2026-07-20 19:59:25,817 | INFO | Processing 161: HİDROPAR BURSA OTOMASYON HİD. PNÖM. MAK. SAN. TİC. A. Ş.
+2026-07-20 19:59:25,817 | INFO | Processing 162: HİDROPRES MAKİNA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-07-20 19:59:25,818 | INFO | Processing 163: HIGHTECH Temsilci Firma
+2026-07-20 19:59:25,818 | INFO | Processing 164: HİLALSAN MAK. ENDUSTRİYEL VE TİC. LTD. STİ.
+2026-07-20 19:59:25,818 | INFO | Processing 165: HORN TURKEY METAL İŞLEME EKİPMANLARI İTH. VE PAZ. LTD. ŞTİ.
+2026-07-20 19:59:25,818 | INFO | Processing 166: İBRAHİM ÜMİT MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:59:25,819 | INFO | Processing 167: İCON CNC MAKİNA TEKNOLOJİLERİ SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:59:25,819 | INFO | Processing 168: İDEAL MAKİNA END. ÜRÜN. SAN. VE TİC. A.Ş.
+2026-07-20 19:59:25,819 | INFO | Processing 169: İĞREK MAKİNA SANAYİ VE TİC. A. Ş.
+2026-07-20 19:59:25,819 | INFO | Processing 170: İHSAN KOÇAK MAKİNA SANAYİ VE TİCARET A.Ş.
+2026-07-20 19:59:25,820 | INFO | Processing 171: İMAŞ MAKİNE SAN. A.Ş.
+2026-07-20 19:59:25,820 | INFO | Processing 172: INDUCTOTHERM İNDÜKSİYON SİSTEMLERİ SAN AŞ
+2026-07-20 19:59:25,823 | INFO | Search cache hit: guohong makina Turkiye official website
+2026-07-20 19:59:25,824 | INFO | Search cache hit: guvenal mak Turkiye official website
+2026-07-20 19:59:25,826 | INFO | Processing 152 with supplied website: HAN ELEKTRONİK VE MEKANİK SANAYİ İÇ VE DIŞ TİC. LTD. ŞTİ. -> http://www.hanelectronic.com/
+2026-07-20 19:59:25,826 | INFO | Processing 157 with supplied website: HERMAKİNA CNC TAK.TEZ.VE BİL.SİS.İTH.İHR.SA.Tİ.LTD.ŞTİ. -> https://hermakina.com.tr/
+2026-07-20 19:59:25,827 | INFO | Processing 158 with supplied website: HİCO MAKİNA VE MÜH.LTD.ŞTİ. -> https://www.hicopres.com/
+2026-07-20 19:59:25,827 | INFO | Processing 159 with supplied website: HİDKOM MÜHENDİSLİK MÜMES. TAAHHÜT MAK. VE TİC. LTD. ŞTİ. -> https://www.hidkom.com/
+2026-07-20 19:59:25,827 | INFO | Processing 160 with supplied website: HİDROLİKSAN HALİM USTA HİDROLİK PRES İML .SAN. TİC.LTD.ŞTİ. -> https://www.hidroliksan.com/
+2026-07-20 19:59:25,828 | INFO | Processing 162 with supplied website: HİDROPRES MAKİNA SANAYİ VE TİCARET ANONİM ŞİRKETİ -> https://www.hidropres.com.tr/
+2026-07-20 19:59:25,829 | INFO | Processing 165 with supplied website: HORN TURKEY METAL İŞLEME EKİPMANLARI İTH. VE PAZ. LTD. ŞTİ. -> https://www.horn-group.com/tr/
+2026-07-20 19:59:25,829 | INFO | Processing 166 with supplied website: İBRAHİM ÜMİT MAKİNA SAN. TİC. LTD. ŞTİ. -> https://umitmakina.com.tr/
+2026-07-20 19:59:25,830 | INFO | Processing 167 with supplied website: İCON CNC MAKİNA TEKNOLOJİLERİ SANAYİ VE TİCARET LİMİTED ŞİRKETİ -> https://www.iconcnc.com.tr
+2026-07-20 19:59:25,830 | INFO | Processing 168 with supplied website: İDEAL MAKİNA END. ÜRÜN. SAN. VE TİC. A.Ş. -> http://www.idealmakina.com
+2026-07-20 19:59:25,830 | INFO | Processing 169 with supplied website: İĞREK MAKİNA SANAYİ VE TİC. A. Ş. -> https://www.igrek.com.tr/
+2026-07-20 19:59:25,830 | INFO | Processing 170 with supplied website: İHSAN KOÇAK MAKİNA SANAYİ VE TİCARET A.Ş. -> https://www.ihsankocak.com.tr/
+2026-07-20 19:59:25,831 | INFO | Processing 172 with supplied website: INDUCTOTHERM İNDÜKSİYON SİSTEMLERİ SAN AŞ -> https://inductotherm.com
+2026-07-20 19:59:25,852 | INFO | Search cache hit: guohong makina ekipmanlari imalat limited sirketi Turkiye official website
+2026-07-20 19:59:25,855 | INFO | Search cache hit: guvenal mak tic ve san ltd sti Turkiye official website
+2026-07-20 19:59:25,864 | INFO | Search cache hit: harde kalip Turkiye official website
+2026-07-20 19:59:25,892 | INFO | Search cache hit: guvenal mak resmi sitesi
+2026-07-20 19:59:25,892 | INFO | Search cache hit: guohong makina resmi sitesi
+2026-07-20 19:59:25,905 | INFO | Search cache hit: harde kalip elemanlari celik ve teknik hirdavat ithalat ihracat sanayi ve ticaret limited sirketi Turkiye official website
+2026-07-20 19:59:25,906 | INFO | Search cache hit: guohong makina ekipmanlari imalat limited sirketi resmi sitesi
+2026-07-20 19:59:25,906 | INFO | Search cache hit: guvenal mak tic ve san ltd sti resmi sitesi
+2026-07-20 19:59:25,927 | INFO | Search cache hit: harde kalip resmi sitesi
+2026-07-20 19:59:25,928 | INFO | Search cache hit: guohong makina makine
+2026-07-20 19:59:25,941 | INFO | Search cache hit: guvenal mak makine
+2026-07-20 19:59:25,947 | INFO | Search cache hit: guohong makina ekipmanlari imalat limited sirketi makine
+2026-07-20 19:59:25,947 | INFO | Search cache hit: harde kalip elemanlari celik ve teknik hirdavat ithalat ihracat sanayi ve ticaret limited sirketi resmi sitesi
+2026-07-20 19:59:25,961 | INFO | Search cache hit: guohong makina contact
+2026-07-20 19:59:25,961 | INFO | Search cache hit: guvenal mak tic ve san ltd sti makine
+2026-07-20 19:59:25,973 | INFO | Search cache hit: harde kalip makine
+2026-07-20 19:59:25,974 | INFO | Search cache hit: "guohong makina" Turkiye resmi sitesi
+2026-07-20 19:59:25,984 | INFO | Search cache hit: guvenal mak contact
+2026-07-20 19:59:25,993 | INFO | Search cache hit: harde kalip elemanlari celik ve teknik hirdavat ithalat ihracat sanayi ve ticaret limited sirketi makine
+2026-07-20 19:59:25,993 | INFO | Search cache hit: "guohong makina ekipmanlari imalat limited sirketi" web sitesi
+2026-07-20 19:59:26,006 | INFO | Search cache hit: "guvenal mak" Turkiye resmi sitesi
+2026-07-20 19:59:26,014 | INFO | Search cache hit: "guohong makina" makine Turkiye
+2026-07-20 19:59:26,023 | INFO | Search cache hit: "guvenal mak tic ve san ltd sti" web sitesi
+2026-07-20 19:59:26,043 | INFO | Search cache hit: "guvenal mak" makine Turkiye
+2026-07-20 20:01:32,890 | INFO | Processing 173: İNGENİUM MAKİNE LİMİTED ŞİRKETİ
+2026-07-20 20:01:32,891 | INFO | Processing 173 with supplied website: İNGENİUM MAKİNE LİMİTED ŞİRKETİ -> https://www.ingeniummakine.com.tr/
+2026-07-20 20:01:32,906 | INFO | Completed 153/369: İBRAHİM ÜMİT MAKİNA SAN. TİC. LTD. ŞTİ.
+

@@ -35,7 +35,7 @@ class MetadataContextTests(unittest.TestCase):
         self.assertEqual(scorer.metadata_contexts(metadata), [])
         self.assertEqual(search._metadata_query_terms(metadata), [])
 
-    def test_context_softening_requires_supplied_website(self) -> None:
+    def test_missing_discovery_context_is_never_a_hard_failure(self) -> None:
         evaluation = {
             "context_failed": True,
             "reasons": ["metadata_context_missing:0/1", "page_identity_strong:1/1", "email_domain_match"],
@@ -44,6 +44,22 @@ class MetadataContextTests(unittest.TestCase):
         }
         self.assertFalse(main._is_hard_context_failure(evaluation))
         evaluation["candidate"] = {"query": "search"}
+        self.assertFalse(main._is_hard_context_failure(evaluation))
+
+    def test_metadata_context_absence_has_no_score_penalty(self) -> None:
+        score, reason = main._page_context_score(
+            "Example", [{"html": "Example endustriyel urunler"}],
+            {"sector": "Laboratory Services"},
+        )
+        self.assertEqual(score, 0)
+        self.assertEqual(reason, "metadata_context_not_observed:0/1")
+
+    def test_explicit_first_party_context_conflict_remains_hard(self) -> None:
+        evaluation = {
+            "context_failed": True,
+            "reasons": ["metadata_context_conflict:laboratuvar/tekstil"],
+            "candidate": {"query": "search"},
+        }
         self.assertTrue(main._is_hard_context_failure(evaluation))
 
 

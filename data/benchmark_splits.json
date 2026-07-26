@@ -42,6 +42,17 @@
       "source": "Expomed Eurasia 2026",
       "source_url": "https://expomedistanbul.com/en/exhibitor-list",
       "status": "ready_for_blind_run"
+    },
+    {
+      "name": "golden_6",
+      "role": "blind_golden6",
+      "expected": "outputs/golden_6_20260718/golden_6_manual_validation_20_ready.xlsx",
+      "pipeline_input": "outputs/golden_6_20260718/golden_6_discovery_blind_input_20.xlsx",
+      "source_assisted_input": "outputs/golden_6_20260718/golden_6_pipeline_input_20.xlsx",
+      "discovery_protocol": "profile_url_removed_before_paid_run",
+      "source": "Automechanika Istanbul 2026",
+      "source_url": "https://www.automechanikaistanbulplus.com/participants?lang=en",
+      "status": "ready_for_blind_run"
     }
   ]
 }

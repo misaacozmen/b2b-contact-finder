@@ -16,7 +16,7 @@ from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 
 import config
-from modules import aliases, cache_store, company_resolvers, crawler, google_places, runtime, scorer
+from modules import aliases, cache_store, company_resolvers, crawler, discovery_coverage, google_places, query_planner, runtime, scorer
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -46,6 +46,13 @@ class CandidateList(list):
         super().__init__(values)
         self.trace = trace or []
         self.source_health = source_health or {}
+
+
+class SearchResults(list):
+    def __init__(self, values=(), cache_status: str = "unknown", provider: str = ""):
+        super().__init__(values)
+        self.cache_status = cache_status
+        self.provider = provider
 
 
 def reset_source_health() -> None:
@@ -348,7 +355,7 @@ def _search_text(query: str) -> list[dict]:
         )
         if cached is not None:
             LOGGER.info("Search cache hit: %s", query)
-            return cached
+            return SearchResults(cached, "cache_hit", config.SEARCH_PROVIDER)
         if mode == "replay":
             # Offline reranking must not depend on which provider is enabled
             # in the interactive prompt. This fallback never runs in a mode
@@ -368,9 +375,9 @@ def _search_text(query: str) -> list[dict]:
                         "Search replay cache fallback hit: query=%s provider=%s",
                         query, provider,
                     )
-                    return cached
+                    return SearchResults(cached, "replay_fallback_hit", provider)
             LOGGER.warning("Search replay cache miss: %s", query)
-            return []
+            return SearchResults([], "replay_miss")
 
     results = _search_text_live(query)
     if mode in {"use", "refresh"}:
@@ -381,7 +388,7 @@ def _search_text(query: str) -> list[dict]:
             results,
             config.CACHE_SCHEMA_VERSION,
         )
-    return results
+    return SearchResults(results, "live", config.SEARCH_PROVIDER)
 
 
 def _safe_search_text(query: str) -> list[dict]:
@@ -392,10 +399,10 @@ def _safe_search_text(query: str) -> list[dict]:
         LOGGER.warning("Search query failed; continuing with remaining queries: %s (%s)", query, exc)
         if config.SEARCH_PROVIDER == "brightdata":
             try:
-                return _ddgs_text(query)
+                return SearchResults(_ddgs_text(query), "live_fallback", "ddgs")
             except Exception as fallback_exc:
                 LOGGER.warning("Free search fallback also failed: %s (%s)", query, fallback_exc)
-        return []
+        return SearchResults([], "error", config.SEARCH_PROVIDER)
 
 
 def _metadata_query_terms(metadata: dict | None) -> list[str]:
@@ -436,16 +443,31 @@ def _candidate_rank_key(item: dict) -> tuple[int, ...]:
     role = item.get("role", "unknown")
     reason = item.get("reason", "")
     discovery_only = "discovery_only_not_identity_authority" in reason
+    # A labelled outbound website is a high-value route to crawl even though
+    # the listing/PDF that exposed it remains completely non-authoritative.
+    outbound_evidence = item.get("_outbound_discovery_evidence", [])
+    strong_outbound_route = bool(
+        role == "company_candidate"
+        and item.get("score", 0) >= 65
+        and (
+            item.get("query") == "search_bridge_profile"
+            or any(
+                urlparse(str(evidence.get("source_url", ""))).path.casefold().endswith(".pdf")
+                for evidence in outbound_evidence
+            )
+        )
+    )
     intrinsic_domain_identity = bool(
         item.get("_exact_brand_domain")
+        or item.get("_public_brand_domain")
         or re.search(r"(?:^|;\s*)domain_hits:[1-9]\d*/", reason)
     )
     return (
         0 if role in DISCOVERY_ONLY_ROLES else 1,
-        0 if discovery_only else 1,
-        1 if role == "company_candidate" or item.get("_exact_brand_domain") else 0,
-        1 if intrinsic_domain_identity else 0,
+        0 if discovery_only and not strong_outbound_route else 1,
         item.get("_ownership_evidence", 0),
+        1 if role == "company_candidate" or item.get("_exact_brand_domain") or item.get("_public_brand_domain") else 0,
+        1 if intrinsic_domain_identity else 0,
         item.get("_legal_name_evidence", 0),
         item["score"],
         item.get("_rare_token_signal", 0),
@@ -462,9 +484,18 @@ def _candidate_search_control_key(item: dict) -> tuple[int, ...]:
 
 
 def _candidate_role(company_name: str, url: str, title: str, snippet: str) -> str:
-    """Classify a result conservatively; intrinsic company domains win."""
+    """Classify entity-profile results before considering domain similarity."""
     domain = scorer.normalize_domain(url)
-    if scorer.domain_identity_match(company_name, url)[0]:
+    intrinsic_company_domain = scorer.domain_identity_match(company_name, url)[0]
+    raw_path = unquote(urlparse(url).path).casefold()
+    uuid_company_record = bool(re.search(
+        r"/(?:company|firma|member|exhibitor)/"
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+        r"(?:/|$)", raw_path,
+    ))
+    if uuid_company_record:
+        return "directory"
+    if intrinsic_company_domain:
         return "company_candidate"
     path = scorer.normalize_text(unquote(urlparse(url).path.replace("/", " ")))
     raw_query = unquote(urlparse(url).query).casefold()
@@ -484,7 +515,6 @@ def _candidate_role(company_name: str, url: str, title: str, snippet: str) -> st
         "exhibitor", "katilimci", "listing", "member", "detail",
     ))
     generic_host = any(keyword in domain for keyword in config.GENERIC_DOMAIN_KEYWORDS)
-    raw_path = unquote(urlparse(url).path).casefold()
     entity_query = bool(re.search(
         r"(?:^|&)(?:slug|company|companyid|company_id|firma|member|supplier|exhibitor)=",
         raw_query,
@@ -591,7 +621,21 @@ def _add_snippet_outbound_candidates(
     normalized_evidence = f" {scorer.normalize_text(evidence_text)} "
     brand_hits = sum(1 for token in brand_tokens if f" {token} " in normalized_evidence)
 
+    websites_with_variants: list[tuple[str, str]] = []
     for website in _snippet_outbound_websites(result, source_url):
+        websites_with_variants.append((website, ""))
+        domain = scorer.normalize_domain(website)
+        # PDF/catalogue OCR and legacy corporate material often disagree only
+        # on brand-domain hyphenation. Add one conservative discovery variant
+        # when the literal domain already equals a long public-brand anchor
+        # after punctuation normalization. The variant still has to be crawled
+        # and pass every first-party identity/publication gate.
+        if "-" in domain and scorer.public_brand_domain_match(anchor_name, website):
+            dehyphenated = domain.replace("-", "")
+            if scorer.is_valid_hostname(dehyphenated) and len(scorer.compact_domain_core(dehyphenated)) >= 7:
+                websites_with_variants.append((f"https://{dehyphenated}", domain))
+
+    for website, variant_of in list(dict.fromkeys(websites_with_variants)):
         if len(legal_tokens) <= 1:
             identity_in_source = legal_match and scorer.public_brand_domain_match(anchor_name, website)
         else:
@@ -619,14 +663,20 @@ def _add_snippet_outbound_candidates(
         candidates_by_domain[domain] = {
             "domain": domain,
             "url": website,
-            "score": 70,
+            "score": 68 if variant_of else 70,
             "title": "",
             "snippet": "",
             "query": "snippet_outbound_discovery",
             "rank": rank,
-            "reason": "labelled_third_party_outbound_discovery; discovery_only_not_identity_authority",
+            "reason": (
+                "labelled_third_party_outbound_discovery; "
+                f"{'orthographic_domain_variant; ' if variant_of else ''}"
+                "discovery_only_not_identity_authority"
+            ),
             "role": "company_candidate",
             "_official_query_evidence": 0,
+            "_public_brand_domain": scorer.public_brand_domain_match(anchor_name, website),
+            "_domain_variant_of": variant_of,
             "_outbound_discovery_evidence": [evidence],
         }
 
@@ -825,6 +875,7 @@ def _add_search_results(
                 bool(scorer.domain_identity_tokens(company_name))
                 and scorer.compact_domain_core(domain) == "".join(scorer.domain_identity_tokens(company_name))
             ),
+            "_public_brand_domain": scorer.public_brand_domain_match(company_name, domain),
             "_search_evidence": search_evidence,
             "_contact_seed_urls": contact_seed_urls,
         }
@@ -854,6 +905,7 @@ def _add_search_results(
                 existing.get("_ownership_evidence", 0), ownership_evidence
             )
             existing["_exact_brand_domain"] = existing.get("_exact_brand_domain", False) or candidate["_exact_brand_domain"]
+            existing["_public_brand_domain"] = existing.get("_public_brand_domain", False) or candidate["_public_brand_domain"]
             existing["_search_evidence"] = search_evidence
             existing["_contact_seed_urls"] = contact_seed_urls
             if not existing.get("title"):
@@ -888,6 +940,7 @@ def _add_search_results(
                 existing.get("_ownership_evidence", 0), ownership_evidence
             )
             existing["_exact_brand_domain"] = existing.get("_exact_brand_domain", False) or candidate["_exact_brand_domain"]
+            existing["_public_brand_domain"] = existing.get("_public_brand_domain", False) or candidate["_public_brand_domain"]
             existing["_search_evidence"] = search_evidence
             existing["_contact_seed_urls"] = contact_seed_urls
             existing["reason"] = re.sub(
@@ -997,6 +1050,7 @@ def _adaptive_queries(
     metadata: dict | None,
     already_run: set[str] | None = None,
     related_name_hints: list[str] | None = None,
+    evidence_gaps: set[str] | None = None,
 ) -> list[str]:
     """Build high-information queries only after the static plan is weak.
 
@@ -1004,40 +1058,62 @@ def _adaptive_queries(
     disclosure pages. They do not carry identity authority; they only add
     search candidates that still pass the normal crawl and publication gates.
     """
-    already_run = already_run or set()
-    corporate_words = {
-        scorer.normalize_text(word) for word in (*config.LEGAL_COMPANY_WORDS, "sirket", "sirketi")
-    }
-    brand = " ".join(
-        token for token in scorer.primary_brand_tokens(company_name, limit=2)
-        if token not in corporate_words
-    ).strip()
-    full_name = " ".join(scorer._raw_company_tokens(company_name)).strip()
-    if not brand and not full_name:
-        return []
-    brand = brand or full_name
-    contexts = _metadata_query_terms(metadata)
-    hint_queries = [
-        f'"{hint}" Turkiye official website'
-        for hint in (related_name_hints or [])
+    return query_planner.adaptive_queries(
+        company_name,
+        metadata,
+        already_run=already_run,
+        related_name_hints=related_name_hints,
+        context_terms=_metadata_query_terms(metadata),
+        evidence_gaps=evidence_gaps,
+        limit=config.MAX_ADAPTIVE_SEARCH_QUERIES,
+    )
+
+
+def _adaptive_discovery_gaps(
+    company_name: str,
+    candidates_by_domain: dict[str, dict],
+    related_name_hints: list[str] | None = None,
+) -> set[str]:
+    """Describe unresolved discovery evidence without granting authority."""
+    candidates = [
+        item for item in candidates_by_domain.values()
+        if item.get("role") not in DISCOVERY_ONLY_ROLES
+        and not scorer.is_excluded_domain(item.get("url", ""))
     ]
-    queries = [
-        *hint_queries,
-        f'"{brand}" Turkiye resmi sitesi',
-        f'"{full_name}" web sitesi' if full_name != brand else "",
-        f'"{brand}" {contexts[0]} Turkiye' if contexts else "",
-        f'"{brand}" kvkk',
-        f'"{full_name}" ticari unvan' if full_name else "",
-        f'"{brand}" iletisim Turkiye',
-    ]
-    unique = []
-    seen = set(already_run)
-    for query in queries:
-        key = query.strip()
-        if key and key not in seen:
-            unique.append(key)
-            seen.add(key)
-    return unique[: config.MAX_ADAPTIVE_SEARCH_QUERIES]
+    gaps: set[str] = set()
+    if not candidates:
+        gaps.add("no_candidates")
+    ranked = sorted(candidates, key=_candidate_rank_key, reverse=True)
+    if len(ranked) >= 2 and abs(ranked[0].get("score", 0) - ranked[1].get("score", 0)) <= config.AMBIGUOUS_CANDIDATE_MARGIN:
+        gaps.add("ambiguous_candidates")
+    brand_tokens = scorer.primary_brand_tokens(company_name, limit=1)
+    # A single search hit is not uniqueness evidence for a short public brand;
+    # explicitly seek the legal/full-name variant before accepting it.
+    if brand_tokens and len(brand_tokens[0]) < 7 and ranked:
+        gaps.add("ambiguous_candidates")
+    if not any(
+        (
+            scorer.domain_identity_match(company_name, item.get("url", ""))[0]
+            or scorer.public_brand_domain_match(company_name, item.get("url", ""))
+        )
+        and "search_text_identity:" not in item.get("reason", "")
+        for item in candidates
+    ):
+        gaps.add("missing_intrinsic_domain")
+    if not any(
+        item.get("_legal_name_evidence") or item.get("_ownership_evidence")
+        for item in candidates
+    ):
+        gaps.add("missing_legal_name")
+    if not any(
+        scorer.normalize_domain(item.get("url", "")).endswith(".tr")
+        or item.get("_metadata_context_matches", 0) > 0
+        for item in candidates
+    ):
+        gaps.add("missing_local_signal")
+    if related_name_hints:
+        gaps.add("relationship_hint")
+    return gaps
 
 
 def _related_name_hints(company_name: str, title: str, snippet: str) -> list[str]:
@@ -1200,6 +1276,7 @@ def _add_domain_guesses(candidates_by_domain: dict[str, dict], company_name: str
                     bool(scorer.domain_identity_tokens(company_name))
                     and scorer.compact_domain_core(domain) == "".join(scorer.domain_identity_tokens(company_name))
                 ),
+                "_public_brand_domain": scorer.public_brand_domain_match(company_name, domain),
             }
 
 
@@ -1676,6 +1753,9 @@ def _expand_search_bridge_candidates(
 
 def find_candidate_domains(company_name: str, metadata: dict | None = None) -> list[dict]:
     if aliases.has_no_website(company_name):
+        discovery_coverage.finalize_company(
+            company_name, resolved=True, candidate_count=0,
+        )
         return CandidateList([], [{"source": "human_alias", "status": "verified_no_website"}])
     candidates_by_domain: dict[str, dict] = {}
     trace: list[dict] = []
@@ -1688,14 +1768,31 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     source_health = _source_health_snapshot((metadata or {}).get("profile_url", ""))
     if source_health.get("host"):
         trace.append({"source": "exhibitor_profile_health", **source_health})
-    def run_query(query: str, phase: str) -> list[dict]:
+    def run_query(
+        query: str,
+        phase: str,
+        evidence_gaps: set[str] | None = None,
+    ) -> list[dict]:
         if not query or query in executed_queries:
             return []
         executed_queries.add(query)
         results = _safe_search_text(query)
+        observed_gaps = evidence_gaps or _adaptive_discovery_gaps(
+            company_name, candidates_by_domain, related_name_hints,
+        )
+        discovery_coverage.record_query(
+            company_name,
+            query,
+            phase,
+            getattr(results, "cache_status", "unknown"),
+            len(results),
+            observed_gaps,
+        )
         trace.append({
             "source": config.SEARCH_PROVIDER, "query": query,
-            "phase": phase, "result_count": len(results), "results": results,
+            "phase": phase,
+            "cache_status": getattr(results, "cache_status", "unknown"),
+            "result_count": len(results), "results": results,
         })
         for result in results:
             for hint in _related_name_hints(
@@ -1724,7 +1821,10 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         )
         if paid_total_limit > 0:
             reserve = min(config.PAID_SEARCH_ADAPTIVE_RESERVE, max(paid_total_limit - 1, 0))
-            primary_queries = primary_queries[: max(paid_total_limit - reserve, 1)]
+            primary_queries = query_planner.diverse_queries(
+                primary_queries,
+                max(paid_total_limit - reserve, 1),
+            )
     elif (
         config.SEARCH_PROVIDER == "brightdata"
         and config.MAX_SEARCH_QUERIES_PER_COMPANY <= 0
@@ -1748,21 +1848,28 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     )
 
     if _discovery_needs_expansion(company_name, candidates_by_domain, metadata):
-        adaptive_queries = _adaptive_queries(
-            company_name, metadata, executed_queries, related_name_hints,
-        )
-        hint_queries = {
-            f'"{hint}" Turkiye official website': hint
-            for hint in related_name_hints if hint
-        }
-        if paid_total_limit > 0:
-            adaptive_queries = adaptive_queries[: max(paid_total_limit - len(executed_queries), 0)]
-        trace.append({
-            "source": "adaptive_discovery", "status": "expanded",
-            "planned_queries": adaptive_queries,
-        })
-        for query in adaptive_queries:
-            results = run_query(query, "adaptive")
+        adaptive_queries: list[str] = []
+        adaptive_states: list[dict] = []
+        while len(adaptive_queries) < config.MAX_ADAPTIVE_SEARCH_QUERIES:
+            if paid_total_limit > 0 and len(executed_queries) >= paid_total_limit:
+                break
+            gaps = _adaptive_discovery_gaps(
+                company_name, candidates_by_domain, related_name_hints,
+            )
+            planned = _adaptive_queries(
+                company_name, metadata, executed_queries,
+                related_name_hints, evidence_gaps=gaps,
+            )
+            if not planned:
+                break
+            query = planned[0]
+            adaptive_queries.append(query)
+            adaptive_states.append({"query": query, "evidence_gaps": sorted(gaps)})
+            results = run_query(query, "adaptive", gaps)
+            hint_queries = {
+                f'"{hint}" Turkiye official website': hint
+                for hint in related_name_hints if hint
+            }
             if query in hint_queries:
                 _add_related_hint_results(
                     candidates_by_domain, company_name, hint_queries[query], query, results,
@@ -1774,6 +1881,11 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
                 and not _discovery_needs_expansion(company_name, candidates_by_domain, metadata)
             ):
                 break
+        trace.append({
+            "source": "adaptive_discovery", "status": "expanded",
+            "planned_queries": adaptive_queries,
+            "states": adaptive_states,
+        })
         _expand_search_bridge_candidates(
             candidates_by_domain, company_name, bridge_sources, trace, expanded_bridge_urls,
         )
@@ -1783,7 +1895,13 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         for query in _fallback_queries(company_name, metadata):
             if paid_total_limit > 0 and len(executed_queries) >= paid_total_limit:
                 break
-            run_query(query, "fallback")
+            run_query(
+                query,
+                "fallback",
+                _adaptive_discovery_gaps(
+                    company_name, candidates_by_domain, related_name_hints,
+                ),
+            )
             best = _best_candidate(candidates_by_domain)
             if best and best["score"] >= config.EARLY_STOP_SCORE_THRESHOLD and _can_early_stop(company_name, best, metadata):
                 break
@@ -1817,6 +1935,20 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     ):
         _add_domain_guesses(candidates_by_domain, company_name)
 
+    discovery_coverage.finalize_company(
+        company_name,
+        resolved=bool(
+            best
+            and best.get("score", 0) >= config.MIN_ACCEPT_SCORE
+            and not _discovery_needs_expansion(
+                company_name, candidates_by_domain, metadata,
+            )
+        ),
+        candidate_count=sum(
+            1 for item in candidates_by_domain.values()
+            if item.get("role") not in DISCOVERY_ONLY_ROLES
+        ),
+    )
     return CandidateList(
         sorted(candidates_by_domain.values(), key=_candidate_rank_key, reverse=True),
         trace,

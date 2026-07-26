@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 
-from modules import runtime
+import config
+from modules import replay_snapshot, runtime
 
 
 def _path(directory: Path, namespace: str, key: str, compressed: bool = False) -> Path:
@@ -20,7 +21,31 @@ def _path(directory: Path, namespace: str, key: str, compressed: bool = False) -
     return directory / namespace / f"{digest}{suffix}"
 
 
-def load(directory: Path, namespace: str, key: str, ttl_days: int, schema_version: int) -> Any | None:
+def _store_name(directory: Path) -> str:
+    return directory.name or "cache"
+
+
+def load(
+    directory: Path,
+    namespace: str,
+    key: str,
+    ttl_days: int,
+    schema_version: int,
+    *,
+    allow_stale: bool | None = None,
+) -> Any | None:
+    if allow_stale is None:
+        allow_stale = (
+            config.SEARCH_CACHE_MODE == "replay"
+            if directory == config.SEARCH_CACHE_DIR
+            else config.CRAWL_CACHE_MODE == "replay"
+        )
+    store = _store_name(directory)
+    snapshot_hit, snapshot_value = replay_snapshot.lookup(
+        store, namespace, key, schema_version,
+    )
+    if snapshot_hit:
+        return snapshot_value
     compressed_path = _path(directory, namespace, key, compressed=True)
     legacy_path = _path(directory, namespace, key)
     try:
@@ -36,9 +61,14 @@ def load(directory: Path, namespace: str, key: str, ttl_days: int, schema_versio
             created = created.replace(tzinfo=timezone.utc)
         age = datetime.now(timezone.utc) - created
         if ttl_days >= 0 and age.total_seconds() > ttl_days * 86400:
-            return None
+            if not allow_stale:
+                runtime.record(f"cache.{namespace}.expired")
+                return None
+            runtime.record(f"cache.{namespace}.stale_hit")
         runtime.record(f"cache.{namespace}.hit")
-        return payload.get("value")
+        value = payload.get("value")
+        replay_snapshot.record(store, namespace, key, schema_version, value)
+        return value
     except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
         runtime.record(f"cache.{namespace}.miss")
         return None
@@ -56,4 +86,5 @@ def save(directory: Path, namespace: str, key: str, value: Any, schema_version: 
     with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
         json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
     tmp.replace(path)
+    replay_snapshot.record(_store_name(directory), namespace, key, schema_version, value)
     runtime.record(f"cache.{namespace}.write")

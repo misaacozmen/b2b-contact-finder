@@ -1,0 +1,32 @@
+﻿2026-07-20 19:46:27,046 | INFO | Source profile preflight: host=maktekfuari.com status=cached_available server_errors=0 circuit_open=False
+2026-07-20 19:46:27,081 | INFO | Resuming from index 128
+2026-07-20 19:46:27,085 | INFO | Processing 129: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:46:27,086 | INFO | Processing 131: FLY METAL SAN.TİC.LTD.ŞTİ
+2026-07-20 19:46:27,086 | INFO | Processing 133: FORM MAKİNE CNC TAKIM TEZG SAN VE TİC LTD ŞTİ
+2026-07-20 19:46:27,086 | INFO | Processing 134: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ.
+2026-07-20 19:46:27,087 | INFO | Processing 135: GELİŞİM ELEKTROMEKANİK LTD. ŞTİ.
+2026-07-20 19:46:27,087 | INFO | Processing 136: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ.
+2026-07-20 19:46:27,088 | INFO | Processing 129 with supplied website: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ. -> https://www.eyinovasyon.com.tr
+2026-07-20 19:46:27,097 | INFO | Processing 134 with supplied website: FORM TEKNİK HIRD.SAN. VE TİC.LTD.ŞTİ. -> http://www.form-teknik.com/
+2026-07-20 19:46:27,098 | INFO | Processing 135 with supplied website: GELİŞİM ELEKTROMEKANİK LTD. ŞTİ. -> https://www.gelisimmak.com/
+2026-07-20 19:46:27,098 | INFO | Processing 136 with supplied website: GENCO TEKNİK MAKİNA TİC. LTD. ŞTİ. -> https://www.gencomakina.com
+2026-07-20 19:46:27,107 | INFO | Supplied website failed, falling back to search: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:46:27,111 | INFO | Search cache hit: fly Turkiye official website
+2026-07-20 19:46:27,121 | INFO | Search cache hit: form cnc Turkiye official website
+2026-07-20 19:46:27,134 | INFO | Search cache hit: eym inovasyon Turkiye official website
+2026-07-20 19:46:27,134 | INFO | Search cache hit: fly metal san tic ltd sti Turkiye official website
+2026-07-20 19:46:27,155 | INFO | Search cache hit: fly resmi sitesi
+2026-07-20 19:46:27,170 | INFO | Search cache hit: fly metal san tic ltd sti resmi sitesi
+2026-07-20 19:46:27,182 | INFO | Search cache hit: fly makine
+2026-07-20 19:46:27,192 | INFO | Search cache hit: fly metal san tic ltd sti makine
+2026-07-20 19:46:27,203 | INFO | Search cache hit: fly contact
+2026-07-20 19:46:38,482 | INFO | Exhibitor profile could not be read: https://isinolsun.com/firma-profil/fly-metal-c82575 (HTTPSConnectionPool(host='isinolsun.com', port=443): Read timed out. (read timeout=10))
+2026-07-20 19:46:38,498 | INFO | Search cache hit: "fly" Turkiye resmi sitesi
+2026-07-20 19:46:38,511 | INFO | Search cache hit: "fly metal san tic ltd sti" web sitesi
+2026-07-20 19:46:38,519 | INFO | Search cache hit: "fly" makine Turkiye
+2026-07-20 19:47:15,325 | INFO | Processing 137: GENESİS KALIP APARAT MÜHENDİSLİK SAN. VE TİC. LTD.ŞTİ.
+2026-07-20 19:47:15,326 | INFO | Processing 137 with supplied website: GENESİS KALIP APARAT MÜHENDİSLİK SAN. VE TİC. LTD.ŞTİ. -> https://www.gnskalip.com
+2026-07-20 19:47:15,341 | INFO | Completed 131/369: GELİŞİM ELEKTROMEKANİK LTD. ŞTİ.
+2026-07-20 19:48:00,256 | INFO | Processing 138: GERMAK MAKİNA SANAYİ TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:48:00,273 | INFO | Completed 132/369: GENESİS KALIP APARAT MÜHENDİSLİK SAN. VE TİC. LTD.ŞTİ.
+

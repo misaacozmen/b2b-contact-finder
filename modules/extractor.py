@@ -6,7 +6,7 @@ from urllib.parse import unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 import config
-from modules import scorer
+from modules import evidence_ledger, scorer
 
 
 EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
@@ -17,6 +17,7 @@ PHONE_RE = re.compile(
 # "0 216 669 0 555"). Capture a country/trunk prefix followed by exactly ten
 # digits regardless of separator grouping, then let phonenumbers validate it.
 TR_PHONE_FLEX_RE = re.compile(r"(?<!\d)(?:\+?90|0)(?:[\s().-]*\d){10}(?!\d)")
+TR_SERVICE_PHONE_RE = re.compile(r"(?<!\d)(?:0[\s().-]*)?444(?:[\s().-]*\d){4}(?!\d)")
 AT_MARKER_RE = re.compile(r"(?i)(?<=\w)\s*(?:\[\s*(?:at|@)\s*\]|\(\s*(?:at|@)\s*\)|\{\s*(?:at|@)\s*\})\s*(?=\w)")
 DOT_MARKER_RE = re.compile(r"(?i)(?<=\w)\s*(?:\[\s*(?:dot|nokta|\.)\s*\]|\(\s*(?:dot|nokta|\.)\s*\)|\{\s*(?:dot|nokta|\.)\s*\})\s*(?=\w)")
 
@@ -61,6 +62,7 @@ def _contact_label(text: str) -> str:
         (("headquarters", "genel merkez", "merkez ofis", "merkez"), "headquarters"),
         (("specialist", "uzman"), "specialist"),
         (("owner", "sahibi", "yetkili"), "owner"),
+        (("marketing", "pazarlama"), "marketing"),
         (("sales", "satis", "satış"), "sales"),
         (("export", "ihracat"), "export"),
         (("istanbul",), "istanbul"),
@@ -75,21 +77,52 @@ def _contact_label(text: str) -> str:
     return "general"
 
 
-def extract_organization_evidence(html_text: str) -> dict:
-    """Extract first-party identity fields from JSON-LD organization objects."""
+def _node_value(node) -> str:
+    if node.get("content"):
+        return str(node["content"]).strip()
+    if node.get("href"):
+        return str(node["href"]).strip()
+    return node.get_text(" ", strip=True)
+
+
+def _schema_property_names(node) -> list[str]:
+    raw = " ".join((str(node.get("itemprop", "")), str(node.get("property", ""))))
+    result = []
+    for value in raw.split():
+        result.append(re.split(r"[:/#]", value)[-1])
+    return result
+
+
+def extract_organization_evidence(
+    html_text: str, source_url: str = "", retrieval_method: str = "http",
+) -> dict:
+    """Extract auditable first-party identity fields from structured and legal HTML."""
     soup = BeautifulSoup(html_text, "html.parser")
     result = {
         "names": [], "urls": [], "same_as": [], "addresses": [],
         "identifiers": [], "ownership_statements": [],
         "legal_names": [], "brand_names": [], "related_organizations": [],
+        "phones": [], "relationships": [], "claims": [],
     }
+
+    def add(field: str, value: object, method: str, target: str | None = None, relation: str = "") -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        result[target or field].append(text)
+        result["claims"].append(evidence_ledger.build_claim(
+            field, text, source_url, method,
+            html_text=html_text, relation=relation,
+            retrieval_method=retrieval_method,
+        ))
+
     organization_types = {"organization", "localbusiness", "corporation", "store", "professionalservice"}
     for selector in ('meta[property="og:site_name"]', 'meta[name="application-name"]'):
         for node in soup.select(selector):
             if node.get("content"):
-                result["names"].append(node["content"].strip())
+                add("name", node["content"], "html_meta", "names")
     for node in soup.select('link[rel="canonical"][href]'):
-        result["urls"].append(node["href"].strip())
+        add("url", node["href"], "html_canonical", "urls")
     for document in _json_ld_documents(soup):
         for node in _walk_json(document):
             raw_types = node.get("@type", [])
@@ -99,23 +132,53 @@ def extract_organization_evidence(html_text: str) -> dict:
             for key in ("name", "legalName", "alternateName"):
                 values = node.get(key, [])
                 values = values if isinstance(values, list) else [values]
-                result["names"].extend(str(value).strip() for value in values if value)
-                if key == "legalName":
-                    result["legal_names"].extend(str(value).strip() for value in values if value)
+                for value in values:
+                    if not value:
+                        continue
+                    add("legal_name" if key == "legalName" else "name", value, "json_ld", "names")
+                    if key == "legalName":
+                        add("legal_name", value, "json_ld", "legal_names")
             for key, target in (("url", "urls"), ("sameAs", "same_as")):
                 values = node.get(key, [])
                 values = values if isinstance(values, list) else [values]
-                result[target].extend(str(value).strip() for value in values if value)
+                for value in values:
+                    if value:
+                        add("url" if key == "url" else "same_as", value, "json_ld", target)
             address = node.get("address")
             if address:
-                result["addresses"].append(address if isinstance(address, str) else json.dumps(address, ensure_ascii=False))
-            for key in ("taxID", "vatID", "leiCode"):
+                rendered_address = address if isinstance(address, str) else json.dumps(address, ensure_ascii=False)
+                add("address", rendered_address, "json_ld", "addresses")
+            for key in ("taxID", "vatID", "leiCode", "iso6523Code", "globalLocationNumber"):
                 if node.get(key):
-                    result["identifiers"].append(f"{key}:{node[key]}")
+                    add("identifier", f"{key}:{node[key]}", "json_ld", "identifiers")
+            identifier = node.get("identifier")
+            identifiers = identifier if isinstance(identifier, list) else [identifier]
+            for item in identifiers:
+                if isinstance(item, dict):
+                    name = item.get("propertyID") or item.get("name") or "identifier"
+                    value = item.get("value") or item.get("@value")
+                    if value:
+                        add("identifier", f"{name}:{value}", "json_ld", "identifiers")
+                elif item:
+                    add("identifier", f"identifier:{item}", "json_ld", "identifiers")
+            for key in ("telephone", "phone"):
+                values = node.get(key, [])
+                values = values if isinstance(values, list) else [values]
+                for value in values:
+                    if value:
+                        add("telephone", value, "json_ld", "phones")
+            contact_points = node.get("contactPoint", [])
+            contact_points = contact_points if isinstance(contact_points, list) else [contact_points]
+            for contact_point in contact_points:
+                if isinstance(contact_point, dict) and contact_point.get("telephone"):
+                    add("telephone", contact_point["telephone"], "json_ld", "phones")
             for key, target in (
                 ("brand", "brand_names"),
                 ("parentOrganization", "related_organizations"),
                 ("subOrganization", "related_organizations"),
+                ("branchOf", "related_organizations"),
+                ("department", "related_organizations"),
+                ("memberOf", "related_organizations"),
             ):
                 values = node.get(key, [])
                 values = values if isinstance(values, list) else [values]
@@ -126,10 +189,113 @@ def extract_organization_evidence(html_text: str) -> dict:
                     else:
                         related_name, related_url = str(value).strip(), ""
                     if related_name:
-                        result[target].append(related_name)
+                        add("organization_name", related_name, "json_ld", target, key)
                         result["ownership_statements"].append(f"{key}: {related_name}")
                     if related_url:
-                        result["same_as"].append(related_url)
+                        add("relationship_url", related_url, "json_ld", "same_as", key)
+                    if related_name or related_url:
+                        result["relationships"].append({
+                            "kind": key, "name": related_name, "url": related_url,
+                        })
+
+    # JSON-LD is common, but many older company sites expose the same fields
+    # through Microdata or RDFa. Restrict generic name properties to explicit
+    # organization scopes so product markup cannot become company identity.
+    structured_roots = soup.select(
+        '[itemscope][itemtype*="schema.org/Organization"],'
+        '[itemscope][itemtype*="schema.org/LocalBusiness"],'
+        '[itemscope][itemtype*="schema.org/Corporation"],'
+        '[typeof*="Organization"], [typeof*="LocalBusiness"], [typeof*="Corporation"]'
+    )
+    scalar_properties = {
+        "name": ("name", "names"),
+        "legalName": ("legal_name", "legal_names"),
+        "alternateName": ("name", "names"),
+        "url": ("url", "urls"),
+        "sameAs": ("same_as", "same_as"),
+        "address": ("address", "addresses"),
+        "telephone": ("telephone", "phones"),
+        "taxID": ("identifier", "identifiers"),
+        "vatID": ("identifier", "identifiers"),
+        "leiCode": ("identifier", "identifiers"),
+        "iso6523Code": ("identifier", "identifiers"),
+        "globalLocationNumber": ("identifier", "identifiers"),
+        "identifier": ("identifier", "identifiers"),
+    }
+    relation_properties = {
+        "brand", "parentOrganization", "subOrganization", "branchOf", "department", "memberOf",
+    }
+    for root in structured_roots:
+        method = "microdata" if root.has_attr("itemscope") else "rdfa"
+        for node in [root, *root.select("[itemprop], [property]")]:
+            value = _node_value(node)
+            for prop in _schema_property_names(node):
+                if prop in scalar_properties and value:
+                    field, target = scalar_properties[prop]
+                    rendered = f"{prop}:{value}" if field == "identifier" else value
+                    add(field, rendered, method, target)
+                elif prop in relation_properties and value:
+                    related_url = str(node.get("href") or node.get("resource") or "").strip()
+                    related_name = "" if related_url and value == related_url else value
+                    result["relationships"].append({
+                        "kind": prop, "name": related_name, "url": related_url,
+                    })
+                    if related_name:
+                        add("organization_name", related_name, method, "related_organizations", prop)
+                    if related_url:
+                        add("relationship_url", related_url, method, "same_as", prop)
+
+    # Labeled identifiers in a company's own legal/privacy pages are often
+    # more useful than markup. Labels are mandatory to avoid treating random
+    # page numbers as legal identifiers.
+    visible_lines = soup.get_text("\n", strip=True)
+    visible_compact = re.sub(r"\s+", " ", visible_lines)
+    identifier_specs = (
+        ("mersis", re.compile(r"(?i)\bMERS[İI]S(?:\s*(?:NO|NUMARASI|NUMBER))?\s*[:#-]?\s*([0-9][0-9 .-]{14,24}[0-9])"), 16),
+        ("vkn", re.compile(r"(?i)\b(?:VKN|VERG[İI]\s*(?:K[İI]ML[İI]K\s*)?(?:NO|NUMARASI))\s*[:#-]?\s*([0-9][0-9 .-]{8,16}[0-9])"), 10),
+    )
+    for kind, pattern, required_digits in identifier_specs:
+        for match in pattern.finditer(visible_compact):
+            digits = re.sub(r"\D", "", match.group(1))
+            if len(digits) == required_digits:
+                add("identifier", f"{kind}:{digits}", "visible_labeled", "identifiers")
+
+    legal_name_pattern = re.compile(
+        r"(?i)\b(?:(?:T[İI]CAR[İI]|RESM[İI]|[ŞS][İI]RKET|F[İI]RMA)\s+(?:Ü|U)NVAN(?:I|İ)?|"
+        r"VER[İI]\s+SORUMLUSUNUN\s+(?:Ü|U)NVAN(?:I|İ)?(?:/İSMİ)?)\s*[:#-]?\s*"
+        r"([A-ZÇĞİÖŞÜ0-9&.,'()/-][A-ZÇĞİÖŞÜ0-9&.,'() /-]{2,180}?"
+        r"(?:ANON[İI]M\s+[ŞS][İI]RKET[İI]?|L[İI]M[İI]TED\s+[ŞS][İI]RKET[İI]?|"
+        r"LTD\.?\s*[ŞS]T[İI]\.?|A\.?\s*[ŞS]\.?))(?=\s|$|[,;])"
+    )
+    for match in legal_name_pattern.finditer(visible_compact):
+        legal_name = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;-")
+        if 5 <= len(legal_name) <= 200:
+            add("legal_name", legal_name, "visible_labeled", "names")
+            add("legal_name", legal_name, "visible_labeled", "legal_names")
+
+    trade_pattern = re.compile(
+        r"(?i)\bT[İI]CARET\s*S[İI]C[İI]L(?:\s*(?:NO|NUMARASI))?\s*[:#-]?\s*([A-Z0-9][A-Z0-9/-]{2,23})"
+    )
+    for match in trade_pattern.finditer(visible_compact):
+        registry_value = match.group(1)
+        if any(char.isdigit() for char in registry_value):
+            add("identifier", f"trade_registry:{registry_value}", "visible_labeled", "identifiers")
+    kep_pattern = re.compile(
+        r"\b(?:KEP|KAYITLI\s+ELEKTRON[İI]K\s+POSTA)\s*(?:ADRES[İI])?\s*[:#-]?\s*"
+        r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})",
+        re.IGNORECASE,
+    )
+    for match in kep_pattern.finditer(visible_compact):
+        kep = match.group(1).casefold()
+        result["identifiers"].append(f"kep:{kep}")
+        result["claims"].append(evidence_ledger.build_claim(
+            "kep", kep, source_url, "visible_labeled", html_text=html_text,
+        ))
+    for node in soup.find_all("address"):
+        address = node.get_text(" ", strip=True)
+        if 10 <= len(address) <= 500:
+            add("address", address, "html_address", "addresses")
+
     visible = soup.get_text(" ", strip=True)
     normalized_visible = re.sub(r"\s+", " ", visible)
     ownership_markers = re.compile(
@@ -152,7 +318,21 @@ def extract_organization_evidence(html_text: str) -> dict:
         start = max(0, match.start() - 220)
         end = min(len(source), match.end() + 220)
         result["ownership_statements"].append(source[start:end].strip())
-    return {key: list(dict.fromkeys(values)) for key, values in result.items()}
+    deduplicated = {}
+    for key, values in result.items():
+        if key == "relationships":
+            seen_relationships = set()
+            deduplicated[key] = []
+            for value in values:
+                marker = (value.get("kind", ""), value.get("name", ""), value.get("url", ""))
+                if marker not in seen_relationships:
+                    seen_relationships.add(marker)
+                    deduplicated[key].append(value)
+        elif key == "claims":
+            deduplicated[key] = evidence_ledger.deduplicate(values)
+        else:
+            deduplicated[key] = list(dict.fromkeys(values))
+    return deduplicated
 
 
 def _visible_text(html_text: str) -> str:
@@ -299,11 +479,15 @@ def extract_phones(html_text: str) -> list[str]:
     text = " ".join([_visible_text(html_text), *tel_values, *whatsapp_values, *structured_values])
     phones = []
     seen = set()
-    matches = [*PHONE_RE.findall(text), *TR_PHONE_FLEX_RE.findall(text)]
+    matches = [
+        *PHONE_RE.findall(text), *TR_PHONE_FLEX_RE.findall(text),
+        *TR_SERVICE_PHONE_RE.findall(text),
+    ]
     for match in matches:
         value = re.sub(r"\s+", " ", match).strip(" .,-;:()")
         digits = re.sub(r"\D", "", value)
-        if len(digits) < 10 or len(digits) > 15:
+        service_number = bool(re.fullmatch(r"0?444\d{4}", digits))
+        if (len(digits) < 10 and not service_number) or len(digits) > 15:
             continue
         if digits in seen:
             continue
@@ -312,7 +496,9 @@ def extract_phones(html_text: str) -> list[str]:
     return phones
 
 
-def extract_contact_records(html_text: str, source_url: str) -> dict:
+def extract_contact_records(
+    html_text: str, source_url: str, retrieval_method: str = "http",
+) -> dict:
     """Return all contacts with their page and best available role label."""
     soup = BeautifulSoup(html_text, "html.parser")
     email_labels: dict[str, str] = {}
@@ -337,7 +523,10 @@ def extract_contact_records(html_text: str, source_url: str) -> dict:
         start, _ = match.span()
         context = visible_text[max(0, start - 80):start]
         phone_labels.append((match.group(0), _contact_label(context)))
-    for match in TR_PHONE_FLEX_RE.finditer(visible_text):
+    for match in [
+        *TR_PHONE_FLEX_RE.finditer(visible_text),
+        *TR_SERVICE_PHONE_RE.finditer(visible_text),
+    ]:
         start, _ = match.span()
         context = visible_text[max(0, start - 80):start]
         phone_labels.append((match.group(0), _contact_label(context)))
@@ -360,7 +549,7 @@ def extract_contact_records(html_text: str, source_url: str) -> dict:
                 structured_phone_labels.extend((str(value), "fax") for value in values)
 
     emails = [
-        {"value": value, "label": email_labels.get(value, structured_email_labels.get(value, "general")), "source_url": source_url}
+        {"value": value, "label": email_labels.get(value, structured_email_labels.get(value, "general")), "source_url": source_url, "retrieval_method": retrieval_method}
         for value in extract_emails(html_text)
     ]
     phones = []
@@ -372,8 +561,12 @@ def extract_contact_records(html_text: str, source_url: str) -> dict:
             if digits and labelled_digits and (digits.endswith(labelled_digits) or labelled_digits.endswith(digits)):
                 label = candidate_label
                 break
-        phones.append({"value": value, "label": label, "source_url": source_url})
-    return {"emails": emails, "phones": phones, "identity": extract_organization_evidence(html_text)}
+        phones.append({"value": value, "label": label, "source_url": source_url, "retrieval_method": retrieval_method})
+    return {
+        "emails": emails,
+        "phones": phones,
+        "identity": extract_organization_evidence(html_text, source_url, retrieval_method),
+    }
 
 
 def extract_contact_page_links(

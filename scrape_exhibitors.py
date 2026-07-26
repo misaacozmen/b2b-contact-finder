@@ -8,6 +8,7 @@ from modules.exhibitor_scraper import (
     scrape_beauty_eurasia,
     scrape_idos,
     scrape_ifco,
+    scrape_maktek,
 )
 from modules.utils import ensure_directories
 
@@ -16,6 +17,7 @@ SCRAPERS = {
     "ifco": scrape_ifco,
     "idos": scrape_idos,
     "beauty": scrape_beauty_eurasia,
+    "maktek": scrape_maktek,
 }
 
 

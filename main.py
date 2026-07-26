@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import config
 from modules import scorer
-from modules import checkpoint, crawler, email_verifier, entity_registry, evidence, excel, extractor, identity, phone, report, runtime, search, secrets_store
+from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_registry, evidence, evidence_ledger, excel, extractor, identity, phone, publication_policy, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
 from modules.utils import ensure_directories, random_delay, setup_logging
 
 
@@ -22,16 +22,30 @@ def _empty_result(company: str, status: str, reason: str = "", score: int = 0) -
         "email_source": "",
         "email_source_url": "",
         "alternative_emails": "",
+        "alternative_email_sources": "",
         "email_verification": "not_checked",
         "email_verification_reason": "no_email",
+        "email_publication_status": "suppressed",
+        "email_publication_reason": reason or status,
         "phone": "",
         "phone_source": "",
         "phone_source_url": "",
         "phone_label": "",
         "alternative_phones": "",
+        "alternative_phone_sources": "",
+        "phone_publication_status": "suppressed",
+        "phone_publication_reason": reason or status,
+        "contact_policy_version": contact_publication.POLICY_VERSION,
         "status": status,
         "confidence": "none",
         "score": score,
+        "publication_policy_version": publication_policy.POLICY_VERSION,
+        "publication_policy_action": "retain_legacy_abstention",
+        "publication_eligible": False,
+        "publication_safety_score": 0,
+        "publication_risk_index": 100,
+        "publication_risk_tier": "blocked",
+        "publication_blockers": reason or status,
         "reason": reason,
     }
 
@@ -92,42 +106,29 @@ def _email_is_usable(email: str) -> bool:
     domain = _email_domain(email)
     if not domain:
         return False
+    local = email.split("@", 1)[0].casefold()
+    compact_local = re.sub(r"[._]+", "-", local)
+    local_prefix = re.split(r"[._-]", local, maxsplit=1)[0]
+    if (
+        local in config.BLOCKED_EMAIL_LOCAL_PREFIXES
+        or compact_local in config.BLOCKED_EMAIL_LOCAL_PREFIXES
+        or local_prefix in config.BLOCKED_EMAIL_LOCAL_PREFIXES
+    ):
+        return False
     return not any(domain == bad or domain.endswith(f".{bad}") for bad in config.BAD_EMAIL_DOMAINS)
 
 
 def _select_best_email(company: str, website: str, emails: list[str]) -> str:
-    website_domain = scorer.normalize_domain(urlparse(website).netloc or website)
-    website_root = scorer.compact_domain_core(website_domain)
-    tokens = scorer.distinctive_tokens(company)
-    candidates = [email for email in dict.fromkeys(emails) if _email_is_usable(email)]
-    if not candidates:
-        return ""
+    records = [{"value": email, "source_url": "", "label": "general"} for email in emails]
+    return _select_best_email_record(company, website, records).get("value", "")
 
-    def rank(email: str) -> tuple[int, int, str]:
-        local, domain = email.split("@", 1)
-        email_domain = scorer.normalize_domain(domain)
-        email_root = scorer.compact_domain_core(email_domain)
-        email_text = scorer.normalize_text(f"{local} {email_root}")
-        score = 0
 
-        if email_root and website_root and (email_root == website_root or email_root in website_root or website_root in email_root):
-            score += 80
-        if any(token in email_text for token in tokens):
-            score += 35
-        if email_domain.endswith((".com.tr", ".tr")):
-            score += 5
-
-        prefix = local.split(".", 1)[0].split("-", 1)[0].lower()
-        try:
-            priority = config.EMAIL_PRIORITY_PREFIXES.index(prefix)
-        except ValueError:
-            priority = len(config.EMAIL_PRIORITY_PREFIXES)
-        return score, -priority, email
-
-    ranked = sorted(candidates, key=rank, reverse=True)
-    best = ranked[0]
-    best_score = rank(best)[0]
-    return best if best_score >= 15 else ""
+def _select_best_email_record(company: str, website: str, records: list[dict]) -> dict:
+    """Prefer a target-country mailbox when an official site has local pages."""
+    ranked = contact_decision.rank_email_records(
+        company, website, records, _email_is_usable,
+    )
+    return ranked[0] if ranked else {}
 
 
 def _page_identity_score(company: str, pages: list[dict]) -> tuple[int, str]:
@@ -191,6 +192,8 @@ def _legal_name_identity_score(company: str, pages: list[dict]) -> tuple[int, st
         return 0, "legal_name_phrase_unavailable"
     if scorer.ownership_statement_match(company, text):
         return 20, f"legal_name_ownership_match:{min(len(tokens), 4)}"
+    if len(tokens) >= 3 and scorer.legal_name_full_phrase_match(company, text):
+        return 19, f"legal_name_full_match:{len(tokens)}"
     if scorer.legal_name_phrase_match(company, text):
         return 16, f"legal_name_phrase_match:{min(len(tokens), 4)}"
     return -8, f"legal_name_phrase_missing:0/{min(len(tokens), 4)}"
@@ -218,21 +221,65 @@ def _structured_identity_score(company: str, pages: list[dict]) -> tuple[int, st
         "names": [], "urls": [], "same_as": [], "addresses": [],
         "identifiers": [], "ownership_statements": [],
         "legal_names": [], "brand_names": [], "related_organizations": [],
+        "phones": [], "relationships": [], "claims": [],
     }
+    page_identities: list[dict] = []
     for page in pages:
-        identity = extractor.extract_organization_evidence(page.get("html", ""))
+        identity = extractor.extract_organization_evidence(
+            page.get("html", ""), page.get("url", ""),
+            page.get("retrieval_method", "unknown"),
+        )
+        page_identities.append(identity)
         for key in combined:
             combined[key].extend(identity.get(key, []))
+    relationships = combined.pop("relationships")
+    claims = combined.pop("claims")
     combined = {key: list(dict.fromkeys(values)) for key, values in combined.items()}
+    seen_relationships = set()
+    combined["relationships"] = []
+    for claim in relationships:
+        marker = (claim.get("kind", ""), claim.get("name", ""), claim.get("url", ""))
+        if marker not in seen_relationships:
+            seen_relationships.add(marker)
+            combined["relationships"].append(claim)
+    combined["claims"] = evidence_ledger.deduplicate(claims)
+
+    def repeated_values(key: str) -> list[str]:
+        occurrences: dict[str, set[int]] = {}
+        originals: dict[str, str] = {}
+        for page_index, page_identity in enumerate(page_identities):
+            for raw_value in page_identity.get(key, []):
+                normalized = scorer.normalize_text(str(raw_value))
+                if key == "phones":
+                    normalized = re.sub(r"\D", "", str(raw_value))
+                if not normalized:
+                    continue
+                occurrences.setdefault(normalized, set()).add(page_index)
+                originals.setdefault(normalized, str(raw_value))
+        return [originals[value] for value, sources in occurrences.items() if len(sources) >= 2]
+
+    combined["corroborated_addresses"] = repeated_values("addresses")
+    combined["corroborated_phones"] = repeated_values("phones")
+    # Keep entity identity separate from entity relationships. A labelled
+    # legal name proves who operates the current site, but it does not by
+    # itself assert a parent, branch or product-division relationship.
     relationship_text = " ".join([
-        *combined["ownership_statements"], *combined["legal_names"],
-        *combined["brand_names"], *combined["related_organizations"],
+        *combined["ownership_statements"], *combined["related_organizations"],
+        *(
+            str(value)
+            for relationship in combined["relationships"]
+            for value in (relationship.get("name", ""), relationship.get("url", ""))
+            if value
+        ),
     ])
     if relationship_text and (
         scorer.legal_name_phrase_match(company, relationship_text)
         or scorer.ownership_statement_match(company, relationship_text)
     ):
         return 14, "structured_identity_strong:1/1@scope=declared_relationship", combined
+    legal_name_text = " ".join(combined["legal_names"])
+    if legal_name_text and scorer.legal_name_phrase_match(company, legal_name_text):
+        return 14, "structured_identity_strong:1/1@scope=legal_name", combined
     if not combined["names"] and not combined["urls"]:
         return 0, "structured_identity_absent", combined
     # Canonical URLs identify the crawled domain, not the company owner. They
@@ -268,45 +315,7 @@ def _structured_identity_score(company: str, pages: list[dict]) -> tuple[int, st
 
 
 def _select_phone_records(records: list[dict]) -> list[dict]:
-    label_priority = {
-        "headquarters": 100, "general": 90, "specialist": 85,
-        "sales": 82, "export": 82, "istanbul": 78, "izmir": 78,
-        "ankara": 78, "whatsapp": 75, "factory": 65, "branch": 60, "owner": 40,
-    }
-    by_number: dict[str, dict] = {}
-
-    def number_type_priority(value: str) -> int:
-        digits = re.sub(r"\D", "", value)
-        if re.fullmatch(r"0?444\d{4}", digits) or digits.startswith("0850"):
-            return 3
-        if digits.startswith(("02", "03", "04")):
-            return 2
-        if digits.startswith("05"):
-            return 1
-        return 0
-    for record in records:
-        normalized = phone.normalize_phone(record.get("value", ""))
-        if not normalized:
-            continue
-        item = {
-            "value": normalized,
-            "label": record.get("label", "general"),
-            "source_url": record.get("source_url", ""),
-        }
-        if item["label"] == "fax":
-            continue
-        current = by_number.get(normalized)
-        if current is None or label_priority.get(item["label"], 0) > label_priority.get(current["label"], 0):
-            by_number[normalized] = item
-    return sorted(
-        by_number.values(),
-        key=lambda item: (
-            label_priority.get(item["label"], 0),
-            number_type_priority(item["value"]),
-            1 if any(marker in item["source_url"].casefold() for marker in ("contact", "iletisim", "iletişim")) else 0,
-        ),
-        reverse=True,
-    )
+    return contact_decision.rank_phone_records(records)
 
 
 def _page_context_score(company: str, pages: list[dict], metadata: dict | None = None) -> tuple[int, str]:
@@ -328,7 +337,7 @@ def _page_context_score(company: str, pages: list[dict], metadata: dict | None =
     hits = sum(1 for context in metadata_contexts if scorer.page_matches_metadata_context(text, context))
     if hits:
         return 8, f"context_match:{hits}/{len(metadata_contexts)}"
-    return -20, f"metadata_context_missing:0/{len(metadata_contexts)}"
+    return 0, f"metadata_context_not_observed:0/{len(metadata_contexts)}"
 
 
 def _email_domain_bonus(website: str, email: str) -> tuple[int, str]:
@@ -339,6 +348,72 @@ def _email_domain_bonus(website: str, email: str) -> tuple[int, str]:
     if email_root and website_root and (email_root == website_root or email_root in website_root or website_root in email_root):
         return 10, "email_domain_match"
     return -12, "email_domain_mismatch"
+
+
+def _cross_domain_email_is_safe_first_party(
+    evaluation: dict,
+    identity_verified: bool,
+) -> bool:
+    """Allow a cross-domain mailbox only when the verified official site publishes it.
+
+    Corporate groups and business units commonly use a shared mailbox domain.
+    The mailbox domain is therefore not an ownership gate by itself; the
+    source page, DNS verification and already-established website identity are.
+    """
+    if not evaluation.get("email_failed") or not identity_verified:
+        return False
+    selected_email = str(evaluation.get("email", "") or "")
+    source_url = str(evaluation.get("email_source_url", "") or "")
+    website = str(evaluation.get("crawl_result", {}).get("url", "") or "")
+    if not selected_email or not source_url or not website:
+        return False
+    if evaluation.get("email_verification") != "verified":
+        return False
+    if not scorer.same_registrable_domain(source_url, website):
+        return False
+    return _email_domain_bonus(website, selected_email)[1] == "email_domain_mismatch"
+
+
+def _email_failure_blocks_publication(
+    evaluation: dict,
+    identity_verified: bool,
+) -> bool:
+    if not evaluation.get("email_failed"):
+        return False
+    if not _cross_domain_email_is_safe_first_party(evaluation, identity_verified):
+        return True
+    marker = "cross_domain_email_accepted_from_verified_official_page"
+    if marker not in evaluation["reasons"]:
+        evaluation["reasons"].append(marker)
+    return False
+
+
+def _fair_phone_reference_reasons(
+    metadata: dict | None,
+    official_website: str,
+    official_phones: list[str],
+) -> list[str]:
+    """Compare a fair phone as non-authoritative QA when its website agrees.
+
+    The fair value is never copied into output. A difference is informational:
+    contacts extracted from the verified official website remain publishable.
+    """
+    if not metadata:
+        return []
+    fair_website = str(metadata.get("website", "") or "")
+    fair_phone = str(metadata.get("listed_phone", "") or "")
+    if not fair_website or not fair_phone:
+        return []
+    if not scorer.same_registrable_domain(fair_website, official_website):
+        return []
+    normalized_reference = phone.normalize_phone(fair_phone)
+    if not normalized_reference:
+        return []
+    if normalized_reference in official_phones:
+        return ["fair_phone_reference_match"]
+    if official_phones:
+        return ["fair_phone_reference_differs_nonblocking"]
+    return ["fair_phone_reference_only_not_published"]
 
 
 def _is_ambiguous_company_name(company: str) -> bool:
@@ -375,15 +450,11 @@ def _is_hard_context_failure(evaluation: dict) -> bool:
         return False
     if any(reason.startswith(("context_conflict:", "metadata_context_conflict:")) for reason in reasons):
         return True
-    metadata_missing = any(reason.startswith("metadata_context_missing:") for reason in reasons)
-    page_identity_strong = any(reason.startswith("page_identity_strong:") for reason in reasons)
-    structured_identity_strong = any(reason.startswith("structured_identity_strong:") for reason in reasons)
-    email_domain_match = "email_domain_match" in reasons
-    if _has_trusted_website_evidence(evaluation["candidate"], reasons) and (
-        page_identity_strong or structured_identity_strong or email_domain_match
-    ):
-        return False
-    if metadata_missing and _has_trusted_website_evidence(evaluation["candidate"], reasons):
+    # Fair, directory and listing metadata is discovery-only. Failure to find
+    # its wording on a first-party site can never be a hard conflict.
+    if any(reason.startswith((
+        "metadata_context_missing:", "metadata_context_not_observed:",
+    )) for reason in reasons):
         return False
     return True
 
@@ -428,13 +499,19 @@ def _clear_unpublished_contacts(row: dict) -> None:
     row["email_source"] = ""
     row["email_source_url"] = ""
     row["alternative_emails"] = ""
+    row["alternative_email_sources"] = ""
     row["email_verification"] = "not_checked"
     row["email_verification_reason"] = "website_not_found"
+    row["email_publication_status"] = "suppressed"
+    row["email_publication_reason"] = "website_not_published"
     row["phone"] = ""
     row["phone_source"] = ""
     row["phone_source_url"] = ""
     row["phone_label"] = ""
     row["alternative_phones"] = ""
+    row["alternative_phone_sources"] = ""
+    row["phone_publication_status"] = "suppressed"
+    row["phone_publication_reason"] = "website_not_published"
 
 
 def _apply_risk_caps(
@@ -465,7 +542,8 @@ def _apply_risk_caps(
     )
     strong_structured_or_legal = any(reason.startswith((
         "structured_identity_medium:", "structured_identity_strong:",
-        "legal_name_phrase_match:", "legal_name_ownership_match:",
+        "legal_name_phrase_match:", "legal_name_full_match:",
+        "legal_name_ownership_match:",
     )) for reason in reasons)
     unresolved_owner = any(reason.startswith("structured_identity_unmatched:") for reason in reasons) and not any(
         reason.startswith("legal_name_ownership_match:") for reason in reasons
@@ -486,19 +564,6 @@ def _score_candidate_with_site(company: str, candidate: dict, crawl_result: dict
     structured_bonus, structured_reason, _ = _structured_identity_score(company, crawl_result["pages"])
     legal_name_bonus, legal_name_reason = _legal_name_identity_score(company, crawl_result["pages"])
     country_bonus, country_reason = _country_identity_score(crawl_result, normalized_phones)
-    preliminary_reasons = [page_reason, context_reason, email_reason, structured_reason, legal_name_reason, country_reason]
-    strong_first_party_identity = any(reason.startswith((
-        "page_identity_strong:", "structured_identity_medium:",
-        "structured_identity_strong:", "legal_name_phrase_match:",
-        "legal_name_ownership_match:",
-    )) for reason in preliminary_reasons)
-    if (
-        context_reason.startswith("metadata_context_missing:")
-        and strong_first_party_identity
-        and _has_trusted_website_evidence(candidate, preliminary_reasons)
-    ):
-        context_bonus = 0
-        context_reason = f"{context_reason}_softened"
     reasons.extend([page_reason, context_reason, email_reason, structured_reason, legal_name_reason, country_reason])
     if crawl_result.get("tls_insecure"):
         reasons.append("tls_insecure_transport")
@@ -576,37 +641,47 @@ def _evaluate_candidate(
     phone_records: list[dict] = []
     if crawl_profile == "full":
         for page in crawl_result["pages"]:
-            contacts = extractor.extract_contact_records(page["html"], page["url"])
+            contacts = extractor.extract_contact_records(
+                page["html"], page["url"], page.get("retrieval_method", "unknown"),
+            )
             email_records.extend(contacts["emails"])
             phone_records.extend(contacts["phones"])
 
-    emails = list(dict.fromkeys(
-        record["value"] for record in email_records if _email_is_usable(record["value"])
-    ))
-    selected_email = _select_best_email(company, crawl_result["url"], emails)
-    email_source = "website" if selected_email else ""
-    matching_email_records = [record for record in email_records if record["value"] == selected_email]
-    selected_email_record = max(
-        matching_email_records,
-        key=lambda record: 1 if any(marker in record.get("source_url", "").casefold() for marker in ("contact", "iletisim", "iletişim")) else 0,
-        default={},
+    ranked_email_records = contact_decision.rank_email_records(
+        company, crawl_result["url"], email_records, _email_is_usable,
     )
-    email_source_url = selected_email_record.get("source_url", "")
-    email_verification = (
-        email_verifier.verify_email(selected_email)
-        if verify_email_domain
-        else {"status": "not_checked", "reason": "identity_phase"}
-    )
-    if email_verification["status"] == "invalid_domain":
-        selected_email = ""
-        email_source = ""
-        email_source_url = ""
+    verification_limit = max(config.MAX_EMAIL_CANDIDATE_VERIFICATIONS, 1)
+    for index, record in enumerate(ranked_email_records):
+        verification = (
+            email_verifier.verify_email(record["value"])
+            if verify_email_domain and index < verification_limit
+            else {"status": "not_checked", "reason": "identity_phase"}
+        )
+        record["verification_status"] = verification["status"]
+        record["verification_reason"] = verification["reason"]
+
     ranked_phone_records = _select_phone_records(phone_records)
-    normalized_phones = [record["value"] for record in ranked_phone_records]
+    contact_policy = contact_publication.filter_records(
+        crawl_result["url"], ranked_email_records, ranked_phone_records,
+    )
+    eligible_email_records = contact_policy["eligible_email_records"]
+    eligible_phone_records = contact_policy["eligible_phone_records"]
+    selected_email_record = eligible_email_records[0] if eligible_email_records else {}
+    email_verification = {
+        "status": selected_email_record.get("verification_status", "not_checked"),
+        "reason": selected_email_record.get(
+            "verification_reason", "no_publishable_email",
+        ),
+    }
+    selected_email = selected_email_record.get("value", "")
+    email_source = "website" if selected_email else ""
+    email_source_url = selected_email_record.get("source_url", "")
+    normalized_phones = [record["value"] for record in eligible_phone_records]
     phone_source = "website" if normalized_phones else ""
     # Contact values must come from the crawled official site.  Third-party
     # directory data (such as Google Places or Hunter) is not published.
     final_score, reasons = _score_candidate_with_site(company, candidate, crawl_result, selected_email, normalized_phones, metadata)
+    reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
     context_failed = "context_gate_failed" in reasons
     email_failed = "email_gate_failed" in reasons
 
@@ -617,20 +692,56 @@ def _evaluate_candidate(
         f"identity_evidence:{identity_assessment['support_count']};"
         f"decision:{identity_assessment['decision']}"
     )
+    email_decision = next(
+        (
+            item for item in contact_policy["emails"]
+            if item["eligible"] and item["value"] == selected_email
+        ),
+        {},
+    )
+    phone_decision = next(
+        (
+            item for item in contact_policy["phones"]
+            if item["eligible"] and item["value"] == (
+                normalized_phones[0] if normalized_phones else ""
+            )
+        ),
+        {},
+    )
     return {
         "candidate": candidate,
         "crawl_result": crawl_result,
         "email": selected_email,
         "email_source": email_source,
         "email_source_url": email_source_url,
-        "alternative_emails": [value for value in emails if value != selected_email],
+        "email_selection_reason": selected_email_record.get("selection_reason", ""),
+        "email_retrieval_method": selected_email_record.get("retrieval_method", "http"),
+        "alternative_emails": [
+            record["value"] for record in eligible_email_records
+            if record["value"] != selected_email
+        ],
+        "alternative_email_records": [
+            record for record in eligible_email_records
+            if record["value"] != selected_email
+        ],
         "email_verification": email_verification["status"],
         "email_verification_reason": email_verification["reason"],
         "phone": normalized_phones[0] if normalized_phones else "",
         "phone_source": phone_source if normalized_phones else "",
-        "phone_source_url": ranked_phone_records[0]["source_url"] if ranked_phone_records else "",
-        "phone_label": ranked_phone_records[0]["label"] if ranked_phone_records else "",
-        "alternative_phones": ranked_phone_records[1:],
+        "phone_source_url": eligible_phone_records[0]["source_url"] if eligible_phone_records else "",
+        "phone_label": eligible_phone_records[0]["label"] if eligible_phone_records else "",
+        "phone_selection_reason": eligible_phone_records[0].get("selection_reason", "") if eligible_phone_records else "",
+        "phone_retrieval_method": eligible_phone_records[0].get("retrieval_method", "http") if eligible_phone_records else "",
+        "alternative_phones": eligible_phone_records[1:],
+        "contact_publication": contact_policy,
+        "email_publication_status": "allowed" if selected_email else "suppressed",
+        "email_publication_reason": email_decision.get(
+            "reason", "no_eligible_first_party_email",
+        ),
+        "phone_publication_status": "allowed" if normalized_phones else "suppressed",
+        "phone_publication_reason": phone_decision.get(
+            "reason", "no_eligible_first_party_phone",
+        ),
         "final_score": final_score,
         "reasons": reasons,
         "has_contact": bool(selected_email or normalized_phones),
@@ -648,8 +759,18 @@ def _contact_output_fields(evaluation: dict) -> dict:
         "email_source": evaluation.get("email_source", ""),
         "email_source_url": evaluation.get("email_source_url", ""),
         "alternative_emails": "; ".join(evaluation.get("alternative_emails", [])),
+        "alternative_email_sources": "; ".join(
+            f"{item.get('value', '')} | {item.get('source_url', '')}"
+            for item in evaluation.get("alternative_email_records", [])
+        ),
         "email_verification": evaluation.get("email_verification", "not_checked"),
         "email_verification_reason": evaluation.get("email_verification_reason", ""),
+        "email_publication_status": evaluation.get(
+            "email_publication_status", "suppressed",
+        ),
+        "email_publication_reason": evaluation.get(
+            "email_publication_reason", "",
+        ),
         "phone": evaluation.get("phone", ""),
         "phone_source": evaluation.get("phone_source", ""),
         "phone_source_url": evaluation.get("phone_source_url", ""),
@@ -658,6 +779,19 @@ def _contact_output_fields(evaluation: dict) -> dict:
             f"{item.get('value', '')} [{item.get('label', 'general')}]"
             for item in alternative_phones
         ),
+        "alternative_phone_sources": "; ".join(
+            f"{item.get('value', '')} | {item.get('source_url', '')}"
+            for item in alternative_phones
+        ),
+        "phone_publication_status": evaluation.get(
+            "phone_publication_status", "suppressed",
+        ),
+        "phone_publication_reason": evaluation.get(
+            "phone_publication_reason", "",
+        ),
+        "contact_policy_version": evaluation.get(
+            "contact_publication", {},
+        ).get("policy_version", contact_publication.POLICY_VERSION),
     }
 
 
@@ -669,11 +803,15 @@ def _evaluation_evidence(evaluation: dict) -> dict:
         "reasons": evaluation.get("reasons", []),
         "structured_identity": evaluation.get("structured_identity", {}),
         "identity_assessment": evaluation.get("identity_assessment", {}),
+        "publication_policy": evaluation.get("publication_policy", {}),
+        "rerank_evidence": evaluation.get("rerank_evidence", {}),
+        "contact_publication": evaluation.get("contact_publication", {}),
         "crawl": {
             "url": crawl_result.get("url", ""),
             "cache_status": crawl_result.get("cache_status", ""),
             "error": crawl_result.get("error", ""),
             "pages": [page.get("url", "") for page in crawl_result.get("pages", [])],
+            "recovery_trace": crawl_result.get("recovery_trace", []),
         },
         "contacts": _contact_output_fields(evaluation),
     }
@@ -728,7 +866,7 @@ def _preserve_identity_phase_evidence(full_evaluation: dict, identity_evaluation
 
     identity_prefixes = (
         "page_identity_", "structured_identity_", "legal_name_phrase_",
-        "legal_name_ownership_", "identity_evidence:",
+        "legal_name_full_", "legal_name_ownership_", "identity_evidence:",
     )
     contact_reasons = [
         reason for reason in full_evaluation.get("reasons", [])
@@ -893,6 +1031,10 @@ def _official_family_evidence(first: dict, second: dict, company: str = "") -> d
 
     first_structured = first.get("structured_identity", {})
     second_structured = second.get("structured_identity", {})
+    typed_edges = relationship_graph.typed_domain_edges(
+        first_domain, second_domain, first_structured, second_structured,
+    )
+    edges.extend(typed_edges)
     first_ids = {scorer.normalize_text(value) for value in first_structured.get("identifiers", []) if value}
     second_ids = {scorer.normalize_text(value) for value in second_structured.get("identifiers", []) if value}
     if first_ids and second_ids:
@@ -940,18 +1082,33 @@ def _official_family_evidence(first: dict, second: dict, company: str = "") -> d
     # A shared name or a similar domain is only corroboration. Join domains
     # when there is a direct first-party/registry edge, or at least two
     # independent operational edges. Distinct legal identifiers always win.
+    continuity_edges = {
+        edge for edge in typed_edges
+        if edge in {
+            "first_party_parentOrganization", "first_party_subOrganization",
+            "first_party_branchOf", "first_party_department",
+            "first_party_productDivision",
+        }
+    }
     direct_edges = {
         "same_verified_entity",
         "first_party_domain_link", "shared_legal_identifier",
+        *continuity_edges,
     }
     operational_edges = {
         "cross_domain_first_party_email", "shared_phone", "shared_structured_address",
     }
+    identity_continuity = not conflicts and bool(set(edges) & direct_edges)
     related = not conflicts and (
-        bool(set(edges) & direct_edges)
+        identity_continuity
         or len(set(edges) & operational_edges) >= 2
     )
-    return {"related": related, "edges": list(dict.fromkeys(edges)), "conflicts": conflicts}
+    return {
+        "related": related,
+        "identity_continuity": identity_continuity,
+        "edges": list(dict.fromkeys(edges)),
+        "conflicts": conflicts,
+    }
 
 
 def _same_official_family(first: dict, second: dict, company: str = "") -> bool:
@@ -965,7 +1122,11 @@ def _homonym_conflict(company: str, first: dict, second: dict) -> dict:
     if not first_domain or not second_domain or first_domain == second_domain:
         return {"ambiguous": False, "reason": "same_domain"}
     family = _official_family_evidence(first, second, company)
-    if family["related"]:
+    # Shared phones and cross-domain mailboxes can describe an operational
+    # relationship (shop, reseller or call centre), but must not by themselves
+    # resolve two otherwise publishable same-name identities.  Only explicit
+    # first-party/legal continuity is identity authority here.
+    if family.get("identity_continuity"):
         return {"ambiguous": False, "reason": "official_family", "family": family}
 
     first_assessment = first.get("identity_assessment", {})
@@ -986,7 +1147,8 @@ def _homonym_conflict(company: str, first: dict, second: dict) -> dict:
         return any(reason.startswith((
             "page_identity_medium:", "page_identity_strong:",
             "structured_identity_medium:", "structured_identity_strong:",
-            "legal_name_phrase_match:", "legal_name_ownership_match:",
+            "legal_name_phrase_match:", "legal_name_full_match:",
+            "legal_name_ownership_match:",
         )) for reason in reasons)
 
     def context_state(item: dict) -> str:
@@ -1031,7 +1193,7 @@ def _close_identity_margin_conflict(company: str, first: dict, second: dict) -> 
     second_domain = scorer.normalize_domain(second_candidate.get("url", ""))
     if not first_domain or not second_domain or first_domain == second_domain:
         return False
-    if _same_official_family(first, second, company):
+    if _official_family_evidence(first, second, company).get("identity_continuity"):
         return False
     authoritative_queries = {"verified_entity", "verified_alias", "input_website"}
     if (
@@ -1092,30 +1254,79 @@ def _merge_official_family_contacts(primary: dict, related: list[dict], company:
             continue
         if not _has_trusted_website_evidence(item["candidate"], item.get("reasons", [])):
             continue
-        other_emails = [item.get("email", ""), *item.get("alternative_emails", [])]
+        other_email_records = []
+        if item.get("email"):
+            other_email_records.append({
+                "value": item["email"],
+                "source_url": item.get("email_source_url", ""),
+                "retrieval_method": item.get("email_retrieval_method", "unknown"),
+                "verification_status": item.get("email_verification", "not_checked"),
+                "verification_reason": item.get("email_verification_reason", ""),
+                "official_family_verified": True,
+            })
+        other_email_records.extend(
+            {**record, "official_family_verified": True}
+            for record in item.get("alternative_email_records", [])
+        )
+        other_emails = [record.get("value", "") for record in other_email_records]
         primary["alternative_emails"] = list(dict.fromkeys([
             *primary.get("alternative_emails", []),
             *(email for email in other_emails if email and email != primary.get("email", "")),
         ]))
+        known_email_records = {
+            record.get("value", "")
+            for record in primary.get("alternative_email_records", [])
+        }
+        known_email_records.add(primary.get("email", ""))
+        primary.setdefault("alternative_email_records", []).extend(
+            record for record in other_email_records
+            if record.get("value", "") not in known_email_records
+        )
         if not primary.get("email") and item.get("email"):
-            for key in ("email", "email_source", "email_source_url", "email_verification", "email_verification_reason"):
+            for key in (
+                "email", "email_source", "email_source_url",
+                "email_verification", "email_verification_reason",
+                "email_selection_reason", "email_retrieval_method",
+                "email_publication_status", "email_publication_reason",
+            ):
                 primary[key] = item.get(key, "")
+            primary["alternative_emails"] = [
+                value for value in primary.get("alternative_emails", [])
+                if value != primary["email"]
+            ]
+            primary["alternative_email_records"] = [
+                record for record in primary.get("alternative_email_records", [])
+                if record.get("value", "") != primary["email"]
+            ]
 
         other_phones = []
         if item.get("phone"):
             other_phones.append({
                 "value": item["phone"], "label": item.get("phone_label", "general"),
                 "source_url": item.get("phone_source_url", ""),
+                "retrieval_method": item.get("phone_retrieval_method", "unknown"),
+                "official_family_verified": True,
             })
-        other_phones.extend(item.get("alternative_phones", []))
+        other_phones.extend(
+            {**record, "official_family_verified": True}
+            for record in item.get("alternative_phones", [])
+        )
         known = {phone_item.get("value", "") for phone_item in primary.get("alternative_phones", [])}
         known.add(primary.get("phone", ""))
         primary.setdefault("alternative_phones", []).extend(
             phone_item for phone_item in other_phones if phone_item.get("value", "") not in known
         )
         if not primary.get("phone") and item.get("phone"):
-            for key in ("phone", "phone_source", "phone_source_url", "phone_label"):
+            for key in (
+                "phone", "phone_source", "phone_source_url", "phone_label",
+                "phone_selection_reason", "phone_retrieval_method",
+                "phone_publication_status", "phone_publication_reason",
+            ):
                 primary[key] = item.get(key, "")
+            primary["alternative_phones"] = [
+                phone_item for phone_item in primary.get("alternative_phones", [])
+                if phone_item.get("value", "") != primary["phone"]
+            ]
         primary["has_contact"] = bool(primary.get("email") or primary.get("phone"))
         if "official_site_family_contact_merge" not in primary["reasons"]:
             primary["reasons"].append("official_site_family_contact_merge")
@@ -1137,6 +1348,47 @@ def _confidence_status(score: int, has_contact: bool, reasons: list[str], identi
     # below the review threshold.  Keep it quarantined for a human decision.
     reasons.append("trusted_website_below_score_preserved_for_review")
     return "REVIEW_NEEDED", "review"
+
+
+def _apply_publication_policy(
+    company: str,
+    evaluation: dict,
+    status: str,
+    confidence: str,
+    reasons: list[str],
+) -> tuple[str, str]:
+    decision = publication_policy.evaluate(
+        company,
+        evaluation,
+        status,
+        minimum_safety_score=config.PUBLICATION_POLICY_MIN_SAFETY_SCORE,
+    )
+    mode = str(config.PUBLICATION_POLICY_MODE or "enforce_downgrade_only").strip().casefold()
+    if mode == "shadow":
+        decision["mode"] = "shadow"
+        if decision.get("action") == "downgrade_to_review":
+            decision["action"] = "would_downgrade_to_review"
+    else:
+        status, confidence = publication_policy.enforce(
+            decision, status, confidence, reasons,
+        )
+    evaluation["publication_policy"] = decision
+    return status, confidence
+
+
+def _policy_output_fields(evaluation: dict) -> dict:
+    decision = evaluation.get("publication_policy", {})
+    return {
+        "publication_policy_version": decision.get(
+            "policy_version", publication_policy.POLICY_VERSION,
+        ),
+        "publication_policy_action": decision.get("action", ""),
+        "publication_eligible": bool(decision.get("eligible", False)),
+        "publication_safety_score": int(decision.get("safety_score", 0) or 0),
+        "publication_risk_index": int(decision.get("risk_index", 100) or 0),
+        "publication_risk_tier": decision.get("risk_tier", "blocked"),
+        "publication_blockers": "; ".join(decision.get("hard_blockers", [])),
+    }
 
 
 def _exact_brand_domain(company: str, candidate: dict) -> bool:
@@ -1217,52 +1469,14 @@ def _authoritative_unreachable_candidate(candidates: list[dict], company: str = 
     )
 
 
-def _reason_strength(reasons: list[str], prefix: str) -> int:
-    levels = {"strong": 3, "medium": 2, "weak": 1, "match": 2}
-    for reason in reasons:
-        if not reason.startswith(prefix):
-            continue
-        return max((value for label, value in levels.items() if label in reason), default=0)
-    return 0
-
-
 def _evaluation_rank_key(company: str, item: dict) -> tuple[int, ...]:
-    candidate_reason = item["candidate"].get("reason", "")
-    intrinsic_domain_evidence = (
-        "domain_hits:" in candidate_reason and "search_text_identity:" not in candidate_reason
-        and "explicit_cross_domain_redirect:" not in candidate_reason
-    ) or scorer.domain_identity_match(company, item["candidate"]["url"])[0]
-    candidate = item["candidate"]
-    reasons = item["reasons"]
-    assessment = item.get("identity_assessment") or identity.assess(
-        company, candidate, reasons, item.get("structured_identity", {}),
+    vector = candidate_reranker.evidence_vector(
+        company,
+        item,
+        hard_context_failure=_is_hard_context_failure(item),
     )
-    return (
-        0 if candidate.get("role") in {"directory", "fair_profile", "news"} else 1,
-        assessment.get("support_count", 0),
-        0 if (
-            any(reason.startswith("structured_identity_unmatched:") for reason in reasons)
-            and not any(reason.startswith("legal_name_ownership_match:") for reason in reasons)
-        ) else 1,
-        1 if assessment.get("provisionally_publishable") else 0,
-        0 if _is_hard_context_failure(item) else 1,
-        1 if candidate.get("query") in {"verified_entity", "verified_alias"} else 0,
-        # A bridge-labelled role must not outrank a direct candidate merely
-        # because discovery classified it as ``company_candidate``.  Stronger
-        # first-party ownership still wins via the support components above.
-        0 if "discovery_only_not_identity_authority" in candidate_reason else 1,
-        _reason_strength(reasons, "context_"),
-        1 if candidate.get("role") == "company_candidate" else 0,
-        _reason_strength(reasons, "page_identity_"),
-        _reason_strength(reasons, "structured_identity_"),
-        _reason_strength(reasons, "legal_name_phrase_"),
-        1 if intrinsic_domain_evidence else 0,
-        candidate.get("_official_query_evidence", 0),
-        item["final_score"],
-        candidate.get("_metadata_context_matches", 0),
-        1 if item["has_contact"] else 0,
-        0 if item["email_failed"] else 1,
-    )
+    item["rerank_evidence"] = vector
+    return candidate_reranker.vector_key(vector)
 
 
 def _process_known_website(index: int, company: str, website: str, logger, metadata: dict | None = None) -> tuple[int, dict] | None:
@@ -1288,13 +1502,16 @@ def _process_known_website(index: int, company: str, website: str, logger, metad
     identity_verified = _has_trusted_website_evidence(candidate, reasons)
     if _is_hard_context_failure(evaluation):
         status, confidence = "REVIEW_NEEDED", "review"
-    elif evaluation["email_failed"]:
+    elif _email_failure_blocks_publication(evaluation, identity_verified):
         status, confidence = "REVIEW_NEEDED", "review"
     else:
         status, confidence = _confidence_status(
             final_score, has_contact, reasons,
             identity_verified,
         )
+    status, confidence = _apply_publication_policy(
+        company, evaluation, status, confidence, reasons,
+    )
 
     row = {
         "company": company,
@@ -1304,6 +1521,7 @@ def _process_known_website(index: int, company: str, website: str, logger, metad
         "status": status,
         "confidence": confidence,
         "score": final_score,
+        **_policy_output_fields(evaluation),
         "reason": "; ".join(reason for reason in reasons if reason),
         "__evaluation": _evaluation_evidence(evaluation),
     }
@@ -1468,10 +1686,16 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         return index, _attach_candidates(row, candidates)
     ambiguity_match: tuple[dict, dict, int, dict] | None = None
     for second_eval in ranked_evaluations[1:]:
-        best_key = _evaluation_rank_key(company, best_eval)
-        second_key = _evaluation_rank_key(company, second_eval)
+        best_key = candidate_reranker.non_score_key(
+            company, best_eval,
+            hard_context_failure=_is_hard_context_failure(best_eval),
+        )
+        second_key = candidate_reranker.non_score_key(
+            company, second_eval,
+            hard_context_failure=_is_hard_context_failure(second_eval),
+        )
         score_gap = abs(best_eval["final_score"] - second_eval["final_score"])
-        same_non_score_evidence = best_key[:13] + best_key[14:] == second_key[:13] + second_key[14:]
+        same_non_score_evidence = best_key == second_key
         different_domains = scorer.normalize_domain(best_eval["candidate"]["url"]) != scorer.normalize_domain(second_eval["candidate"]["url"])
         homonym = _homonym_conflict(company, best_eval, second_eval)
         if (
@@ -1558,13 +1782,16 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     elif unsafe_identity or hard_context_failure:
         reasons.append("authoritative_website_preserved_for_review")
         status, confidence = "REVIEW_NEEDED", "review"
-    elif best_eval["email_failed"]:
+    elif _email_failure_blocks_publication(best_eval, identity_verified):
         status, confidence = "REVIEW_NEEDED", "review"
     else:
         status, confidence = _confidence_status(
             final_score, has_contact, reasons,
             identity_verified,
         )
+    status, confidence = _apply_publication_policy(
+        company, best_eval, status, confidence, reasons,
+    )
     random_delay()
     row = {
         "company": company,
@@ -1574,6 +1801,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         "status": status,
         "confidence": confidence,
         "score": final_score,
+        **_policy_output_fields(best_eval),
         "reason": "; ".join(reason for reason in reasons if reason),
         "__evaluation": _evaluation_evidence(best_eval),
     }
@@ -1601,6 +1829,8 @@ def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
             else "partial" if row.get("email") or row.get("phone")
             else "missing"
         )
+        if row.get("status") in report.OK_STATUSES:
+            discovery_coverage.mark_published(row.get("company", ""))
     evidence.write_jsonl(config.EVIDENCE_FILE, rows)
     entity_registry.write_observations(config.ENTITY_RELATIONSHIPS_FILE, rows)
     for row in rows:
@@ -1610,10 +1840,13 @@ def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
         row.pop("__candidate_evaluations", None)
         row.pop("__search_trace", None)
         row.pop("__source_health", None)
-    excel.write_contacts(config.CONTACTS_FILE, rows)
+    published_rows = [row for row in rows if row.get("status") in report.OK_STATUSES]
+    # contacts.xlsx is the publication surface. Review/abstain rows remain in
+    # the dedicated audit artifacts and must never look like published firms.
+    excel.write_contacts(config.CONTACTS_FILE, published_rows)
     excel.write_contacts(
         config.VERIFIED_CONTACTS_FILE,
-        [row for row in rows if row.get("status") in report.OK_STATUSES],
+        published_rows,
     )
     excel.write_contacts(
         config.REVIEW_QUEUE_FILE,
@@ -1623,6 +1856,11 @@ def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
     excel.write_website_candidates(config.CANDIDATES_FILE, rows)
     report_text = report.build_report(rows, elapsed_seconds)
     config.REPORT_FILE.write_text(report_text, encoding="utf-8")
+    discovery_coverage.write(
+        config.DISCOVERY_COVERAGE_FILE,
+        config.DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY,
+    )
+    replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
     runtime.write(config.TELEMETRY_FILE)
     return report_text
 
@@ -1640,6 +1878,8 @@ def _set_output_dir(output_dir: Path) -> None:
     config.EVIDENCE_FILE = output_dir / "evidence.jsonl"
     config.ENTITY_RELATIONSHIPS_FILE = output_dir / "entity_relationships.jsonl"
     config.TELEMETRY_FILE = output_dir / "telemetry.json"
+    config.DISCOVERY_COVERAGE_FILE = output_dir / "discovery_coverage.json"
+    config.REPLAY_SNAPSHOT_FILE = output_dir / "replay_snapshot.json.gz"
 
 
 def _prompt_api_state(label: str, input_fn=input) -> bool:
@@ -1836,6 +2076,13 @@ def run(
         _set_output_dir(output_dir)
     ensure_directories()
     runtime.reset()
+    discovery_coverage.reset()
+    replay_snapshot.reset()
+    if config.REPLAY_SNAPSHOT_INPUT:
+        replay_snapshot.load(
+            Path(config.REPLAY_SNAPSHOT_INPUT),
+            max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES,
+        )
     search.reset_source_health()
     search.reset_candidate_host_observations()
     logger = setup_logging()
@@ -1878,6 +2125,7 @@ def run(
             "google_places_budget": config.GOOGLE_PLACES_REQUEST_BUDGET,
             "brandfetch_budget": config.BRANDFETCH_REQUEST_BUDGET,
             "hunter_budget": config.HUNTER_REQUEST_BUDGET,
+            "replay_snapshot": str(config.REPLAY_SNAPSHOT_INPUT or ""),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1886,6 +2134,14 @@ def run(
     results_by_index: dict[int, dict] = {}
     start_index = 0
     if progress:
+        # Keep interrupted runs portable as well: the snapshot is checkpointed
+        # beside the output and merged only after the matching progress
+        # signature has been accepted.
+        if not config.REPLAY_SNAPSHOT_INPUT and config.REPLAY_SNAPSHOT_FILE.exists():
+            replay_snapshot.load(
+                config.REPLAY_SNAPSHOT_FILE,
+                max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES,
+            )
         results_so_far = progress.get("results_so_far", [])
         for offset, row in enumerate(results_so_far):
             idx = int(row.get("__index", offset))
@@ -1919,8 +2175,15 @@ def run(
                 row["__index"] = idx
                 results_by_index[idx] = row
                 checkpoint.save_result(input_file, idx, row, run_signature)
+                if (
+                    len(results_by_index)
+                    % config.REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL
+                    == 0
+                ):
+                    replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
                 logger.info("Completed %s/%s: %s", len(results_by_index), len(company_records), row["company"])
     except KeyboardInterrupt:
+        replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
         logger.warning("Interrupted. Progress checkpoint was saved.")
         raise
 
@@ -1945,6 +2208,12 @@ def parse_args() -> argparse.Namespace:
         help="Persistent official-site page cache mode",
     )
     parser.add_argument("--rerank-cache", action="store_true", help="Offline replay: do not make search or crawl requests")
+    parser.add_argument(
+        "--replay-snapshot",
+        type=Path,
+        default=None,
+        help="Portable replay_snapshot.json.gz created by an earlier run",
+    )
     parser.add_argument("--brightdata-budget", type=int, default=config.BRIGHTDATA_REQUEST_BUDGET, help="Maximum paid Bright Data HTTP requests for this run")
     parser.add_argument("--google-places-budget", type=int, default=config.GOOGLE_PLACES_REQUEST_BUDGET, help="Maximum paid Google Places requests for this run")
     return parser.parse_args()
@@ -1956,6 +2225,7 @@ if __name__ == "__main__":
     config.CRAWL_CACHE_MODE = "replay" if args.rerank_cache else args.crawl_cache
     config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)
     config.GOOGLE_PLACES_REQUEST_BUDGET = max(0, args.google_places_budget)
+    config.REPLAY_SNAPSHOT_INPUT = args.replay_snapshot
     if args.rerank_cache:
         config.MIN_DELAY_SEC = 0
         config.MAX_DELAY_SEC = 0

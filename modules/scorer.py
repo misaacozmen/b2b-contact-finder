@@ -197,6 +197,28 @@ def legal_name_phrase_match(company_name: str, text: str) -> bool:
     return any(haystack_tokens[index:index + width] == needle for index in range(len(haystack_tokens) - width + 1))
 
 
+def legal_name_full_phrase_match(company_name: str, text: str) -> bool:
+    """Require every meaningful legal-name token to appear contiguously.
+
+    This stricter companion is only a ranking signal. It distinguishes a full
+    first-party legal title from a page that repeats a generic name prefix.
+    """
+    needle = legal_identity_tokens(company_name)
+    if not needle:
+        return False
+    ignored = {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
+    ignored.update({"ve", "and", "sirket", "sirketi"})
+    haystack = [
+        token for token in _raw_company_tokens(text)
+        if token not in ignored and len(token) > 1
+    ]
+    width = len(needle)
+    return any(
+        haystack[index:index + width] == needle
+        for index in range(len(haystack) - width + 1)
+    )
+
+
 def ownership_statement_match(company_name: str, text: str) -> bool:
     """Detect an explicit legal-name/brand ownership statement on the page."""
     tokens = legal_identity_tokens(company_name)

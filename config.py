@@ -28,6 +28,19 @@ EMAIL_CACHE_DIR = STATE_DIR / "email_cache"
 EVIDENCE_FILE = OUTPUT_DIR / "evidence.jsonl"
 ENTITY_RELATIONSHIPS_FILE = OUTPUT_DIR / "entity_relationships.jsonl"
 TELEMETRY_FILE = OUTPUT_DIR / "telemetry.json"
+DISCOVERY_COVERAGE_FILE = OUTPUT_DIR / "discovery_coverage.json"
+REPLAY_SNAPSHOT_FILE = OUTPUT_DIR / "replay_snapshot.json.gz"
+REPLAY_SNAPSHOT_INPUT = (
+    Path(os.getenv("REPLAY_SNAPSHOT_INPUT", "")).expanduser()
+    if os.getenv("REPLAY_SNAPSHOT_INPUT", "").strip()
+    else None
+)
+REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES = int(
+    os.getenv("REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES", str(256 * 1024 * 1024))
+)
+REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL = max(
+    1, int(os.getenv("REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL", "5"))
+)
 
 # CLI overrides these values for normal runs.  "off" as the import-time
 # default keeps library/unit-test calls isolated from persistent state.
@@ -69,6 +82,9 @@ MAX_ADAPTIVE_SEARCH_QUERIES = int(os.getenv("MAX_ADAPTIVE_SEARCH_QUERIES", "4"))
 # allowance for evidence-driven expansion instead of spending every request on
 # static primary templates before we know whether the candidate set is weak.
 PAID_SEARCH_ADAPTIVE_RESERVE = int(os.getenv("PAID_SEARCH_ADAPTIVE_RESERVE", "3"))
+DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY = max(
+    1, int(os.getenv("DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY", "3"))
+)
 MAX_SEARCH_BRIDGE_FETCHES = int(os.getenv("MAX_SEARCH_BRIDGE_FETCHES", "2"))
 PROFILE_BRIDGE_BLOCKED_DOMAINS = [
     "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
@@ -108,6 +124,10 @@ HIGH_CONFIDENCE_SCORE = 90
 MEDIUM_CONFIDENCE_SCORE = 75
 REVIEW_SCORE = 60
 SAFE_OK_MIN_SCORE = 85
+PUBLICATION_POLICY_MODE = os.getenv("PUBLICATION_POLICY_MODE", "enforce_downgrade_only")
+PUBLICATION_POLICY_MIN_SAFETY_SCORE = int(
+    os.getenv("PUBLICATION_POLICY_MIN_SAFETY_SCORE", "75")
+)
 MAX_CANDIDATE_EVALUATIONS = 8
 MAX_CANDIDATE_SCORE_GAP = 24
 AMBIGUOUS_CANDIDATE_MARGIN = int(os.getenv("AMBIGUOUS_CANDIDATE_MARGIN", "5"))
@@ -121,7 +141,13 @@ TARGET_COUNTRY_OFFICIAL_QUERY_BONUS = 10
 METADATA_SEARCH_CONTEXT_BONUS = 8
 
 # B2B-oriented mailboxes are more actionable than a generic info inbox.
-EMAIL_PRIORITY_PREFIXES = ["sales", "export", "marketing", "office", "info"]
+EMAIL_PRIORITY_PREFIXES = ["sales", "export", "office", "info", "marketing"]
+MAX_EMAIL_CANDIDATE_VERIFICATIONS = int(os.getenv("MAX_EMAIL_CANDIDATE_VERIFICATIONS", "3"))
+BLOCKED_EMAIL_LOCAL_PREFIXES = {
+    "privacy", "dataprotection", "data-protection", "dpo", "kvkk",
+    "webmaster", "postmaster", "abuse", "noreply", "no-reply",
+    "donotreply", "do-not-reply", "global", "globalinfo",
+}
 CONTACT_PAGE_PATHS = [
     "/contact", "/contact/", "/contacts", "/iletisim", "/kontakt",
     "/contact-us", "/contact-us/", "/about/contact",
@@ -144,16 +170,22 @@ MAX_FIRST_PARTY_CONTACT_ALIAS_CANDIDATES = int(
 )
 IDENTITY_PAGE_PATHS = [
     "/about", "/about-us", "/hakkimizda", "/kurumsal",
+    "/company-information", "/sirket-bilgileri", "/ticari-bilgiler", "/imprint",
     "/kvkk", "/kvkk-aydinlatma-metni", "/gizlilik-politikasi",
     "/privacy", "/privacy-policy", "/legal", "/legal-notice",
+    "/terms", "/terms-of-use", "/kullanim-kosullari",
+    "/locations", "/lokasyonlar", "/subeler", "/ofisler",
+    "/distributors", "/distributorler", "/bayiler",
 ]
 MAX_SITEMAPS = 4
 MAX_SITEMAP_URLS = 2500
 MAX_DOCUMENT_LINKS = 3
+MAX_STATIC_RECOVERY_PAGES = int(os.getenv("MAX_STATIC_RECOVERY_PAGES", "3"))
 REQUEST_TIMEOUT_SEC = 10
 MAX_HTTP_REDIRECTS = 5
 MAX_RETRIES = 2
 RETRY_BACKOFF_BASE_SEC = 2.0
+MAX_RETRY_AFTER_SEC = int(os.getenv("MAX_RETRY_AFTER_SEC", "30"))
 
 # A host reused by several companies is not automatically a directory (parent
 # groups can legitimately host multiple brands).  Reuse becomes a discovery-
@@ -164,6 +196,10 @@ SHARED_CANDIDATE_HOST_MIN_COMPANIES = int(
 ENABLE_JS_FALLBACK = os.getenv("ENABLE_JS_FALLBACK", "1") == "1"
 ENABLE_JS_PROFILE_FALLBACK = os.getenv("ENABLE_JS_PROFILE_FALLBACK", "1") == "1"
 JS_RENDER_TIMEOUT_SEC = int(os.getenv("JS_RENDER_TIMEOUT_SEC", "20"))
+ENABLE_PDF_OCR = os.getenv("ENABLE_PDF_OCR", "1") == "1"
+PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "3"))
+PDF_OCR_DPI = int(os.getenv("PDF_OCR_DPI", "150"))
+PDF_MIN_TEXT_CHARS = int(os.getenv("PDF_MIN_TEXT_CHARS", "40"))
 
 PHONE_DEFAULT_COUNTRY = "TR"
 PHONE_OUTPUT_FORMAT = "national"
@@ -420,6 +456,8 @@ CONTEXT_VALIDATION_WORDS = [
     "mineraller",
     "plastik",
     "plastic",
+    "otomotiv",
+    "automotive",
 ]
 
 METADATA_CONTEXTS = {
@@ -486,6 +524,16 @@ METADATA_CONTEXTS = {
     "laboratuvar": {
         "query_term": "laboratuvar",
         "aliases": ["laboratuvar", "laboratory", "laboratory services"],
+    },
+    "otomotiv": {
+        "query_term": "otomotiv",
+        "aliases": [
+            "otomotiv", "automotive", "automotive aftermarket", "aftermarket",
+            "auto parts", "vehicle parts", "yedek parca", "spare parts",
+            "driveshaft", "drive shaft", "suspension", "suspansiyon",
+            "egzoz", "exhaust", "friction", "gasket", "connecting rod",
+            "motor oil", "lubricant",
+        ],
     },
 }
 

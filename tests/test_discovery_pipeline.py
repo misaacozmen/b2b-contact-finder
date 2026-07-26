@@ -125,7 +125,7 @@ class DiscoveryPipelineTests(unittest.TestCase):
         ):
             self.assertEqual(search._safe_search_text("Example official website"), [])
 
-    def test_search_query_and_page_identity_do_not_soften_metadata_conflict(self) -> None:
+    def test_search_query_and_page_identity_treat_missing_listing_context_as_neutral(self) -> None:
         evaluation = {
             "context_failed": True,
             "reasons": [
@@ -135,7 +135,7 @@ class DiscoveryPipelineTests(unittest.TestCase):
             "has_contact": False,
             "candidate": {"query": "explosion Turkiye official website", "_official_query_evidence": 1},
         }
-        self.assertTrue(main._is_hard_context_failure(evaluation))
+        self.assertFalse(main._is_hard_context_failure(evaluation))
 
     def test_authoritative_unreachable_website_is_publishable_for_review(self) -> None:
         candidates = [
@@ -577,7 +577,7 @@ class DiscoveryPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["pages"]), 1)
         self.assertEqual(render.call_args_list[0].args[0], "https://example.com")
 
-    def test_context_mismatch_rejects_ambiguous_non_exact_brand_domain(self) -> None:
+    def test_missing_listing_context_does_not_reject_non_exact_brand_domain(self) -> None:
         evaluation = {
             "context_failed": True,
             "reasons": ["metadata_context_missing:0/1"],
@@ -585,8 +585,8 @@ class DiscoveryPipelineTests(unittest.TestCase):
             "candidate": {"query": "real focus resmi sitesi"},
             "crawl_result": {"url": "https://realfocusmedia.net"},
         }
-        self.assertTrue(main._unsafe_context_identity("REAL FOCUS", evaluation))
-        self.assertIn("unsafe_context_identity", evaluation["reasons"])
+        self.assertFalse(main._unsafe_context_identity("REAL FOCUS", evaluation))
+        self.assertNotIn("unsafe_context_identity", evaluation["reasons"])
 
     def test_context_mismatch_keeps_exact_multi_token_brand_for_review(self) -> None:
         evaluation = {

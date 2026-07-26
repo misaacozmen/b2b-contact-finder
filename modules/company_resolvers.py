@@ -8,6 +8,7 @@ before anything can be published.
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import quote
 
 import requests
@@ -19,6 +20,16 @@ from modules import cache_store, runtime, scorer
 LOGGER = logging.getLogger("contact_finder")
 BRANDFETCH_SEARCH_URL = "https://api.brandfetch.io/v2/search/{company}"
 HUNTER_DOMAIN_FINDER_URL = "https://api.hunter.io/v2/domain-finder"
+
+
+def _safe_request_error(exc: Exception) -> str:
+    """Prevent credentials embedded in provider URLs from reaching run logs."""
+    return re.sub(
+        r"([?&](?:api_key|access_token|token)=)[^&\s]+",
+        r"\1[REDACTED]",
+        str(exc),
+        flags=re.IGNORECASE,
+    )
 
 
 def _cached(namespace: str, key: str):
@@ -149,7 +160,11 @@ def hunter_domains(company: str) -> list[dict]:
         return _clean_results(items, "hunter_domain_finder")
     except (requests.RequestException, ValueError, TypeError) as exc:
         runtime.record("resolver.hunter.error")
-        LOGGER.warning("Hunter Domain Finder failed for %s: %s", company, exc)
+        LOGGER.warning(
+            "Hunter Domain Finder failed for %s: %s",
+            company,
+            _safe_request_error(exc),
+        )
         return []
 
 

@@ -1,0 +1,4 @@
+﻿INPUT=C:\Users\ISAAC\Documents\Python b2b\outputs\maktek_20260720_183017\maktek_2026_turkiye_input.xlsx
+OUTPUT=C:\Users\ISAAC\Documents\Python b2b\outputs\maktek_20260720_183017\system_run_20260720_183841
+MODES=search:use,crawl:use,brightdata_budget:500,places_budget:100,brandfetch:True,hunter:True
+

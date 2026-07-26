@@ -47,9 +47,9 @@ class IdentityArchitectureTests(unittest.TestCase):
         self.assertEqual(set(assessment["support_keys"]), {"domain_identity", "first_party_identity"})
         self.assertTrue(assessment["publishable"])
 
-    def test_medium_name_hit_cannot_override_missing_business_context(self):
+    def test_missing_discovery_business_context_is_neutral(self):
         candidate = {
-            "url": "https://example.com.tr", "reason": "domain_hits:1/2",
+            "url": "https://different.com.tr", "reason": "search_text_identity:1/2",
             "role": "company_candidate",
         }
         assessment = identity.assess(
@@ -57,7 +57,8 @@ class IdentityArchitectureTests(unittest.TestCase):
             ["page_identity_medium:1/2", "metadata_context_missing:0/1", "country_identity_tr_tld"],
         )
         self.assertFalse(assessment["publishable"])
-        self.assertIn("business_context_unmatched", {item["kind"] for item in assessment["conflicts"]})
+        self.assertNotIn("business_context_unmatched", {item["kind"] for item in assessment["conflicts"]})
+        self.assertIn("business_context_not_observed", {item["kind"] for item in assessment["neutral"]})
 
     def test_structured_owner_conflict_requires_explicit_relationship(self):
         candidate = {

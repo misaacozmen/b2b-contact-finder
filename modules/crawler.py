@@ -10,7 +10,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import requests
 
 import config
-from modules import cache_store, network_guard, runtime
+from modules import cache_store, network_guard, runtime, site_mapper
 from modules.extractor import extract_contact_page_links, extract_contact_records, extract_emails, extract_phones
 from modules import scorer
 from modules.utils import retry_with_backoff
@@ -19,6 +19,8 @@ from modules.utils import retry_with_backoff
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": config.USER_AGENT, "Accept-Language": "tr,en;q=0.8"})
 _FETCH_STATE = threading.local()
+_RENDER_STATE = threading.local()
+_DOCUMENT_STATE = threading.local()
 _SESSION_LOCK = threading.Lock()
 
 
@@ -152,11 +154,33 @@ def _looks_like_security_interstitial(html: str) -> bool:
         "deceptive site ahead",
         "this site may contain malicious software",
         "privacy error",
+        "just a moment", "cloudflare ray id", "cf-chl-", "attention required",
     )
     return any(marker in text for marker in markers)
 
 
+def _render_request_policy(
+    original_host: str, request_url: str, resource_type: str,
+) -> tuple[bool, str]:
+    """Allow passive assets, but keep rendered active data on the official site."""
+    allowed, reason = network_guard.validate_public_http_url(request_url)
+    if not allowed:
+        return False, f"unsafe_target:{reason}"
+    request_host = urlparse(request_url).netloc.casefold()
+    if resource_type in {"document", "xhr", "fetch", "eventsource"} and not (
+        request_host
+        and scorer.same_registrable_domain(original_host.casefold(), request_host)
+    ):
+        return False, "cross_site_active_data"
+    return True, "allowed"
+
+
 def _try_render(url: str) -> tuple[str | None, str | None]:
+    _RENDER_STATE.last = {
+        "retrieval_method": "browser_render",
+        "blocked_cross_site_active_requests": 0,
+        "blocked_unsafe_requests": 0,
+    }
     if not config.ENABLE_JS_FALLBACK:
         return None, "js_fallback_disabled"
     try:
@@ -172,23 +196,30 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
                     user_agent=config.USER_AGENT,
                     locale="tr-TR",
                     ignore_https_errors=True,
+                    service_workers="block",
                 )
                 original_host = urlparse(url).netloc.casefold()
 
                 def guard_route(route) -> None:
                     request_url = route.request.url
-                    allowed, _ = network_guard.validate_public_http_url(request_url)
-                    request_host = urlparse(request_url).netloc.casefold()
-                    same_site_navigation = (
-                        route.request.resource_type != "document"
-                        or scorer.same_registrable_domain(original_host, request_host)
+                    allowed, reason = _render_request_policy(
+                        original_host, request_url, route.request.resource_type,
                     )
-                    route.continue_() if allowed and same_site_navigation else route.abort()
+                    if not allowed and reason.startswith("unsafe_target:"):
+                        _RENDER_STATE.last["blocked_unsafe_requests"] += 1
+                        route.abort()
+                    elif not allowed:
+                        _RENDER_STATE.last["blocked_cross_site_active_requests"] += 1
+                        route.abort()
+                    else:
+                        route.continue_()
 
                 context.route("**/*", guard_route)
                 page = context.new_page()
                 page.goto(url, wait_until="domcontentloaded", timeout=config.JS_RENDER_TIMEOUT_SEC * 1000)
-                return page.content(), None
+                rendered = page.content()
+                _RENDER_STATE.last["final_url"] = page.url
+                return rendered, None
             finally:
                 browser.close()
     except Exception as exc:
@@ -197,7 +228,8 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
 
 def _renderable_fetch_error(error: str | None) -> bool:
     return bool(error and any(marker in error for marker in (
-        "http_401", "http_403", "http_429", "ssl_error", "connection_error", "security_interstitial",
+        "http_401", "http_403", "http_408", "http_429", "timeout",
+        "ssl_error", "connection_error", "security_interstitial",
     )))
 
 
@@ -208,7 +240,11 @@ def _contactish_url(url: str) -> bool:
         "hakkımızda", "kurumsal", "corporate", "kvkk", "legal", "privacy",
         "gizlilik", "office", "sube", "şube", "whatsapp", "whats-app",
     )
-    return any(keyword in value for keyword in keywords) or value.endswith((".vcf", ".vcard"))
+    smart_map_keywords = (
+        "terms", "kullanim", "location", "lokasyon", "distributor",
+        "bayi", "dealer", "catalog", "catalogue", "katalog", "brochure", "brosur",
+    )
+    return any(keyword in value for keyword in (*keywords, *smart_map_keywords)) or value.endswith((".vcf", ".vcard"))
 
 
 def _robots_and_sitemaps(root: str) -> tuple[robotparser.RobotFileParser | None, list[str]]:
@@ -245,13 +281,16 @@ def _sitemap_contact_urls(root: str, sitemap_urls: list[str]) -> list[str]:
             continue
         try:
             xml_root = ET.fromstring(content)
+            locations = [
+                (node.text or "").strip()
+                for node in xml_root.iter()
+                if node.tag.casefold().endswith("loc") and (node.text or "").strip()
+            ]
         except ET.ParseError:
-            continue
-        locations = [
-            (node.text or "").strip()
-            for node in xml_root.iter()
-            if node.tag.casefold().endswith("loc") and (node.text or "").strip()
-        ]
+            # Some otherwise useful sitemaps are served as loose text or have a
+            # broken namespace/header. URL extraction remains same-domain and
+            # contact/legal-marker restricted below.
+            locations = re.findall(r"https?://[^\s<>'\"]+", content)
         for location in locations:
             examined += 1
             if examined > config.MAX_SITEMAP_URLS:
@@ -262,7 +301,9 @@ def _sitemap_contact_urls(root: str, sitemap_urls: list[str]) -> list[str]:
                 pending.append(location)
             elif _contactish_url(location):
                 found.append(location)
-    return list(dict.fromkeys(found))
+    result = list(dict.fromkeys(found))
+    runtime.record("recovery.sitemap_urls_found", len(result))
+    return result
 
 
 def _document_links(html: str, base_url: str) -> list[str]:
@@ -282,18 +323,63 @@ def _document_links(html: str, base_url: str) -> list[str]:
     return list(dict.fromkeys(urls))[: config.MAX_DOCUMENT_LINKS]
 
 
+def _try_ocr_pdf(content: bytes) -> tuple[str | None, str | None]:
+    """OCR a small bounded prefix when optional local dependencies exist."""
+    if not config.ENABLE_PDF_OCR:
+        return None, "pdf_ocr_disabled"
+    runtime.record("recovery.pdf_ocr_attempts")
+    try:
+        import fitz
+        import pytesseract
+        from PIL import Image
+    except ImportError:
+        return None, "pdf_ocr_dependencies_unavailable"
+    try:
+        document = fitz.open(stream=content, filetype="pdf")
+        texts = []
+        scale = max(config.PDF_OCR_DPI, 72) / 72
+        matrix = fitz.Matrix(scale, scale)
+        page_limit = min(document.page_count, max(config.PDF_OCR_MAX_PAGES, 1))
+        for page_number in range(page_limit):
+            page = document.load_page(page_number)
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            image = Image.open(BytesIO(pixmap.tobytes("png")))
+            texts.append(pytesseract.image_to_string(image, lang="tur+eng"))
+        text = "\n".join(value for value in texts if value).strip()
+        if text:
+            runtime.record("recovery.pdf_ocr_successes")
+            return text, None
+        return None, "pdf_ocr_no_text"
+    except Exception as exc:
+        return None, f"pdf_ocr_failed:{exc.__class__.__name__.lower()}"
+
+
 def _try_extract_pdf(url: str) -> tuple[str | None, str | None]:
+    _DOCUMENT_STATE.last = {"retrieval_method": "pdf_text", "source_url": url}
+    runtime.record("recovery.pdf_attempts")
     try:
         response = _request_with_safe_redirects(url, verify=True)
         if len(response.content) > 8 * 1024 * 1024:
             return None, "pdf_too_large"
         from pypdf import PdfReader
         reader = PdfReader(BytesIO(response.content))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages[:20])
-        return text or None, None if text else "pdf_no_text"
+        text = "\n".join((page.extract_text() or "") for page in reader.pages[:20]).strip()
+        if len(text) >= config.PDF_MIN_TEXT_CHARS:
+            runtime.record("recovery.pdf_text_successes")
+            return text, None
+        ocr_text, ocr_error = _try_ocr_pdf(response.content)
+        if ocr_text:
+            _DOCUMENT_STATE.last["retrieval_method"] = "pdf_ocr"
+            return "\n".join(value for value in (text, ocr_text) if value), None
+        if text:
+            runtime.record("recovery.pdf_short_text_successes")
+            return text, None
+        runtime.record("recovery.pdf_failures")
+        return None, ocr_error or "pdf_no_text"
     except ImportError:
         return None, "pypdf_not_installed"
     except Exception as exc:
+        runtime.record("recovery.pdf_failures")
         return None, f"pdf_failed:{exc.__class__.__name__.lower()}"
 
 
@@ -319,12 +405,17 @@ def _fetch_site_live(url: str, contact_seed_urls: list[str] | None = None, profi
     parsed = urlparse(base_url)
     root = f"{parsed.scheme}://{parsed.netloc}"
     pages: OrderedDict[str, str] = OrderedDict()
+    page_provenance: dict[str, dict] = {}
     errors: list[str] = []
     tls_insecure = False
+    root_retrieval_method = "http"
+    recovery_trace: list[dict] = []
 
     html, error = _try_fetch(root)
     root_meta = getattr(_FETCH_STATE, "last", {})
     tls_insecure = tls_insecure or bool(root_meta.get("tls_insecure"))
+    if html and root_meta.get("tls_insecure"):
+        root_retrieval_method = "http_tls_unverified"
     final_root_url = root_meta.get("final_url", root)
     if html and scorer.same_registrable_domain(urlparse(final_root_url).netloc, parsed.netloc):
         final_parsed = urlparse(final_root_url)
@@ -341,72 +432,145 @@ def _fetch_site_live(url: str, contact_seed_urls: list[str] | None = None, profi
         if http_html:
             root = http_root
             html = http_html
+            root_retrieval_method = (
+                "http_tls_unverified" if http_meta.get("tls_insecure") else "http"
+            )
             error = None
         elif http_error:
             error = f"https:{error}; http:{http_error}"
-    if not html and _renderable_fetch_error(error):
+    # Static recovery precedes browser rendering. A WAF may block only the
+    # homepage while sitemap-listed legal/contact pages remain reachable.
+    if not html:
+        runtime.record("recovery.homepage_failures")
+        _, recovery_sitemaps = _robots_and_sitemaps(root)
+        sitemap_pages = _sitemap_contact_urls(root, recovery_sitemaps)
+        recovery_urls = site_mapper.balanced_urls(
+            [{"url": value, "kind": site_mapper.classify(value)} for value in sitemap_pages],
+            [
+                *(urljoin(root, path) for path in config.IDENTITY_PAGE_PATHS),
+                *(urljoin(root, path) for path in config.CONTACT_PAGE_PATHS),
+            ],
+            config.MAX_STATIC_RECOVERY_PAGES,
+        )
+        recovery_trace.append({
+            "stage": "static_pages",
+            "candidates": len(recovery_urls),
+            "sitemap_candidates": len(sitemap_pages),
+        })
+        for recovery_url in recovery_urls:
+            runtime.record("recovery.static_attempts")
+            recovery_html, recovery_error = (
+                _try_extract_pdf(recovery_url)
+                if recovery_url.casefold().endswith(".pdf")
+                else _try_fetch(recovery_url)
+            )
+            if recovery_html and not _looks_like_security_interstitial(recovery_html):
+                runtime.record("recovery.static_successes")
+                pages[recovery_url] = recovery_html
+                page_provenance[recovery_url] = dict(
+                    _DOCUMENT_STATE.last
+                    if recovery_url.casefold().endswith(".pdf")
+                    else {
+                        "retrieval_method": "http_tls_unverified"
+                        if getattr(_FETCH_STATE, "last", {}).get("tls_insecure")
+                        else "http"
+                    }
+                )
+            elif recovery_error:
+                errors.append(f"{recovery_url}:{recovery_error}")
+    if not html and not pages and _renderable_fetch_error(error):
+        runtime.record("recovery.browser_attempts")
         tls_insecure = tls_insecure or bool(error and "ssl_error" in error)
         rendered_html, render_error = _try_render(base_url)
         if rendered_html:
+            runtime.record("recovery.browser_successes")
             root = base_url
             html = rendered_html
+            root_retrieval_method = "browser_render"
             error = None
         elif render_error and render_error != "js_fallback_disabled":
             errors.append(f"{base_url}:{render_error}")
     if html and _looks_like_js_shell(html):
+        runtime.record("recovery.browser_attempts")
         rendered_html, render_error = _try_render(root)
         if rendered_html:
+            runtime.record("recovery.browser_successes")
             html = rendered_html
+            root_retrieval_method = "browser_render"
         elif render_error and render_error != "js_fallback_disabled":
             errors.append(f"{root}:{render_error}")
     if html:
         pages[root] = html
+        page_provenance[root] = (
+            dict(getattr(_RENDER_STATE, "last", {}))
+            if root_retrieval_method == "browser_render"
+            else {"retrieval_method": root_retrieval_method}
+        )
     elif error:
         errors.append(f"{root}:{error}")
 
     if profile == "identity":
-        from bs4 import BeautifulSoup
-
-        identity_urls: list[str] = []
-        if html:
-            for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
-                linked = urljoin(root, link.get("href", ""))
-                if not scorer.same_registrable_domain(linked, root):
-                    continue
-                label = scorer.normalize_text(f"{linked} {link.get_text(' ', strip=True)}")
-                if any(marker in label for marker in (
-                    "about", "about us", "hakkimizda", "kurumsal", "company", "corporate",
-                    "kvkk", "aydinlatma", "gizlilik", "privacy", "legal", "legal notice",
-                )):
-                    identity_urls.append(linked)
-        identity_urls.extend(urljoin(root, path) for path in config.IDENTITY_PAGE_PATHS)
-        for identity_url in list(dict.fromkeys(identity_urls))[: config.MAX_IDENTITY_PAGES]:
+        recovered_discovery = []
+        for page_url, page_html in pages.items():
+            recovered_discovery.extend(
+                site_mapper.discover(page_html, page_url, include_documents=False)
+            )
+        identity_urls = site_mapper.balanced_urls(
+            [
+                *site_mapper.discover(html or "", root, include_documents=False),
+                *recovered_discovery,
+            ],
+            [urljoin(root, path) for path in config.IDENTITY_PAGE_PATHS],
+            config.MAX_IDENTITY_PAGES,
+        )
+        for identity_url in identity_urls:
             if identity_url in pages:
                 continue
             identity_html, identity_error = _try_fetch(identity_url)
             identity_meta = getattr(_FETCH_STATE, "last", {})
             tls_insecure = tls_insecure or bool(identity_meta.get("tls_insecure"))
             if identity_html:
-                pages[identity_meta.get("final_url", identity_url)] = identity_html
+                final_identity_url = identity_meta.get("final_url", identity_url)
+                pages[final_identity_url] = identity_html
+                page_provenance[final_identity_url] = {
+                    "retrieval_method": "http_tls_unverified"
+                    if identity_meta.get("tls_insecure") else "http",
+                }
             elif identity_error:
                 errors.append(f"{identity_url}:{identity_error}")
         return {
             "url": root,
-            "pages": [{"url": page_url, "html": page_html} for page_url, page_html in pages.items()],
+            "pages": [
+                {"url": page_url, "html": page_html, **page_provenance.get(
+                    page_url, {"retrieval_method": "unknown"},
+                )}
+                for page_url, page_html in pages.items()
+            ],
             "error": "; ".join(errors[:5]) if not pages and errors else "",
             "tls_insecure": tls_insecure,
             "redirect_target": "",
             "crawl_profile": "identity",
+            "recovery_trace": recovery_trace,
         }
 
     robots_parser, sitemap_urls = _robots_and_sitemaps(root)
     contact_urls = _safe_contact_seed_urls(root, contact_seed_urls)
     discovered_contact_urls: set[str] = set()
-    if html:
+    discovery_pages = [(root, html)] if html else []
+    discovery_pages.extend((page_url, page_html) for page_url, page_html in pages.items())
+    for discovery_url, discovery_html in discovery_pages:
         discovered_contact_urls.update(extract_contact_page_links(
-            html, root, limit=config.MAX_CONTACT_PAGES, allow_official_subdomains=True
+            discovery_html,
+            discovery_url,
+            limit=config.MAX_CONTACT_PAGES,
+            allow_official_subdomains=True,
         ))
-        contact_urls.extend(discovered_contact_urls)
+        contact_urls.extend(site_mapper.balanced_urls(
+            site_mapper.discover(discovery_html, discovery_url),
+            [],
+            config.MAX_CONTACT_PAGES,
+        ))
+    contact_urls.extend(discovered_contact_urls)
     contact_urls.extend(_sitemap_contact_urls(root, sitemap_urls))
     contact_urls.extend(urljoin(root, path) for path in config.CONTACT_PAGE_PATHS)
     # Use a queue so an about/corporate page can reveal a contact page that was
@@ -429,6 +593,7 @@ def _fetch_site_live(url: str, contact_seed_urls: list[str] | None = None, profi
             break
         contact_attempts += 1
         runtime.record("crawler.contact_url_attempts")
+        contact_retrieval_method = "http"
         contact_html, contact_error = _try_fetch(contact_url)
         contact_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(contact_meta.get("tls_insecure"))
@@ -443,33 +608,53 @@ def _fetch_site_live(url: str, contact_seed_urls: list[str] | None = None, profi
                     # The URL was linked by the official site. Preserve only
                     # that auditable URL; never crawl the external page body.
                     contact_html = f'<a href="{redirect_url}">WhatsApp</a>'
+                    contact_retrieval_method = "official_link_reference"
                     contact_error = None
         if not contact_html and _renderable_fetch_error(contact_error) and (
             contact_url in discovered_contact_urls or contact_render_attempts < 2
         ):
+            runtime.record("recovery.browser_attempts")
             contact_render_attempts += 1
             rendered_html, render_error = _try_render(contact_url)
             if rendered_html:
+                runtime.record("recovery.browser_successes")
                 contact_html = rendered_html
+                contact_retrieval_method = "browser_render"
                 contact_error = None
                 contact_render_attempts = 2
             elif render_error and render_error != "js_fallback_disabled":
                 errors.append(f"{contact_url}:{render_error}")
         if contact_html and _contact_page_needs_render(contact_html) and contact_render_attempts < 2:
+            runtime.record("recovery.browser_attempts")
             contact_render_attempts += 1
             rendered_html, render_error = _try_render(contact_url)
             if rendered_html:
+                runtime.record("recovery.browser_successes")
                 contact_html = rendered_html
+                contact_retrieval_method = "browser_render"
             elif render_error and render_error != "js_fallback_disabled":
                 errors.append(f"{contact_url}:{render_error}")
         if contact_html:
             final_contact_url = contact_meta.get("final_url", contact_url)
             pages[final_contact_url] = contact_html
+            if contact_retrieval_method == "browser_render":
+                page_provenance[final_contact_url] = dict(getattr(_RENDER_STATE, "last", {}))
+            else:
+                page_provenance[final_contact_url] = {
+                    "retrieval_method": (
+                        "http_tls_unverified"
+                        if contact_retrieval_method == "http" and contact_meta.get("tls_insecure")
+                        else contact_retrieval_method
+                    ),
+                }
             nested_links = extract_contact_page_links(
                 contact_html,
                 final_contact_url,
                 limit=config.MAX_CONTACT_PAGES,
                 allow_official_subdomains=True,
+            )
+            nested_links.extend(
+                item["url"] for item in site_mapper.discover(contact_html, final_contact_url)
             )
             for nested_url in nested_links:
                 if nested_url not in queued and nested_url not in pages:
@@ -507,6 +692,9 @@ def _fetch_site_live(url: str, contact_seed_urls: list[str] | None = None, profi
             document_text, document_error = _try_extract_pdf(document_url)
         if document_text:
             pages[document_url] = document_text
+            page_provenance[document_url] = dict(getattr(_DOCUMENT_STATE, "last", {
+                "retrieval_method": "document_unknown",
+            }))
         elif document_error:
             errors.append(f"{document_url}:{document_error}")
 
@@ -518,11 +706,17 @@ def _fetch_site_live(url: str, contact_seed_urls: list[str] | None = None, profi
             break
     return {
         "url": root,
-        "pages": [{"url": page_url, "html": page_html} for page_url, page_html in pages.items()],
+        "pages": [
+            {"url": page_url, "html": page_html, **page_provenance.get(
+                page_url, {"retrieval_method": "unknown"},
+            )}
+            for page_url, page_html in pages.items()
+        ],
         "error": "; ".join(errors[:5]) if not pages and errors else "",
         "tls_insecure": tls_insecure,
         "redirect_target": redirect_target,
         "crawl_profile": "full",
+        "recovery_trace": recovery_trace,
     }
 
 
@@ -580,9 +774,11 @@ def fetch_site(url: str, contact_seed_urls: list[str] | None = None, profile: st
                 page for page in cached_pages
                 if not _looks_like_security_interstitial(page.get("html", ""))
             ]
+            cached["pages"] = safe_pages
+            if any(not page.get("retrieval_method") for page in safe_pages):
+                cached["provenance_status"] = "legacy_cache_unknown"
             if len(safe_pages) != len(cached_pages):
                 runtime.record("cache.site.security_interstitial_rejected", len(cached_pages) - len(safe_pages))
-                cached["pages"] = safe_pages
                 if not safe_pages:
                     cached["error"] = "cached_security_interstitial"
             cached["cache_status"] = "hit"

@@ -220,10 +220,32 @@ class PipelineImprovementTests(unittest.TestCase):
                 "phone_source_url": "https://example.com/contact",
                 "status": "OK_HIGH_CONFIDENCE",
                 "__candidates": [{"_evidence_queries": {"q1", "q2"}}],
+                "__evaluation": {
+                    "email": "info@example.com",
+                    "email_source_url": "https://example.com/contact",
+                    "email_verification": "verified",
+                    "email_verification_reason": "mx_present",
+                    "phone": "02125550000",
+                    "phone_source_url": "https://example.com/contact",
+                    "phone_label": "headquarters",
+                    "structured_identity": {"claims": [{
+                        "field": "legal_name", "value": "Example Limited",
+                        "normalized_value": "example limited",
+                        "source_url": "https://example.com/kvkk",
+                        "source_domain": "example.com", "source_kind": "first_party",
+                        "page_scope": "legal", "method": "visible_labeled",
+                        "independence_key": "first_party_domain:example.com",
+                    }]},
+                },
             }])
             payload = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(payload["selected"]["email_source_url"], "https://example.com/contact")
         self.assertEqual(payload["candidates"][0]["_evidence_queries"], ["q1", "q2"])
+        self.assertEqual(
+            {claim["field"] for claim in payload["field_evidence"]},
+            {"legal_name", "email", "phone"},
+        )
+        self.assertTrue(all(claim["source_url"] for claim in payload["field_evidence"]))
 
     def test_output_smoke_writes_new_audit_columns_and_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

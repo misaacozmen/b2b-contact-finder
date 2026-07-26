@@ -1,0 +1,424 @@
+﻿2026-07-20 18:39:55,874 | INFO | Source profile preflight: host=maktekfuari.com status=available server_errors=0 circuit_open=False
+2026-07-20 18:39:55,880 | INFO | Processing 1: 3B DİZAYN BİLGİSAYAR MAKİNA KALIP MODEL TAS. SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 18:39:55,881 | INFO | Processing 2: 3D TEKNO MARKET ANONIM SIRKETI
+2026-07-20 18:39:55,881 | INFO | Processing 3: 5T5 MAKİNA SAN VE TİC AŞ
+2026-07-20 18:39:55,883 | INFO | Processing 1 with supplied website: 3B DİZAYN BİLGİSAYAR MAKİNA KALIP MODEL TAS. SAN. VE TİC. LTD. ŞTİ. -> https://www.topsolid.com/tr
+2026-07-20 18:39:55,886 | INFO | Processing 2 with supplied website: 3D TEKNO MARKET ANONIM SIRKETI -> https://www.3dteknomarket.com
+2026-07-20 18:39:55,889 | INFO | Processing 3 with supplied website: 5T5 MAKİNA SAN VE TİC AŞ -> https://www.5t5makina.com
+2026-07-20 18:40:04,709 | INFO | Processing 4: ABBA TEKNOLOJİ YAZILIM HİZMETLERİ SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:40:04,709 | INFO | Processing 4 with supplied website: ABBA TEKNOLOJİ YAZILIM HİZMETLERİ SANAYİ VE TİCARET LİMİTED ŞİRKETİ -> https://www.abbateknoloji.com/
+2026-07-20 18:40:04,744 | INFO | Completed 1/369: 5T5 MAKİNA SAN VE TİC AŞ
+2026-07-20 18:40:13,755 | INFO | Processing 5: ABKTEKNİK İMALAT VE MÜH ÇÖZÜMLERİ LTD.ŞTİ
+2026-07-20 18:40:13,779 | INFO | Processing 5 with supplied website: ABKTEKNİK İMALAT VE MÜH ÇÖZÜMLERİ LTD.ŞTİ -> https://www.abkteknik.com/
+2026-07-20 18:40:13,800 | INFO | Completed 2/369: 3B DİZAYN BİLGİSAYAR MAKİNA KALIP MODEL TAS. SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 18:40:16,217 | INFO | Processing 6: ABM MAKİNE SAN. VE TİC. A.Ş.
+2026-07-20 18:40:16,218 | INFO | Processing 6 with supplied website: ABM MAKİNE SAN. VE TİC. A.Ş. -> https://www.abmgrinding.com/en
+2026-07-20 18:40:16,234 | INFO | Completed 3/369: ABBA TEKNOLOJİ YAZILIM HİZMETLERİ SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:40:26,732 | INFO | Processing 7: ADDVALUE EKLEMELI IMALAT VE MAKINA ROBOT SISTEMLERI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 18:40:26,764 | INFO | Processing 7 with supplied website: ADDVALUE EKLEMELI IMALAT VE MAKINA ROBOT SISTEMLERI SANAYI VE TICARET LIMITED SIRKETI -> https://www.addvalue.com.tr
+2026-07-20 18:40:26,919 | INFO | Completed 4/369: ABM MAKİNE SAN. VE TİC. A.Ş.
+2026-07-20 18:40:29,331 | INFO | Processing 8: ADİL MAKİNA SAN.VE TİC.N ADİL ÜNAL
+2026-07-20 18:40:29,338 | INFO | Processing 8 with supplied website: ADİL MAKİNA SAN.VE TİC.N ADİL ÜNAL -> https://www.adilmakina.com.tr/
+2026-07-20 18:40:29,516 | INFO | Completed 5/369: 3D TEKNO MARKET ANONIM SIRKETI
+2026-07-20 18:40:29,611 | INFO | Processing 9: ADİL TESTERE MAKİNE A.Ş.
+2026-07-20 18:40:29,633 | INFO | Processing 9 with supplied website: ADİL TESTERE MAKİNE A.Ş. -> https://www.adiltestere.com
+2026-07-20 18:40:29,651 | INFO | Completed 6/369: ABKTEKNİK İMALAT VE MÜH ÇÖZÜMLERİ LTD.ŞTİ
+2026-07-20 18:40:32,391 | INFO | Processing 10: ADLER MAKİNA METAL İŞLEME SAN. VE TİC. A.Ş.
+2026-07-20 18:40:32,392 | INFO | Processing 10 with supplied website: ADLER MAKİNA METAL İŞLEME SAN. VE TİC. A.Ş. -> https://www.adlermetal.com
+2026-07-20 18:40:32,410 | INFO | Completed 7/369: ADDVALUE EKLEMELI IMALAT VE MAKINA ROBOT SISTEMLERI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 18:40:43,327 | INFO | Processing 11: AGP ENERJİ MÜH. İNŞ. TAAH. SAN. VE TİC. A.Ş.
+2026-07-20 18:40:43,344 | INFO | Completed 8/369: ADİL MAKİNA SAN.VE TİC.N ADİL ÜNAL
+2026-07-20 18:40:45,719 | INFO | Processing 12: AIRON ENDÜSTRİ MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:40:45,737 | INFO | Completed 9/369: ADİL TESTERE MAKİNE A.Ş.
+2026-07-20 18:41:04,065 | INFO | Processing 13: AJANS ORGANİZE KAMURAN TECİMEN
+2026-07-20 18:41:04,066 | INFO | Processing 13 with supplied website: AJANS ORGANİZE KAMURAN TECİMEN -> https://www.ajansorganize.com
+2026-07-20 18:41:04,083 | INFO | Completed 10/369: ADLER MAKİNA METAL İŞLEME SAN. VE TİC. A.Ş.
+2026-07-20 18:41:09,167 | INFO | Processing 14: AJANSMİK FUARCILIK VE MEDYA HİZMETLERİ LİMİTED ŞİRKETİ
+2026-07-20 18:41:09,168 | INFO | Processing 14 with supplied website: AJANSMİK FUARCILIK VE MEDYA HİZMETLERİ LİMİTED ŞİRKETİ -> https://ajansmik.com/
+2026-07-20 18:41:09,185 | INFO | Completed 11/369: AJANS ORGANİZE KAMURAN TECİMEN
+2026-07-20 18:41:13,391 | INFO | Processing 15: AK MAKİNA SAN VE TİC LTD ŞTİ
+2026-07-20 18:41:13,392 | INFO | Processing 15 with supplied website: AK MAKİNA SAN VE TİC LTD ŞTİ -> https://www.akmakina.com.tr/
+2026-07-20 18:41:13,409 | INFO | Completed 12/369: AJANSMİK FUARCILIK VE MEDYA HİZMETLERİ LİMİTED ŞİRKETİ
+2026-07-20 18:41:17,616 | WARNING | Search query failed; continuing with remaining queries: airon makina resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:41:40,222 | WARNING | Search query failed; continuing with remaining queries: agp enerji contact (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:41:40,253 | INFO | Processing 16: AKBAL MAKİNA END.SAN. VE DIŞ TİC.LTD.ŞTİ.
+2026-07-20 18:41:40,254 | INFO | Processing 16 with supplied website: AKBAL MAKİNA END.SAN. VE DIŞ TİC.LTD.ŞTİ. -> https://www.akbalmakina.com/
+2026-07-20 18:41:40,270 | INFO | Completed 13/369: AK MAKİNA SAN VE TİC LTD ŞTİ
+2026-07-20 18:41:51,704 | INFO | Processing 17: AKERMAK TEKNİK HIRDAVAT VE ENDÜSTRİYEL ÜRÜNLERİ SAN. VE TİC. A. Ş.
+2026-07-20 18:41:51,705 | INFO | Processing 17 with supplied website: AKERMAK TEKNİK HIRDAVAT VE ENDÜSTRİYEL ÜRÜNLERİ SAN. VE TİC. A. Ş. -> https://www.akermak.com/
+2026-07-20 18:41:51,719 | INFO | Completed 14/369: AKBAL MAKİNA END.SAN. VE DIŞ TİC.LTD.ŞTİ.
+2026-07-20 18:41:54,627 | INFO | Processing 18: AKKO MAKINA SAN. VE TIC. A.Ş.
+2026-07-20 18:41:54,628 | INFO | Processing 18 with supplied website: AKKO MAKINA SAN. VE TIC. A.Ş. -> https://www.akko.com.tr/tr
+2026-07-20 18:41:54,642 | INFO | Completed 15/369: AKERMAK TEKNİK HIRDAVAT VE ENDÜSTRİYEL ÜRÜNLERİ SAN. VE TİC. A. Ş.
+2026-07-20 18:42:04,109 | INFO | Processing 19: AKSÜT MAKİNA METAL İNŞ. TEKS. OTO. PET. ÜRÜN. TİC. VE SAN. LTD. ŞTİ.
+2026-07-20 18:42:04,128 | INFO | Completed 16/369: AKKO MAKINA SAN. VE TIC. A.Ş.
+2026-07-20 18:42:50,545 | WARNING | Search query failed; continuing with remaining queries: aksut makina makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:43:01,878 | WARNING | Search query failed; continuing with remaining queries: aksut makina metal ins teks oto pet urun tic ve san ltd sti makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:43:32,149 | INFO | Processing 20: AKTİF KESİCİ TAKIM HIRDAVAT MAK. SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:43:32,151 | INFO | Processing 20 with supplied website: AKTİF KESİCİ TAKIM HIRDAVAT MAK. SAN. TİC. LTD. ŞTİ. -> https://www.aktifkesicitakim.com.tr
+2026-07-20 18:43:32,168 | INFO | Completed 17/369: AIRON ENDÜSTRİ MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:43:50,726 | WARNING | Search query failed; continuing with remaining queries: "aksut makina metal ins teks oto pet urun tic ve san ltd sti" web sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:44:03,293 | INFO | Processing 21: AKYAPAK MAKİNA SANAYİ TİCARET A. Ş.
+2026-07-20 18:44:03,294 | INFO | Processing 21 with supplied website: AKYAPAK MAKİNA SANAYİ TİCARET A. Ş. -> https://akyapak.com/en
+2026-07-20 18:44:03,312 | INFO | Completed 18/369: AKTİF KESİCİ TAKIM HIRDAVAT MAK. SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:44:14,976 | INFO | Processing 22: ALFAMAK KALIP ELEMANLARI MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:44:14,977 | INFO | Processing 22 with supplied website: ALFAMAK KALIP ELEMANLARI MAKİNA SAN. TİC. LTD. ŞTİ. -> https://alfamak.com/en
+2026-07-20 18:44:14,997 | INFO | Completed 19/369: AKYAPAK MAKİNA SANAYİ TİCARET A. Ş.
+2026-07-20 18:44:26,951 | INFO | Processing 23: ALKA MAKİNA OTO İNŞ. ELK. İTH. İHR. SAN. VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 18:44:26,951 | INFO | Processing 23 with supplied website: ALKA MAKİNA OTO İNŞ. ELK. İTH. İHR. SAN. VE DIŞ TİC. LTD. ŞTİ. -> https://www.alkamakina.com
+2026-07-20 18:44:26,970 | INFO | Completed 20/369: ALFAMAK KALIP ELEMANLARI MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:44:34,123 | INFO | Processing 24: ALTAN MAKİNA HIR. SAN TİC A.Ş.
+2026-07-20 18:44:34,144 | INFO | Completed 21/369: ALKA MAKİNA OTO İNŞ. ELK. İTH. İHR. SAN. VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 18:44:45,948 | INFO | Processing 25: ALTERNATİF RULMAN A.Ş.
+2026-07-20 18:44:45,981 | INFO | Completed 22/369: AKSÜT MAKİNA METAL İNŞ. TEKS. OTO. PET. ÜRÜN. TİC. VE SAN. LTD. ŞTİ.
+2026-07-20 18:45:05,400 | INFO | Processing 26: ANCA TURKEY CNC MAKİNE LTD.ŞTİ.
+2026-07-20 18:45:05,401 | INFO | Processing 26 with supplied website: ANCA TURKEY CNC MAKİNE LTD.ŞTİ. -> https://anca.com
+2026-07-20 18:45:05,418 | INFO | Completed 23/369: ALTERNATİF RULMAN A.Ş.
+2026-07-20 18:45:17,514 | INFO | Processing 27: ARAN MAKİNA SAN.VE TİC. AHMET ARMUTÇUOĞLU
+2026-07-20 18:45:17,533 | INFO | Completed 24/369: ANCA TURKEY CNC MAKİNE LTD.ŞTİ.
+2026-07-20 18:45:36,098 | WARNING | Search query failed; continuing with remaining queries: aran makina Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:45:52,174 | WARNING | Search query failed; continuing with remaining queries: altan makina contact (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:47:10,912 | INFO | Processing 28: ARI MAKİNA TAKIM TEZGAHLARI SAN.VE TİC.LTD.ŞTİ.
+2026-07-20 18:47:10,928 | INFO | Processing 28 with supplied website: ARI MAKİNA TAKIM TEZGAHLARI SAN.VE TİC.LTD.ŞTİ. -> https://Arı Makina
+2026-07-20 18:47:11,055 | INFO | Completed 25/369: AGP ENERJİ MÜH. İNŞ. TAAH. SAN. VE TİC. A.Ş.
+2026-07-20 18:47:11,057 | INFO | Supplied website failed, falling back to search: ARI MAKİNA TAKIM TEZGAHLARI SAN.VE TİC.LTD.ŞTİ.
+2026-07-20 18:47:33,087 | INFO | Processing 29: ARİF ALAÇAM RULMAN TİC. VE SAN. LTD. ŞTİ.
+2026-07-20 18:47:33,107 | INFO | Completed 26/369: ALTAN MAKİNA HIR. SAN TİC A.Ş.
+2026-07-20 18:48:00,954 | WARNING | Search query failed; continuing with remaining queries: arif alacam Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:49:00,152 | WARNING | Search query failed; continuing with remaining queries: arif alacam makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:49:12,353 | INFO | Processing 30: ARMADA YAZILIM A.Ş.
+2026-07-20 18:49:12,355 | INFO | Processing 30 with supplied website: ARMADA YAZILIM A.Ş. -> https://www.armadayazilim.com
+2026-07-20 18:49:12,372 | INFO | Completed 27/369: ARI MAKİNA TAKIM TEZGAHLARI SAN.VE TİC.LTD.ŞTİ.
+2026-07-20 18:49:19,329 | INFO | Processing 31: ARP TEKNİK MAKİNA SAN. VE TİC. LTD.ŞTİ
+2026-07-20 18:49:19,331 | INFO | Processing 31 with supplied website: ARP TEKNİK MAKİNA SAN. VE TİC. LTD.ŞTİ -> https://www.arpteknik.com
+2026-07-20 18:49:19,347 | INFO | Completed 28/369: ARMADA YAZILIM A.Ş.
+2026-07-20 18:49:25,752 | WARNING | Search query failed; continuing with remaining queries: arif alacam contact (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:49:28,343 | INFO | Exhibitor profile could not be read: https://www.datanyze.com/companies/arif-alacam-rulman/457089490 (403 Client Error: Forbidden for url: https://www.datanyze.com/companies/arif-alacam-rulman/457089490)
+2026-07-20 18:49:35,295 | INFO | Processing 32: ASTOR KONVEYÖR SİSTEMLERİ METAL MAKİNA ELEKTRİK OTOMASYON SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 18:49:35,296 | INFO | Processing 32 with supplied website: ASTOR KONVEYÖR SİSTEMLERİ METAL MAKİNA ELEKTRİK OTOMASYON SAN. VE TİC. LTD. ŞTİ. -> https://astorkonveyor.com/
+2026-07-20 18:49:35,312 | INFO | Completed 29/369: ARP TEKNİK MAKİNA SAN. VE TİC. LTD.ŞTİ
+2026-07-20 18:50:11,623 | INFO | Processing 33: ATİK ENDÜSTRİYEL KAY. TEKN. SAN. VE TİC. A. Ş.
+2026-07-20 18:50:11,641 | INFO | Completed 30/369: ASTOR KONVEYÖR SİSTEMLERİ METAL MAKİNA ELEKTRİK OTOMASYON SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 18:50:56,479 | INFO | Processing 34: ATLAS CNC MAKİNA TİCARET AŞ
+2026-07-20 18:50:56,481 | INFO | Processing 34 with supplied website: ATLAS CNC MAKİNA TİCARET AŞ -> https://www.atlascnc.com
+2026-07-20 18:50:56,499 | INFO | Completed 31/369: ARAN MAKİNA SAN.VE TİC. AHMET ARMUTÇUOĞLU
+2026-07-20 18:51:39,350 | INFO | Processing 35: ATLIER RULMANCILIK ENDÜSTRİYEL EKİPMAN TİCARET VE SANAYİ LİMİTED ŞİRKETİ
+2026-07-20 18:51:39,370 | INFO | Completed 32/369: ARİF ALAÇAM RULMAN TİC. VE SAN. LTD. ŞTİ.
+2026-07-20 18:51:47,610 | INFO | Processing 36: AYD KURUMSAL TEKNİK VE NÜKLEER HİZMETLER DANIŞMANLIK TİC. LTD. ŞTİ.
+2026-07-20 18:51:47,612 | INFO | Processing 36 with supplied website: AYD KURUMSAL TEKNİK VE NÜKLEER HİZMETLER DANIŞMANLIK TİC. LTD. ŞTİ. -> https://ayddanismanlik.com/
+2026-07-20 18:51:47,630 | INFO | Completed 33/369: ATLAS CNC MAKİNA TİCARET AŞ
+2026-07-20 18:51:55,240 | INFO | Processing 37: AZE OTOMASYON EĞİTİM VE DANIŞMANLIK AŞ
+2026-07-20 18:51:55,241 | INFO | Processing 37 with supplied website: AZE OTOMASYON EĞİTİM VE DANIŞMANLIK AŞ -> https://www.azeotomasyon.com
+2026-07-20 18:51:55,258 | INFO | Completed 34/369: AYD KURUMSAL TEKNİK VE NÜKLEER HİZMETLER DANIŞMANLIK TİC. LTD. ŞTİ.
+2026-07-20 18:52:06,242 | INFO | Processing 38: BACA MÜHENDİSLİK AŞ
+2026-07-20 18:52:06,260 | INFO | Completed 35/369: AZE OTOMASYON EĞİTİM VE DANIŞMANLIK AŞ
+2026-07-20 18:52:19,265 | WARNING | Search query failed; continuing with remaining queries: baca muhendislik Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:52:44,173 | WARNING | Search query failed; continuing with remaining queries: baca muhendislik as Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:52:58,809 | WARNING | Search query failed; continuing with remaining queries: "atik kay" makine Turkiye (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:53:05,405 | INFO | Processing 39: BARIŞ POLİMER SAN. İTH. İHR. END. VE TİC. LTD. ŞTİ.
+2026-07-20 18:53:05,406 | INFO | Processing 39 with supplied website: BARIŞ POLİMER SAN. İTH. İHR. END. VE TİC. LTD. ŞTİ. -> http://www.barisithalat.com/
+2026-07-20 18:53:05,424 | INFO | Completed 36/369: ATİK ENDÜSTRİYEL KAY. TEKN. SAN. VE TİC. A. Ş.
+2026-07-20 18:53:09,048 | INFO | Processing 40: BARTEKNİK MAKİNA SERVİS & SERVİS ÇUBUK SÜRÜCÜ SİSTEMLERİ SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:53:09,049 | INFO | Processing 40 with supplied website: BARTEKNİK MAKİNA SERVİS & SERVİS ÇUBUK SÜRÜCÜ SİSTEMLERİ SAN. TİC. LTD. ŞTİ. -> https://barteknikmakina.com
+2026-07-20 18:53:09,066 | INFO | Completed 37/369: BARIŞ POLİMER SAN. İTH. İHR. END. VE TİC. LTD. ŞTİ.
+2026-07-20 18:53:15,529 | WARNING | Search query failed; continuing with remaining queries: "atlier rulmancilik" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:53:16,309 | INFO | Processing 41: BAŞARANLAR CNC MAKİNA TAKIM SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 18:53:16,310 | INFO | Processing 41 with supplied website: BAŞARANLAR CNC MAKİNA TAKIM SAN. VE TİC. LTD. ŞTİ. -> http://www.hasstak.com/
+2026-07-20 18:53:16,328 | INFO | Completed 38/369: BARTEKNİK MAKİNA SERVİS & SERVİS ÇUBUK SÜRÜCÜ SİSTEMLERİ SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:53:22,911 | INFO | Processing 42: BAYKAL MAKİNA SAN. VE TİC. A. Ş.
+2026-07-20 18:53:22,912 | INFO | Processing 42 with supplied website: BAYKAL MAKİNA SAN. VE TİC. A. Ş. -> https://www.baykal.com.tr
+2026-07-20 18:53:22,929 | INFO | Completed 39/369: BAŞARANLAR CNC MAKİNA TAKIM SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 18:53:27,179 | INFO | Processing 43: BAYSEL MAKİNA SANAYİ VE TİC. LTD. ŞTİ.
+2026-07-20 18:53:27,179 | INFO | Processing 43 with supplied website: BAYSEL MAKİNA SANAYİ VE TİC. LTD. ŞTİ. -> https://baysel.com.tr/
+2026-07-20 18:53:27,197 | INFO | Completed 40/369: BAYKAL MAKİNA SAN. VE TİC. A. Ş.
+2026-07-20 18:53:39,543 | INFO | Processing 44: BBEND MAKİNA İTHALAT İHRACAT SAN. EV TİC. LTD. ŞTİ.
+2026-07-20 18:53:39,545 | INFO | Processing 44 with supplied website: BBEND MAKİNA İTHALAT İHRACAT SAN. EV TİC. LTD. ŞTİ. -> https://www.bbendmakina.com/
+2026-07-20 18:53:39,561 | INFO | Completed 41/369: BAYSEL MAKİNA SANAYİ VE TİC. LTD. ŞTİ.
+2026-07-20 18:53:43,204 | INFO | Processing 45: BEKA-MAK MAKİNA SANAYİ VE TİC. A. Ş.
+2026-07-20 18:53:43,223 | INFO | Completed 42/369: BBEND MAKİNA İTHALAT İHRACAT SAN. EV TİC. LTD. ŞTİ.
+2026-07-20 18:54:00,443 | WARNING | Search query failed; continuing with remaining queries: "baca muhendislik as" web sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:54:15,059 | WARNING | Search query failed; continuing with remaining queries: beka mak makina sanayi ve tic a s Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:54:25,090 | INFO | Exhibitor profile could not be read: https://www.datanyze.com/companies/baca-muhendislik-ltd-sti/546766622 (403 Client Error: Forbidden for url: https://www.datanyze.com/companies/baca-muhendislik-ltd-sti/546766622)
+2026-07-20 18:54:44,892 | WARNING | Search query failed; continuing with remaining queries: beka mak makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:54:47,552 | INFO | Processing 46: BEM MAKİNE MÜHENDİSLİK DIŞ TİCARET PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:54:47,611 | INFO | Processing 46 with supplied website: BEM MAKİNE MÜHENDİSLİK DIŞ TİCARET PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ -> https://www.bemcnc.com.tr
+2026-07-20 18:54:47,892 | INFO | Completed 43/369: ATLIER RULMANCILIK ENDÜSTRİYEL EKİPMAN TİCARET VE SANAYİ LİMİTED ŞİRKETİ
+2026-07-20 18:55:01,777 | WARNING | Search query failed; continuing with remaining queries: beka mak makina sanayi ve tic a s makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:55:09,256 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.beka_mak_makine_elektrik_ihracat_ithalat_sanayi_ve_ticaret_limited_sirketi.dc04de7f2e37dca25a7a5643c45f8d3d.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.beka_mak_makine_elektrik_ihracat_ithalat_sanayi_ve_ticaret_limited_sirketi.dc04de7f2e37dca25a7a5643c45f8d3d.html)
+2026-07-20 18:55:23,650 | INFO | Processing 47: BERİL ENDÜSTRİYEL ÜRÜNLER MÜHENDİSLİK TİC. LTD. ŞTİ.
+2026-07-20 18:55:23,652 | INFO | Processing 47 with supplied website: BERİL ENDÜSTRİYEL ÜRÜNLER MÜHENDİSLİK TİC. LTD. ŞTİ. -> https://www.berilmuh.com.tr
+2026-07-20 18:55:23,670 | INFO | Completed 44/369: BACA MÜHENDİSLİK AŞ
+2026-07-20 18:55:28,566 | INFO | Processing 48: BERT OKE SERT MADEN SAN. VE TİC. LTD.ŞTİ.
+2026-07-20 18:55:28,567 | INFO | Processing 48 with supplied website: BERT OKE SERT MADEN SAN. VE TİC. LTD.ŞTİ. -> https://www.oketurkiye.com/
+2026-07-20 18:55:28,584 | INFO | Completed 45/369: BERİL ENDÜSTRİYEL ÜRÜNLER MÜHENDİSLİK TİC. LTD. ŞTİ.
+2026-07-20 18:55:42,982 | INFO | Processing 49: BEST CNC TAKIM TEZGAHLARI SAN.TİC.LTD.ŞTİ.
+2026-07-20 18:55:42,983 | INFO | Processing 49 with supplied website: BEST CNC TAKIM TEZGAHLARI SAN.TİC.LTD.ŞTİ. -> https://www.bestcnc.com.tr
+2026-07-20 18:55:43,001 | INFO | Completed 46/369: BERT OKE SERT MADEN SAN. VE TİC. LTD.ŞTİ.
+2026-07-20 18:55:47,329 | INFO | Processing 50: BIEL MAKİNE SANAYİ VE TİCARET A.Ş.
+2026-07-20 18:55:47,330 | INFO | Processing 50 with supplied website: BIEL MAKİNE SANAYİ VE TİCARET A.Ş. -> https://bielmakine.com/
+2026-07-20 18:55:47,349 | INFO | Completed 47/369: BEST CNC TAKIM TEZGAHLARI SAN.TİC.LTD.ŞTİ.
+2026-07-20 18:55:48,782 | INFO | Processing 51: BİEM LASER MAKİNA VE OTOMASYON SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:55:48,801 | INFO | Completed 48/369: BEM MAKİNE MÜHENDİSLİK DIŞ TİCARET PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:55:55,450 | INFO | Processing 52: BİLGİN MEKATRONİK MAK. SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:55:55,469 | INFO | Completed 49/369: BIEL MAKİNE SANAYİ VE TİCARET A.Ş.
+2026-07-20 18:56:39,834 | WARNING | Search query failed; continuing with remaining queries: "biem laser" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:56:55,087 | INFO | Processing 53: BİLGİNOĞLU ENDÜSTRİ MALZ. SAN. TİC. A.Ş.
+2026-07-20 18:56:55,089 | INFO | Processing 53 with supplied website: BİLGİNOĞLU ENDÜSTRİ MALZ. SAN. TİC. A.Ş. -> https://www.bilginoglu-endustri.com.tr/
+2026-07-20 18:56:55,107 | INFO | Completed 50/369: BEKA-MAK MAKİNA SANAYİ VE TİC. A. Ş.
+2026-07-20 18:57:14,682 | INFO | Processing 54: BİLOL METAL İŞLEME MERKEZİ SAN. VE TİC. LTD.ŞTİ.
+2026-07-20 18:57:14,700 | INFO | Completed 51/369: BİLGİNOĞLU ENDÜSTRİ MALZ. SAN. TİC. A.Ş.
+2026-07-20 18:58:01,729 | INFO | Processing 55: BİMAKSAN CNC TAKIM TEZGAHLARI .SAN VE TİC. LTD. ŞTİ.
+2026-07-20 18:58:01,731 | INFO | Processing 55 with supplied website: BİMAKSAN CNC TAKIM TEZGAHLARI .SAN VE TİC. LTD. ŞTİ. -> https://www.bimaksan.com.tr
+2026-07-20 18:58:01,748 | INFO | Completed 52/369: BİEM LASER MAKİNA VE OTOMASYON SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:58:08,453 | INFO | Processing 56: BMT MAKİNA EKİPMANLARI DANIŞMANLIK LTD ŞTİ.
+2026-07-20 18:58:08,454 | INFO | Processing 56 with supplied website: BMT MAKİNA EKİPMANLARI DANIŞMANLIK LTD ŞTİ. -> https://www.bmtmakina.com.tr
+2026-07-20 18:58:08,472 | INFO | Completed 53/369: BİMAKSAN CNC TAKIM TEZGAHLARI .SAN VE TİC. LTD. ŞTİ.
+2026-07-20 18:58:17,677 | INFO | Processing 57: BODOR LASER TURKEY MAKİNA TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:58:17,678 | INFO | Processing 57 with supplied website: BODOR LASER TURKEY MAKİNA TİCARET LİMİTED ŞİRKETİ -> https://www.bodor.com
+2026-07-20 18:58:17,696 | INFO | Completed 54/369: BMT MAKİNA EKİPMANLARI DANIŞMANLIK LTD ŞTİ.
+2026-07-20 18:58:22,898 | WARNING | Search query failed; continuing with remaining queries: "bilgin mekatronik" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 18:58:25,699 | INFO | Processing 58: BOEHLERİT SERT METAL VE TAKIM SAN. VE TİC. A.Ş.
+2026-07-20 18:58:25,700 | INFO | Processing 58 with supplied website: BOEHLERİT SERT METAL VE TAKIM SAN. VE TİC. A.Ş. -> https://www.boehlerit.com.tr/
+2026-07-20 18:58:25,716 | INFO | Completed 55/369: BODOR LASER TURKEY MAKİNA TİCARET LİMİTED ŞİRKETİ
+2026-07-20 18:58:30,762 | INFO | Processing 59: BOĞAZİÇİ ENDÜSTRİYEL YAĞ. KİM. MAD. SAN. VE TİC. A.Ş.
+2026-07-20 18:58:30,763 | INFO | Processing 59 with supplied website: BOĞAZİÇİ ENDÜSTRİYEL YAĞ. KİM. MAD. SAN. VE TİC. A.Ş. -> https://www.bogazicifiltrasyon.com , www.bogaziciendustriyel.com.tr
+2026-07-20 18:58:30,767 | INFO | Supplied website failed, falling back to search: BOĞAZİÇİ ENDÜSTRİYEL YAĞ. KİM. MAD. SAN. VE TİC. A.Ş.
+2026-07-20 18:58:30,782 | INFO | Completed 56/369: BOEHLERİT SERT METAL VE TAKIM SAN. VE TİC. A.Ş.
+2026-07-20 18:58:38,895 | INFO | Processing 60: BOĞAZİÇİ YAZILIM ANONİM ŞİRKETİ
+2026-07-20 18:58:38,896 | INFO | Processing 60 with supplied website: BOĞAZİÇİ YAZILIM ANONİM ŞİRKETİ -> https://www.bogaziciyazilim.com
+2026-07-20 18:58:38,913 | INFO | Completed 57/369: BİLGİN MEKATRONİK MAK. SAN. TİC. LTD. ŞTİ.
+2026-07-20 18:58:49,547 | INFO | Processing 61: BOR CARBIDE İÇ VE DIŞ TİCARET A.Ş.
+2026-07-20 18:58:49,565 | INFO | Completed 58/369: BOĞAZİÇİ YAZILIM ANONİM ŞİRKETİ
+2026-07-20 18:59:46,096 | WARNING | Search query failed; continuing with remaining queries: bogazici endustriyel yag kim mad san ve tic a s makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:00:00,979 | WARNING | Search query failed; continuing with remaining queries: bor carbide resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:00:29,221 | INFO | Processing 62: BÜLENT SAĞBİLGE HMC LAZER SERVİS
+2026-07-20 19:00:29,239 | INFO | Completed 59/369: BOR CARBIDE İÇ VE DIŞ TİCARET A.Ş.
+2026-07-20 19:00:34,898 | INFO | Processing 63: BURLA MAK. TİC. VE YATIRIM A.Ş.
+2026-07-20 19:00:34,920 | INFO | Completed 60/369: BİLOL METAL İŞLEME MERKEZİ SAN. VE TİC. LTD.ŞTİ.
+2026-07-20 19:02:13,021 | INFO | Processing 64: BURMAK ENDÜSTRİYEL PAZ. TİC. A.Ş.
+2026-07-20 19:02:13,023 | INFO | Processing 64 with supplied website: BURMAK ENDÜSTRİYEL PAZ. TİC. A.Ş. -> https://bur-mak.com/
+2026-07-20 19:02:13,040 | INFO | Completed 61/369: BOĞAZİÇİ ENDÜSTRİYEL YAĞ. KİM. MAD. SAN. VE TİC. A.Ş.
+2026-07-20 19:02:27,349 | INFO | Processing 65: BURPRES METAL SANAYİ A.Ş.
+2026-07-20 19:02:27,350 | INFO | Processing 65 with supplied website: BURPRES METAL SANAYİ A.Ş. -> https://www.burpres.com
+2026-07-20 19:02:27,368 | INFO | Completed 62/369: BURMAK ENDÜSTRİYEL PAZ. TİC. A.Ş.
+2026-07-20 19:02:36,397 | INFO | Processing 66: CANDAR METAL OTOMOTİV SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:02:36,418 | INFO | Completed 63/369: BURPRES METAL SANAYİ A.Ş.
+2026-07-20 19:04:19,427 | INFO | Processing 67: ÇELEBİ MAK.MÜH.SÜLEYMAN ÇELEBİ
+2026-07-20 19:04:19,429 | INFO | Processing 67 with supplied website: ÇELEBİ MAK.MÜH.SÜLEYMAN ÇELEBİ -> https://www.celebimakina.com/
+2026-07-20 19:04:19,446 | INFO | Completed 64/369: BURLA MAK. TİC. VE YATIRIM A.Ş.
+2026-07-20 19:04:28,826 | INFO | Processing 68: ÇELİK MAKİNA TİCARET A.Ş.
+2026-07-20 19:04:28,845 | INFO | Completed 65/369: ÇELEBİ MAK.MÜH.SÜLEYMAN ÇELEBİ
+2026-07-20 19:04:32,869 | INFO | Processing 69: CENTRE ÖZÇELİK MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:04:32,889 | INFO | Completed 66/369: BÜLENT SAĞBİLGE HMC LAZER SERVİS
+2026-07-20 19:05:09,775 | WARNING | Search query failed; continuing with remaining queries: centre ozcelik makina sanayi ve ticaret limited sirketi Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:06:09,051 | WARNING | Search query failed; continuing with remaining queries: makina makine (Bright Data returned non-JSON body: )
+2026-07-20 19:07:20,036 | INFO | Exhibitor profile could not be read: https://www.turkish-manufacturers.com/companies/celik-makina-ticaret-as_7114.html (403 Client Error: Forbidden for url: https://www.turkish-manufacturers.com/companies/celik-makina-ticaret-as_7114.html)
+2026-07-20 19:07:22,672 | INFO | Processing 70: CERATIZIT TURKEY KESİCİ TAKIMLAR VE KARBÜR ÇÖZÜMLERİ TİC. LTD. ŞTİ.
+2026-07-20 19:07:22,692 | INFO | Completed 67/369: CANDAR METAL OTOMOTİV SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:10:58,919 | INFO | Processing 71: CESURBEND MAKİNA YED. PAR. İTH. İHR. SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:10:58,922 | INFO | Processing 71 with supplied website: CESURBEND MAKİNA YED. PAR. İTH. İHR. SAN. TİC. LTD. ŞTİ. -> https://www.cesurbend.com/
+2026-07-20 19:10:58,942 | INFO | Completed 68/369: CENTRE ÖZÇELİK MAKİNA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:11:05,727 | WARNING | Search query failed; continuing with remaining queries: "ceratizit turkey" makine Turkiye (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:11:15,349 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.ceratizit_turkey_kesici_takimlar_ve_karbur_cozumleri_ticaret_limited_sirketi.471ed8b1b07b52f4eea25fba8a326a17.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.ceratizit_turkey_kesici_takimlar_ve_karbur_cozumleri_ticaret_limited_sirketi.471ed8b1b07b52f4eea25fba8a326a17.html)
+2026-07-20 19:11:16,699 | INFO | Processing 72: CETEK SPRAY NOZZLE DIŞ TİC. LTD. ŞTİ
+2026-07-20 19:11:16,717 | INFO | Completed 69/369: CESURBEND MAKİNA YED. PAR. İTH. İHR. SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:11:37,664 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/ceratizit-turkey-cutting-tools-and-carbide-solutions-trading-ltd-co-106399853/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/ceratizit-turkey-cutting-tools-and-carbide-solutions-trading-ltd-co-106399853/)
+2026-07-20 19:12:06,352 | WARNING | Search query failed; continuing with remaining queries: cetek spray Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:15:13,042 | WARNING | Search query failed; continuing with remaining queries: "cetek spray" makine Turkiye (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+C:\Users\ISAAC\Documents\Python b2b\.venv\Lib\site-packages\urllib3\connectionpool.py:1110: InsecureRequestWarning: Unverified HTTPS request is being made to host 'metaldunyasi.com.tr'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#tls-warnings
+  warnings.warn(
+2026-07-20 19:19:49,823 | INFO | Processing 73: CHİRON İSTANBUL MAK. TİC.VE SERV.LTD.ŞTİ.
+2026-07-20 19:19:49,825 | INFO | Processing 73 with supplied website: CHİRON İSTANBUL MAK. TİC.VE SERV.LTD.ŞTİ. -> https://chiron-group.com/
+2026-07-20 19:19:49,843 | INFO | Completed 70/369: CERATIZIT TURKEY KESİCİ TAKIMLAR VE KARBÜR ÇÖZÜMLERİ TİC. LTD. ŞTİ.
+2026-07-20 19:21:02,472 | INFO | Processing 74: CLASS CNC MÜHENDİSLİK MAKİNA SAN.VE TİC.A.Ş.
+2026-07-20 19:21:02,473 | INFO | Processing 74 with supplied website: CLASS CNC MÜHENDİSLİK MAKİNA SAN.VE TİC.A.Ş. -> https://classcnc.com.tr/
+2026-07-20 19:21:02,489 | INFO | Completed 71/369: CHİRON İSTANBUL MAK. TİC.VE SERV.LTD.ŞTİ.
+2026-07-20 19:21:18,788 | INFO | Processing 75: CMS MAKİNE VE DANIŞMANLIK SAN VE TİC LTD ŞTİ
+2026-07-20 19:21:18,789 | INFO | Processing 75 with supplied website: CMS MAKİNE VE DANIŞMANLIK SAN VE TİC LTD ŞTİ -> http://www.cms.biz.tr
+2026-07-20 19:21:18,817 | INFO | Completed 72/369: ÇELİK MAKİNA TİCARET A.Ş.
+2026-07-20 19:21:25,110 | INFO | Processing 76: CNC İLERİ TEKNOLOJİ VE TİC.A.Ş.
+2026-07-20 19:21:25,113 | INFO | Processing 76 with supplied website: CNC İLERİ TEKNOLOJİ VE TİC.A.Ş. -> https://cnc.com.tr/
+2026-07-20 19:21:25,133 | INFO | Completed 73/369: CETEK SPRAY NOZZLE DIŞ TİC. LTD. ŞTİ
+2026-07-20 19:21:27,130 | INFO | Processing 77: CNC SİSTEM SAN. TİC. LTD. ŞTİ
+2026-07-20 19:21:27,150 | INFO | Completed 74/369: CLASS CNC MÜHENDİSLİK MAKİNA SAN.VE TİC.A.Ş.
+2026-07-20 19:21:36,715 | INFO | Processing 78: CSB TEKNİK MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:21:36,736 | INFO | Completed 75/369: CMS MAKİNE VE DANIŞMANLIK SAN VE TİC LTD ŞTİ
+2026-07-20 19:21:37,173 | INFO | Processing 79: CSM TURKEY MAKİNA SAN. İTH.İHR. DAN. TİC. LTD. ŞTİ.
+2026-07-20 19:21:37,173 | INFO | Processing 79 with supplied website: CSM TURKEY MAKİNA SAN. İTH.İHR. DAN. TİC. LTD. ŞTİ. -> http://www.tubebender.com.tw
+2026-07-20 19:21:37,192 | INFO | Completed 76/369: CNC İLERİ TEKNOLOJİ VE TİC.A.Ş.
+2026-07-20 19:21:49,069 | INFO | Processing 80: ÇUKUROVA İKLİMLENDİRME A.Ş.
+2026-07-20 19:21:49,070 | INFO | Processing 80 with supplied website: ÇUKUROVA İKLİMLENDİRME A.Ş. -> https://www.cukurovaisi.com/tr/
+2026-07-20 19:21:49,087 | INFO | Completed 77/369: CSM TURKEY MAKİNA SAN. İTH.İHR. DAN. TİC. LTD. ŞTİ.
+2026-07-20 19:22:08,798 | INFO | Processing 81: DCB LAZER TEKNOLOJİLERİ SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:22:08,818 | INFO | Completed 78/369: ÇUKUROVA İKLİMLENDİRME A.Ş.
+2026-07-20 19:22:31,668 | INFO | Processing 82: DEKUMA MAKİNE SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:22:31,669 | INFO | Processing 82 with supplied website: DEKUMA MAKİNE SAN. VE TİC. LTD. ŞTİ. -> https://dekuma.com.tr
+2026-07-20 19:22:31,689 | INFO | Completed 79/369: CNC SİSTEM SAN. TİC. LTD. ŞTİ
+2026-07-20 19:23:31,035 | WARNING | Search query failed; continuing with remaining queries: dcb lazer contact (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:23:33,908 | INFO | Processing 83: DELTA KALIP ELEMANLARI SAN. VE TİC.A.Ş.
+2026-07-20 19:23:33,908 | INFO | Processing 83 with supplied website: DELTA KALIP ELEMANLARI SAN. VE TİC.A.Ş. -> https://www.deltakalip.com/
+2026-07-20 19:23:33,928 | INFO | Completed 80/369: CSB TEKNİK MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:23:38,445 | INFO | Processing 84: DEMETAL KALIP VE MAK. SAN. TİC. A.Ş.
+2026-07-20 19:23:38,476 | INFO | Completed 81/369: DELTA KALIP ELEMANLARI SAN. VE TİC.A.Ş.
+2026-07-20 19:24:12,871 | INFO | Processing 85: DEMİRAL MAKİNE İNŞ. VE PAZ. SAN. TİC. A.Ş.
+2026-07-20 19:24:12,872 | INFO | Processing 85 with supplied website: DEMİRAL MAKİNE İNŞ. VE PAZ. SAN. TİC. A.Ş. -> http://www.demiralmakina.com.tr
+2026-07-20 19:24:12,889 | INFO | Completed 82/369: DEKUMA MAKİNE SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:24:19,677 | INFO | Processing 86: DENER MAK. SAN VE TİC AŞ
+2026-07-20 19:24:19,678 | INFO | Processing 86 with supplied website: DENER MAK. SAN VE TİC AŞ -> http://www.dener.com/
+2026-07-20 19:24:19,697 | INFO | Completed 83/369: DEMİRAL MAKİNE İNŞ. VE PAZ. SAN. TİC. A.Ş.
+2026-07-20 19:24:38,534 | INFO | Processing 87: DİRİNLER MAKİNA SAN.VE TİCARET A.Ş.
+2026-07-20 19:24:38,534 | INFO | Processing 87 with supplied website: DİRİNLER MAKİNA SAN.VE TİCARET A.Ş. -> https://www.dirinler.com.tr
+2026-07-20 19:24:38,553 | INFO | Completed 84/369: DENER MAK. SAN VE TİC AŞ
+2026-07-20 19:24:42,353 | INFO | Exhibitor profile could not be read: https://smtech-eurasia.com/exhibitor-list/dcb-lazer-teknolojileri-san-tic-ltd-sti-165622-3341 (HTTPSConnectionPool(host='smtech-eurasia.com', port=443): Max retries exceeded with url: /exhibitor-list/dcb-lazer-teknolojileri-san-tic-ltd-sti-165622-3341 (Caused by SSLError(SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Hostname mismatch, certificate is not valid for 'smtech-eurasia.com'. (_ssl.c:1081)"))))
+2026-07-20 19:24:44,806 | INFO | Processing 88: DMS CNC MAKİNA SAN VE TİC LTD ŞTİ
+2026-07-20 19:24:44,807 | INFO | Processing 88 with supplied website: DMS CNC MAKİNA SAN VE TİC LTD ŞTİ -> https://www.dmscnc.com/
+2026-07-20 19:24:44,824 | INFO | Completed 85/369: DİRİNLER MAKİNA SAN.VE TİCARET A.Ş.
+2026-07-20 19:25:10,581 | INFO | Processing 89: DORA CNC SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:25:10,582 | INFO | Processing 89 with supplied website: DORA CNC SAN. VE TİC. LTD. ŞTİ. -> https://www.doracnc.com
+2026-07-20 19:25:10,600 | INFO | Completed 86/369: DCB LAZER TEKNOLOJİLERİ SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:25:33,920 | INFO | Processing 90: DR ELEKTRİK MAK.MÜH.OTOM.İNŞ.SAN.VE TİC.LTD.ŞTİ.
+2026-07-20 19:25:33,951 | INFO | Processing 90 with supplied website: DR ELEKTRİK MAK.MÜH.OTOM.İNŞ.SAN.VE TİC.LTD.ŞTİ. -> http://www.drmakine.com/
+2026-07-20 19:25:34,589 | INFO | Completed 87/369: DORA CNC SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:25:48,543 | INFO | Processing 91: DÜNYA MEDYA BAS. YAY. REK. TAN. HİZ. İLKER KAPLAN
+2026-07-20 19:25:48,562 | INFO | Completed 88/369: DMS CNC MAKİNA SAN VE TİC LTD ŞTİ
+2026-07-20 19:25:56,143 | INFO | Supplied website failed, falling back to search: DR ELEKTRİK MAK.MÜH.OTOM.İNŞ.SAN.VE TİC.LTD.ŞTİ.
+2026-07-20 19:26:06,761 | WARNING | Search query failed; continuing with remaining queries: dunya medya Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:26:35,474 | WARNING | Search query failed; continuing with remaining queries: "demetal kalip" makine Turkiye (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:26:35,820 | WARNING | Search query failed; continuing with remaining queries: dunya medya bas yay rek tan hiz ilker kaplan resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:27:16,439 | INFO | Processing 92: DURMAZLAR MAKİNA SAN. VE TİC. A. Ş.
+2026-07-20 19:27:16,457 | INFO | Completed 89/369: DEMETAL KALIP VE MAK. SAN. TİC. A.Ş.
+2026-07-20 19:27:20,906 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.dr_elektrik_makine_muhendislik_otomotiv_insaat_sanayi_ve_ticaret_limited_sirketi.081380841706e8beba21881d0feba073.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.dr_elektrik_makine_muhendislik_otomotiv_insaat_sanayi_ve_ticaret_limited_sirketi.081380841706e8beba21881d0feba073.html)
+2026-07-20 19:27:44,791 | WARNING | Search query failed; continuing with remaining queries: "dr elektrik" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:28:07,637 | WARNING | Search query failed; continuing with remaining queries: durmazlar makina san ve tic a s makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:28:08,561 | WARNING | Search query failed; continuing with remaining queries: "dr elektrik mak muh otom ins san ve tic ltd sti" web sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:28:48,636 | WARNING | Search query failed; continuing with remaining queries: "durmazlar makina" Turkiye resmi sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:29:22,724 | WARNING | Search query failed; continuing with remaining queries: "durmazlar makina" makine Turkiye (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:29:36,754 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.durmazlar_makina_sanayi_ve_ticaret_anonim_sirketi.96c5c2399e8ec9f527f73510179a8840.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.durmazlar_makina_sanayi_ve_ticaret_anonim_sirketi.96c5c2399e8ec9f527f73510179a8840.html)
+2026-07-20 19:31:30,998 | INFO | Processing 93: DURO MAKİNA KALIP SAN VE TİC LTD ŞTİ
+2026-07-20 19:31:31,000 | INFO | Processing 93 with supplied website: DURO MAKİNA KALIP SAN VE TİC LTD ŞTİ -> https://www.duromakina.com.tr
+2026-07-20 19:31:31,019 | INFO | Completed 90/369: DÜNYA MEDYA BAS. YAY. REK. TAN. HİZ. İLKER KAPLAN
+2026-07-20 19:31:52,853 | INFO | Processing 94: EA GLOBAL LAZER TEKNOLOJİ MAKİNE SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:31:52,853 | INFO | Processing 94 with supplied website: EA GLOBAL LAZER TEKNOLOJİ MAKİNE SAN. VE TİC. LTD. ŞTİ. -> https://www.eagloballazer.com
+2026-07-20 19:31:52,872 | INFO | Completed 91/369: DURO MAKİNA KALIP SAN VE TİC LTD ŞTİ
+2026-07-20 19:32:19,858 | INFO | Processing 95: EAE MAKİNA SAN. VE TİC. A.Ş.
+2026-07-20 19:32:19,859 | INFO | Processing 95 with supplied website: EAE MAKİNA SAN. VE TİC. A.Ş. -> https://www.eaemachinery.com
+2026-07-20 19:32:19,877 | INFO | Completed 92/369: EA GLOBAL LAZER TEKNOLOJİ MAKİNE SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:33:02,592 | INFO | Processing 96: EDM TEKNİK MAKİNE SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:33:02,593 | INFO | Processing 96 with supplied website: EDM TEKNİK MAKİNE SAN. VE TİC. LTD. ŞTİ. -> https://www.edmteknik.com
+2026-07-20 19:33:02,611 | INFO | Completed 93/369: EAE MAKİNA SAN. VE TİC. A.Ş.
+2026-07-20 19:33:11,344 | INFO | Processing 97: EFEMET KESİCİ TAKIMLAR SAN.TİC.LTD.ŞTİ.
+2026-07-20 19:33:11,346 | INFO | Processing 97 with supplied website: EFEMET KESİCİ TAKIMLAR SAN.TİC.LTD.ŞTİ. -> https://efemet.com.tr/
+2026-07-20 19:33:11,365 | INFO | Completed 94/369: DURMAZLAR MAKİNA SAN. VE TİC. A. Ş.
+2026-07-20 19:33:50,120 | INFO | Processing 98: EGE TEKNİK CNC MAK. İTH. İHR. TİC. SAN. LTD. ŞTİ.
+2026-07-20 19:33:50,140 | INFO | Processing 98 with supplied website: EGE TEKNİK CNC MAK. İTH. İHR. TİC. SAN. LTD. ŞTİ. -> https://egeteknikcnc.com.tr
+2026-07-20 19:33:50,160 | INFO | Completed 95/369: EDM TEKNİK MAKİNE SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:33:55,140 | INFO | Processing 99: EKSEN TAKIM TEZGAHLARI VE MAK. SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:33:55,202 | INFO | Processing 99 with supplied website: EKSEN TAKIM TEZGAHLARI VE MAK. SAN. TİC. LTD. ŞTİ. -> https://eksenmakinecnc.com/
+2026-07-20 19:33:55,457 | INFO | Completed 96/369: DR ELEKTRİK MAK.MÜH.OTOM.İNŞ.SAN.VE TİC.LTD.ŞTİ.
+2026-07-20 19:33:56,555 | INFO | Processing 100: ELAR ELEKTRONİK MAKİNA VE KAUÇUK SAN. TİC. LTD. STI.
+2026-07-20 19:33:56,556 | INFO | Processing 100 with supplied website: ELAR ELEKTRONİK MAKİNA VE KAUÇUK SAN. TİC. LTD. STI. -> https://www.elarmak.com
+2026-07-20 19:33:56,573 | INFO | Completed 97/369: EFEMET KESİCİ TAKIMLAR SAN.TİC.LTD.ŞTİ.
+2026-07-20 19:33:57,885 | INFO | Processing 101: ELMAKSAN CNC MAKINA TAKIM TEZGAHLARI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 19:33:57,886 | INFO | Processing 101 with supplied website: ELMAKSAN CNC MAKINA TAKIM TEZGAHLARI SANAYI VE TICARET LIMITED SIRKETI -> https://www.cncticaret.com/
+2026-07-20 19:33:57,903 | INFO | Completed 98/369: EGE TEKNİK CNC MAK. İTH. İHR. TİC. SAN. LTD. ŞTİ.
+2026-07-20 19:34:06,279 | INFO | Processing 102: ELMALI MAKİNA SANAYİ VE TİCARET LTD. ŞTİ.
+2026-07-20 19:34:06,312 | INFO | Processing 102 with supplied website: ELMALI MAKİNA SANAYİ VE TİCARET LTD. ŞTİ. -> https://www.elmali.com.tr/
+2026-07-20 19:34:06,667 | INFO | Completed 99/369: EKSEN TAKIM TEZGAHLARI VE MAK. SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:34:09,037 | INFO | Processing 103: ELMAS MAKİNE KESİCİ TAK SAN TİC LTD ŞTİ.
+2026-07-20 19:34:09,038 | INFO | Processing 103 with supplied website: ELMAS MAKİNE KESİCİ TAK SAN TİC LTD ŞTİ. -> https://www.elmaskeles.com/
+2026-07-20 19:34:09,054 | INFO | Completed 100/369: ELAR ELEKTRONİK MAKİNA VE KAUÇUK SAN. TİC. LTD. STI.
+2026-07-20 19:34:12,798 | INFO | Processing 104: EMAG SALACH GMBH MERKEZİ ALMANYA İST. MERK.ŞUBESİ
+2026-07-20 19:34:12,799 | INFO | Processing 104 with supplied website: EMAG SALACH GMBH MERKEZİ ALMANYA İST. MERK.ŞUBESİ -> https://www.emag.com
+2026-07-20 19:34:12,816 | INFO | Completed 101/369: ELMAKSAN CNC MAKINA TAKIM TEZGAHLARI SANAYI VE TICARET LIMITED SIRKETI
+2026-07-20 19:34:17,515 | INFO | Processing 105: Enar Makina & Metal San ve Tic.Ltd.Şti Temsilci Firma
+2026-07-20 19:34:17,516 | INFO | Processing 105 with supplied website: Enar Makina & Metal San ve Tic.Ltd.Şti Temsilci Firma -> https://www.enarmakina.com
+2026-07-20 19:34:17,532 | INFO | Completed 102/369: ELMALI MAKİNA SANAYİ VE TİCARET LTD. ŞTİ.
+2026-07-20 19:34:19,148 | INFO | Processing 106: ENİGMA HIZLI BAĞLANTI SİS. SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:34:19,149 | INFO | Processing 106 with supplied website: ENİGMA HIZLI BAĞLANTI SİS. SAN. TİC. LTD. ŞTİ. -> https://www.enigmaclamp.com.tr/
+2026-07-20 19:34:19,165 | INFO | Completed 103/369: ELMAS MAKİNE KESİCİ TAK SAN TİC LTD ŞTİ.
+2026-07-20 19:34:24,702 | INFO | Processing 107: ENİGMA HIZLI BAĞLANTI SİSTEMLERİ SAN TİC LTD ŞTİ Temsilci Firma
+2026-07-20 19:34:24,703 | INFO | Processing 107 with supplied website: ENİGMA HIZLI BAĞLANTI SİSTEMLERİ SAN TİC LTD ŞTİ Temsilci Firma -> https://www.enigmaclamp.com.tr
+2026-07-20 19:34:24,719 | INFO | Completed 104/369: EMAG SALACH GMBH MERKEZİ ALMANYA İST. MERK.ŞUBESİ
+2026-07-20 19:34:25,859 | INFO | Processing 108: ENKAR İNŞ. TAAH. VE TİC. LTD. ŞTİ.
+2026-07-20 19:34:25,860 | INFO | Processing 108 with supplied website: ENKAR İNŞ. TAAH. VE TİC. LTD. ŞTİ. -> http://www.enkar.com.tr/
+2026-07-20 19:34:25,876 | INFO | Completed 105/369: ENİGMA HIZLI BAĞLANTI SİS. SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:34:36,383 | INFO | Processing 109: ENOX MAKİNA SAN .TİC.AŞ.
+2026-07-20 19:34:36,388 | INFO | Processing 109 with supplied website: ENOX MAKİNA SAN .TİC.AŞ. -> https://www.enoxmakina.com
+2026-07-20 19:34:36,713 | INFO | Completed 106/369: ENKAR İNŞ. TAAH. VE TİC. LTD. ŞTİ.
+2026-07-20 19:34:38,604 | INFO | Processing 110: EPSİLON CNC MAKİNA SAN. VE TİC. A.Ş.
+2026-07-20 19:34:38,605 | INFO | Processing 110 with supplied website: EPSİLON CNC MAKİNA SAN. VE TİC. A.Ş. -> https://www.epsiloncnc.com
+2026-07-20 19:34:38,622 | INFO | Completed 107/369: ENİGMA HIZLI BAĞLANTI SİSTEMLERİ SAN TİC LTD ŞTİ Temsilci Firma
+2026-07-20 19:34:39,565 | INFO | Processing 111: ER-EL MAKİNA YEDEK PARÇA İML SAN TİC LTD ŞTİ
+2026-07-20 19:34:39,567 | INFO | Processing 111 with supplied website: ER-EL MAKİNA YEDEK PARÇA İML SAN TİC LTD ŞTİ -> https://www.er-el.com.tr
+2026-07-20 19:34:39,584 | INFO | Completed 108/369: Enar Makina & Metal San ve Tic.Ltd.Şti Temsilci Firma
+2026-07-20 19:35:07,809 | INFO | Processing 112: ER-HA MÜHENDİSLİK MAK.SAN. İML. VE TİC.LTD. ŞTİ.
+2026-07-20 19:35:07,810 | INFO | Processing 112 with supplied website: ER-HA MÜHENDİSLİK MAK.SAN. İML. VE TİC.LTD. ŞTİ. -> https://pmmanipulators.com/
+2026-07-20 19:35:07,830 | INFO | Completed 109/369: ER-EL MAKİNA YEDEK PARÇA İML SAN TİC LTD ŞTİ
+2026-07-20 19:35:08,721 | INFO | Processing 113: ERBEND MAKİNA SANAYİ VE TİCARET A. Ş.
+2026-07-20 19:35:08,722 | INFO | Processing 113 with supplied website: ERBEND MAKİNA SANAYİ VE TİCARET A. Ş. -> https://www.erbend.com
+2026-07-20 19:35:08,740 | INFO | Completed 110/369: ENOX MAKİNA SAN .TİC.AŞ.
+2026-07-20 19:35:09,210 | INFO | Processing 114: ERBİLEKLER METAL İŞLEME ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:35:09,211 | INFO | Processing 114 with supplied website: ERBİLEKLER METAL İŞLEME ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ. -> https://erbilekler.com/
+2026-07-20 19:35:09,229 | INFO | Completed 111/369: EPSİLON CNC MAKİNA SAN. VE TİC. A.Ş.
+2026-07-20 19:35:24,134 | INFO | Processing 115: ERDAL ÖZKAN MAKİNA MÜH. GIDA İNŞ. İM. İHR. İTH. A.Ş.
+2026-07-20 19:35:24,135 | INFO | Processing 115 with supplied website: ERDAL ÖZKAN MAKİNA MÜH. GIDA İNŞ. İM. İHR. İTH. A.Ş. -> https://www.erdcrane.com
+2026-07-20 19:35:24,153 | INFO | Completed 112/369: ERBİLEKLER METAL İŞLEME ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:35:25,876 | INFO | Processing 116: ERDE DIŞ TİCARET LTD ŞTİ
+2026-07-20 19:35:25,877 | INFO | Processing 116 with supplied website: ERDE DIŞ TİCARET LTD ŞTİ -> https://www.erdeticaret.com.tr
+2026-07-20 19:35:25,895 | INFO | Completed 113/369: ERBEND MAKİNA SANAYİ VE TİCARET A. Ş.
+2026-07-20 19:35:39,061 | INFO | Processing 117: Erde Dış Ticaret Ltd. Şti. Temsilci Firma
+2026-07-20 19:35:39,104 | INFO | Processing 117 with supplied website: Erde Dış Ticaret Ltd. Şti. Temsilci Firma -> https://www.erdeticaret.com.tr/
+2026-07-20 19:35:39,126 | INFO | Completed 114/369: ER-HA MÜHENDİSLİK MAK.SAN. İML. VE TİC.LTD. ŞTİ.
+2026-07-20 19:35:39,876 | INFO | Processing 118: ERFAB İÇ VE DIŞ TİCARET A. Ş.
+2026-07-20 19:35:39,895 | INFO | Completed 115/369: ERDAL ÖZKAN MAKİNA MÜH. GIDA İNŞ. İM. İHR. İTH. A.Ş.
+2026-07-20 19:35:41,163 | INFO | Processing 119: ERHAN TEKNİK HIRDAVAT SAN. TİC. LTD ŞTİ
+2026-07-20 19:35:41,164 | INFO | Processing 119 with supplied website: ERHAN TEKNİK HIRDAVAT SAN. TİC. LTD ŞTİ -> https://www.erhanteknik.com.tr
+2026-07-20 19:35:41,183 | INFO | Completed 116/369: ERDE DIŞ TİCARET LTD ŞTİ
+2026-07-20 19:35:46,654 | INFO | Processing 120: ERİŞ MAKİNA SANAYİ VE TİCARET A.Ş.
+2026-07-20 19:35:46,674 | INFO | Completed 117/369: Erde Dış Ticaret Ltd. Şti. Temsilci Firma
+2026-07-20 19:35:52,395 | INFO | Processing 121: ERİŞ OTOMASYON MAK.SAN.TİC.LTD.ŞTİ.
+2026-07-20 19:35:52,417 | INFO | Completed 118/369: ERHAN TEKNİK HIRDAVAT SAN. TİC. LTD ŞTİ
+2026-07-20 19:36:10,094 | WARNING | Search query failed; continuing with remaining queries: erfab ic Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:36:20,771 | INFO | Processing 122: ERKAN CNC TEKNOLOJİLERİ A.Ş.
+2026-07-20 19:36:20,771 | INFO | Processing 122 with supplied website: ERKAN CNC TEKNOLOJİLERİ A.Ş. -> https://www.erkancnc.com/
+2026-07-20 19:36:20,791 | INFO | Completed 119/369: ERİŞ MAKİNA SANAYİ VE TİCARET A.Ş.
+2026-07-20 19:37:16,781 | WARNING | Search query failed; continuing with remaining queries: erfab ic ve dis ticaret a s makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:37:19,209 | INFO | Processing 123: ERKUR MAKİNE İMALAT PLASTİK İÇ VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:37:19,230 | INFO | Completed 120/369: ERKAN CNC TEKNOLOJİLERİ A.Ş.
+2026-07-20 19:37:42,270 | WARNING | Search query failed; continuing with remaining queries: eris otomasyon Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:38:26,526 | WARNING | Search query failed; continuing with remaining queries: erkur imalat makine (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:39:06,481 | WARNING | Search query failed; continuing with remaining queries: "eris otomasyon mak san tic ltd sti" web sitesi (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:39:26,636 | INFO | Exhibitor profile could not be read: https://smtech-eurasia.com/en/exhibitor-list/eris-otomasyon-maksanticltdsti-128017-2998 (HTTPSConnectionPool(host='smtech-eurasia.com', port=443): Max retries exceeded with url: /en/exhibitor-list/eris-otomasyon-maksanticltdsti-128017-2998 (Caused by SSLError(SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Hostname mismatch, certificate is not valid for 'smtech-eurasia.com'. (_ssl.c:1081)"))))
+2026-07-20 19:41:48,028 | INFO | Processing 124: ERMAKSAN MAKİNA SAN . VE TİC. A. Ş.
+2026-07-20 19:41:48,028 | INFO | Processing 124 with supplied website: ERMAKSAN MAKİNA SAN . VE TİC. A. Ş. -> https://www.ermaksan.com.tr
+2026-07-20 19:41:48,050 | INFO | Completed 121/369: ERİŞ OTOMASYON MAK.SAN.TİC.LTD.ŞTİ.
+2026-07-20 19:42:07,431 | INFO | Processing 125: EROĞLU MAKİNA SAN. TİC. A. Ş. HASSAS TUTUCU TAKIM FABRİKASI
+2026-07-20 19:42:07,432 | INFO | Processing 125 with supplied website: EROĞLU MAKİNA SAN. TİC. A. Ş. HASSAS TUTUCU TAKIM FABRİKASI -> https://www.eroglumakina.com
+2026-07-20 19:42:07,449 | INFO | Completed 122/369: ERMAKSAN MAKİNA SAN . VE TİC. A. Ş.
+2026-07-20 19:42:33,659 | INFO | Processing 126: ETİ BİLGİSAYAR DAN.VE DIŞ TİCARET LTD.ŞTİ.
+2026-07-20 19:42:33,660 | INFO | Processing 126 with supplied website: ETİ BİLGİSAYAR DAN.VE DIŞ TİCARET LTD.ŞTİ. -> https://www.eti.com.tr
+2026-07-20 19:42:33,679 | INFO | Completed 123/369: ERFAB İÇ VE DIŞ TİCARET A. Ş.
+2026-07-20 19:42:35,802 | INFO | Processing 127: Euroloy Carbide Tools Temsilci Firma
+2026-07-20 19:42:35,802 | INFO | Processing 127 with supplied website: Euroloy Carbide Tools Temsilci Firma -> https://euroloy.com
+2026-07-20 19:42:35,821 | INFO | Completed 124/369: EROĞLU MAKİNA SAN. TİC. A. Ş. HASSAS TUTUCU TAKIM FABRİKASI
+2026-07-20 19:42:45,984 | INFO | Processing 128: EUROSERVO MOTOR TAMİR HİZMETLERİ SAN VE TİC. A.Ş.
+2026-07-20 19:42:45,985 | INFO | Processing 128 with supplied website: EUROSERVO MOTOR TAMİR HİZMETLERİ SAN VE TİC. A.Ş. -> https://euroservo.com.tr/
+2026-07-20 19:42:46,003 | INFO | Completed 125/369: ETİ BİLGİSAYAR DAN.VE DIŞ TİCARET LTD.ŞTİ.
+2026-07-20 19:42:55,770 | INFO | Processing 129: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:42:55,771 | INFO | Processing 129 with supplied website: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ. -> https://www.eyinovasyon.com.tr
+2026-07-20 19:42:55,791 | INFO | Completed 126/369: Euroloy Carbide Tools Temsilci Firma
+2026-07-20 19:42:58,235 | INFO | Supplied website failed, falling back to search: EYM İNOVASYON MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:43:29,433 | WARNING | Search query failed; continuing with remaining queries: eym inovasyon makina san tic ltd sti Turkiye official website (Bright Data returned non-JSON body: This query cannot be attempted at this time. Please try again later)
+2026-07-20 19:43:43,980 | INFO | Processing 130: FLİO OTOMASYON MAKİNA SAN.TİC.LTD.ŞTİ.
+2026-07-20 19:43:43,981 | INFO | Processing 130 with supplied website: FLİO OTOMASYON MAKİNA SAN.TİC.LTD.ŞTİ. -> https://www.flio.com.tr
+2026-07-20 19:43:43,999 | INFO | Completed 127/369: EUROSERVO MOTOR TAMİR HİZMETLERİ SAN VE TİC. A.Ş.
+2026-07-20 19:43:54,199 | INFO | Processing 131: FLY METAL SAN.TİC.LTD.ŞTİ
+2026-07-20 19:43:54,219 | INFO | Completed 128/369: FLİO OTOMASYON MAKİNA SAN.TİC.LTD.ŞTİ.
+2026-07-20 19:45:18,440 | INFO | Processing 132: FORBA MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:45:18,441 | INFO | Processing 132 with supplied website: FORBA MAKİNA SAN. TİC. LTD. ŞTİ. -> https://forbamakina.com/
+2026-07-20 19:45:18,460 | INFO | Completed 129/369: ERKUR MAKİNE İMALAT PLASTİK İÇ VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:45:34,954 | INFO | Exhibitor profile could not be read: https://isinolsun.com/firma-profil/fly-metal-c82575 (HTTPSConnectionPool(host='isinolsun.com', port=443): Read timed out. (read timeout=10))
+2026-07-20 19:45:43,834 | INFO | Processing 133: FORM MAKİNE CNC TAKIM TEZG SAN VE TİC LTD ŞTİ
+2026-07-20 19:45:43,852 | INFO | Completed 130/369: FORBA MAKİNA SAN. TİC. LTD. ŞTİ.
+2026-07-20 19:46:09,304 | INFO | Exhibitor profile could not be read: https://iyifirma.com/fly-metal-sanayi-ve-ticaret-limited-sirketi/ (403 Client Error: Forbidden for url: https://iyifirma.com/fly-metal-sanayi-ve-ticaret-limited-sirketi/)
+

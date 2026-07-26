@@ -1,0 +1,46 @@
+﻿2026-07-20 19:56:46,335 | INFO | Source profile preflight: host=maktekfuari.com status=cached_available server_errors=0 circuit_open=False
+2026-07-20 19:56:46,371 | INFO | Resuming from index 145
+2026-07-20 19:56:46,375 | INFO | Processing 146: GUOHONG MAKİNA EKİPMANLARI İMALAT LİMİTED ŞİRKETİ
+2026-07-20 19:56:46,376 | INFO | Processing 147: GÜRİŞ İŞ MAKİNALARI END. A.Ş.
+2026-07-20 19:56:46,376 | INFO | Processing 148: GÜVENAL MAK.TİC.VE SAN.LTD.ŞTİ.
+2026-07-20 19:56:46,376 | INFO | Processing 152: HAN ELEKTRONİK VE MEKANİK SANAYİ İÇ VE DIŞ TİC. LTD. ŞTİ.
+2026-07-20 19:56:46,377 | INFO | Processing 153: HANKO MAKİNA SAN. VE TİC.LTD.ŞTİ.
+2026-07-20 19:56:46,377 | INFO | Processing 154: HARDE KALIP ELEMANLARI ÇELİK VE TEKNİK HIRDAVAT İTHALAT İHRACAT SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-07-20 19:56:46,377 | INFO | Processing 155: HASSAS MÜHENDİSLİK SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:56:46,377 | INFO | Processing 156: HATSAN SİLAH MAKİNA KALIP SAN VE TİC A.Ş.
+2026-07-20 19:56:46,380 | INFO | Search cache hit: guohong makina Turkiye official website
+2026-07-20 19:56:46,387 | INFO | Processing 152 with supplied website: HAN ELEKTRONİK VE MEKANİK SANAYİ İÇ VE DIŞ TİC. LTD. ŞTİ. -> http://www.hanelectronic.com/
+2026-07-20 19:56:46,387 | INFO | Processing 153 with supplied website: HANKO MAKİNA SAN. VE TİC.LTD.ŞTİ. -> http://www.hankoltd.com/
+2026-07-20 19:56:46,388 | INFO | Processing 155 with supplied website: HASSAS MÜHENDİSLİK SAN. VE TİC. LTD. ŞTİ. -> https://www.hassas.com
+2026-07-20 19:56:46,389 | INFO | Search cache hit: guris is Turkiye official website
+2026-07-20 19:56:46,389 | INFO | Processing 156 with supplied website: HATSAN SİLAH MAKİNA KALIP SAN VE TİC A.Ş. -> https://hatsancuttingtools.com/ https://hatsan.com.tr/tr/
+2026-07-20 19:56:46,399 | INFO | Search cache hit: guvenal mak Turkiye official website
+2026-07-20 19:56:46,413 | INFO | Search cache hit: guohong makina ekipmanlari imalat limited sirketi Turkiye official website
+2026-07-20 19:56:46,419 | INFO | Search cache hit: guvenal mak tic ve san ltd sti Turkiye official website
+2026-07-20 19:56:46,419 | INFO | Search cache hit: guris is makinalari end a s Turkiye official website
+2026-07-20 19:56:46,433 | INFO | Search cache hit: guohong makina resmi sitesi
+2026-07-20 19:56:46,439 | INFO | Search cache hit: guvenal mak resmi sitesi
+2026-07-20 19:56:46,447 | INFO | Search cache hit: guohong makina ekipmanlari imalat limited sirketi resmi sitesi
+2026-07-20 19:56:46,454 | INFO | Search cache hit: guvenal mak tic ve san ltd sti resmi sitesi
+2026-07-20 19:56:46,461 | INFO | Search cache hit: guohong makina makine
+2026-07-20 19:56:46,467 | INFO | Search cache hit: guvenal mak makine
+2026-07-20 19:56:46,473 | INFO | Search cache hit: guohong makina ekipmanlari imalat limited sirketi makine
+2026-07-20 19:56:46,487 | INFO | Search cache hit: guohong makina contact
+2026-07-20 19:56:46,500 | INFO | Search cache hit: "guohong makina" Turkiye resmi sitesi
+2026-07-20 19:56:56,212 | INFO | Search cache hit: guris is makinalari end a s resmi sitesi
+2026-07-20 19:56:56,226 | INFO | Search cache hit: guris is makine
+2026-07-20 19:56:56,240 | INFO | Search cache hit: guris is makinalari end a s makine
+2026-07-20 19:56:56,252 | INFO | Search cache hit: guris is contact
+2026-07-20 19:58:21,239 | INFO | Processing 157: HERMAKİNA CNC TAK.TEZ.VE BİL.SİS.İTH.İHR.SA.Tİ.LTD.ŞTİ.
+2026-07-20 19:58:21,241 | INFO | Processing 157 with supplied website: HERMAKİNA CNC TAK.TEZ.VE BİL.SİS.İTH.İHR.SA.Tİ.LTD.ŞTİ. -> https://hermakina.com.tr/
+2026-07-20 19:58:21,259 | INFO | Completed 149/369: GÜRİŞ İŞ MAKİNALARI END. A.Ş.
+2026-07-20 19:58:33,834 | INFO | Processing 158: HİCO MAKİNA VE MÜH.LTD.ŞTİ.
+2026-07-20 19:58:33,835 | INFO | Processing 158 with supplied website: HİCO MAKİNA VE MÜH.LTD.ŞTİ. -> https://www.hicopres.com/
+2026-07-20 19:58:33,851 | INFO | Completed 150/369: HATSAN SİLAH MAKİNA KALIP SAN VE TİC A.Ş.
+2026-07-20 19:58:47,608 | INFO | Processing 159: HİDKOM MÜHENDİSLİK MÜMES. TAAHHÜT MAK. VE TİC. LTD. ŞTİ.
+2026-07-20 19:58:47,609 | INFO | Processing 159 with supplied website: HİDKOM MÜHENDİSLİK MÜMES. TAAHHÜT MAK. VE TİC. LTD. ŞTİ. -> https://www.hidkom.com/
+2026-07-20 19:58:47,625 | INFO | Completed 151/369: HASSAS MÜHENDİSLİK SAN. VE TİC. LTD. ŞTİ.
+2026-07-20 19:58:51,537 | INFO | Processing 160: HİDROLİKSAN HALİM USTA HİDROLİK PRES İML .SAN. TİC.LTD.ŞTİ.
+2026-07-20 19:58:51,538 | INFO | Processing 160 with supplied website: HİDROLİKSAN HALİM USTA HİDROLİK PRES İML .SAN. TİC.LTD.ŞTİ. -> https://www.hidroliksan.com/
+2026-07-20 19:58:51,554 | INFO | Completed 152/369: HANKO MAKİNA SAN. VE TİC.LTD.ŞTİ.
+

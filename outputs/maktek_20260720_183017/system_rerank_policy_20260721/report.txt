@@ -1,0 +1,28 @@
+================================
+B2B Contact Finder - Sonuc Raporu
+================================
+Toplam firma: 369
+Website bulundu: 207 (56.1%)
+Otomatik kullanima uygun dogrulanmis website: 195 (52.8%)
+E-posta bulundu: 193 (52.3%)
+MX/A kaydi bulunan e-posta domaini: 191 (51.8%)
+Telefon bulundu: 202 (54.7%)
+Tam iletisim bilgisi bulunan firma (website+email+phone): 191 (51.8%)
+Otomatik kullanima uygun dogrulanmis firma: 195 (52.8%)
+Dogrulanmis tam iletisim: 190 (51.5%)
+Yuksek guvenli OK: 103 (27.9%)
+Orta guvenli OK: 92 (24.9%)
+Manuel kontrol gereken: 155 (42.0%)
+Website adayi belirsiz: 15 (4.1%)
+Yayinlanmayan/geri cekilen sonuc: 174 (47.2%)
+--------------------------------
+Ortalama skor: 76.8
+Kesfedilen aday/firma: 1.9
+Hafif kimlik taramasi/firma: 1.3
+Tam iletisim taramasi/firma: 0.7
+Crawler HTTP istegi/firma: 0.0
+Fuar profil 5xx: 0; devre kesici atlamasi: 0
+Bright Data API istekleri: 0
+Google Places API istekleri: 0
+Islem suresi: 0:06:44
+================================
