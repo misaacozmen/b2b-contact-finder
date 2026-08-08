@@ -1,0 +1,31 @@
+{
+  "captured_at": "2026-08-08",
+  "source_rows": 552,
+  "current_listing_rows": 507,
+  "shared_profiles": 470,
+  "company_profile_mismatches": 0,
+  "brand_metadata_added": 60,
+  "domain_token_proof_repaired": 4,
+  "fixed_seed_subset": {
+    "companies": 60,
+    "fair_listed_websites": 44,
+    "passed": 44,
+    "meaningful_identity_token": 43,
+    "profile_local_website": 1,
+    "failed": 0,
+    "brand_metadata_added": 9,
+    "domain_token_proof_repaired": 2
+  },
+  "named_findings": {
+    "4EL GIDA SAN. VE TİC. LTD. ŞTİ.": {
+      "domain": "torita.com.tr",
+      "brand": "Torita Tortillas",
+      "relationship": "confirmed_on_same_fair_card_and_profile"
+    },
+    "A.AKSULAR GIDA TİC.VE SAN. A.Ş.": {
+      "domain": "alyfoods.com",
+      "brand": "aly",
+      "relationship": "confirmed_on_same_fair_card_and_profile"
+    }
+  }
+}

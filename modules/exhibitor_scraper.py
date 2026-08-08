@@ -539,6 +539,58 @@ def _maktek_profile_details(html: str) -> dict:
     return details
 
 
+def _brand_values(card) -> str:
+    """Read brand names that belong to this card, without crossing card boundaries."""
+    heading = next(
+        (
+            item
+            for item in card.select("h3.brand-desc-title")
+            if _fold(item.get_text(" ", strip=True)) == _fold("Markalar")
+        ),
+        None,
+    )
+    if heading is None:
+        return ""
+
+    values: list[str] = []
+    pending: list[str] = []
+    for sibling in heading.next_siblings:
+        name = getattr(sibling, "name", None)
+        if name == "button" or (name and name.startswith("h")):
+            break
+        if name == "br":
+            value = _clean(" ".join(pending))
+            if value:
+                values.append(value.rstrip(",;"))
+            pending = []
+            continue
+        text = sibling.get_text(" ", strip=True) if name else str(sibling)
+        if _clean(text):
+            pending.append(_clean(text))
+    value = _clean(" ".join(pending))
+    if value:
+        values.append(value.rstrip(",;"))
+    return "; ".join(dict.fromkeys(item for item in values if item))
+
+
+def _profile_company_key(value: str) -> str:
+    folded = re.sub(r"\btemsilci\s+firma\b", " ", _fold(value))
+    return re.sub(r"[^a-z0-9]+", "", folded)
+
+
+def _merge_brand_catalog_profile(row: dict, details: dict, *, website_field: str) -> bool:
+    """Merge a detail page only when its heading identifies the listing company."""
+    listing_key = _profile_company_key(str(row.get("company", "")))
+    profile_key = _profile_company_key(str(details.get("company", "")))
+    if not listing_key or not profile_key or listing_key != profile_key:
+        return False
+    for field, value in details.items():
+        if not value or field == "company":
+            continue
+        row[website_field if field == "website" else field] = value
+    return True
+
+
 def _brand_catalog_list_rows(
     html: str,
     base_url: str,
@@ -581,7 +633,7 @@ def _brand_catalog_list_rows(
             "listed_address": "",
             "hall": hall,
             "stand": stand,
-            "brands": "",
+            "brands": _brand_values(card),
             "representations": "",
         })
     return rows
@@ -625,9 +677,7 @@ def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[di
                 try:
                     detail_html = _get(session, profile_url)
                     details = _maktek_profile_details(detail_html)
-                    for field, value in details.items():
-                        if value:
-                            row[field] = value
+                    _merge_brand_catalog_profile(row, details, website_field="website")
                     time.sleep(delay_sec)
                 except requests.RequestException:
                     pass
@@ -675,12 +725,7 @@ def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[d
                 try:
                     detail_html = _get(session, profile_url)
                     details = _maktek_profile_details(detail_html)
-                    for field, value in details.items():
-                        if value:
-                            if field == "website":
-                                row["listed_website"] = value
-                            else:
-                                row[field] = value
+                    _merge_brand_catalog_profile(row, details, website_field="listed_website")
                     time.sleep(delay_sec)
                 except requests.RequestException:
                     pass

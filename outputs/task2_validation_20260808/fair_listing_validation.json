@@ -1,0 +1,320 @@
+{
+  "checked_count": 44,
+  "passed_count": 44,
+  "failed_count": 0,
+  "proof_counts": {
+    "profile_local_website": 1,
+    "meaningful_identity_token": 43
+  },
+  "failures": [],
+  "results": [
+    {
+      "company": "ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "domain": "natyyror.com.tr",
+      "proof": "profile_local_website",
+      "matched_token": "",
+      "brands": ""
+    },
+    {
+      "company": "AGRO SEEDS GIDA SAN.VE TİC.LTD.ŞTİ.",
+      "domain": "agroseedsgida.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "agro",
+      "brands": "AGRO SEEDS"
+    },
+    {
+      "company": "AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş",
+      "domain": "aromsa.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "aromsa",
+      "brands": ""
+    },
+    {
+      "company": "AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.",
+      "domain": "avsarmadensuyu.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "avsar",
+      "brands": "AVŞAR DOĞAL MADENSUYU"
+    },
+    {
+      "company": "AYDIN KURUYEMİŞ SAN.VE TİC.A.Ş.",
+      "domain": "aydinkuruyemis.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "aydin",
+      "brands": "AYDIN, BUNGEE, REGAL, SEMBOL"
+    },
+    {
+      "company": "AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.",
+      "domain": "aynira.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "aynira",
+      "brands": ""
+    },
+    {
+      "company": "BEŞEM GIDA SANAYİ VE TİC. LTD. ŞTİ. Temsilci Firma",
+      "domain": "besemgida.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "besem",
+      "brands": ""
+    },
+    {
+      "company": "BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.",
+      "domain": "chocovia.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "chocovia",
+      "brands": "CHOCOVİA"
+    },
+    {
+      "company": "BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.",
+      "domain": "wwww.bilgemgida.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "bilgem",
+      "brands": "KALETAT"
+    },
+    {
+      "company": "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.",
+      "domain": "burcu.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "burcu",
+      "brands": "BURCU GIDA, BURCU GIDA"
+    },
+    {
+      "company": "burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma",
+      "domain": "burcu.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "burcu",
+      "brands": ""
+    },
+    {
+      "company": "Chef Seasons Gıda San ve Tic A.Ş. Temsilci Firma",
+      "domain": "chefseasons.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "chef",
+      "brands": ""
+    },
+    {
+      "company": "DURUM GIDA SANAYİ VE TİCARET A.Ş.",
+      "domain": "durum.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "durum",
+      "brands": ""
+    },
+    {
+      "company": "EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ",
+      "domain": "ekolfood.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "ekol",
+      "brands": ""
+    },
+    {
+      "company": "EKREM AGRO DIŞ TİC. A.Ş.",
+      "domain": "ekremagro.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "ekrem",
+      "brands": ""
+    },
+    {
+      "company": "ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma",
+      "domain": "elatli.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "elatli",
+      "brands": ""
+    },
+    {
+      "company": "ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.",
+      "domain": "erishelva.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "helva",
+      "brands": "Eriş, Green Garden, Oduncuzade, Pacamara Coffee"
+    },
+    {
+      "company": "ERYILMAZ AGRO GRUP GIDA MEDİKAL ELEKTRİK TEKSTİL SAN. TİC. LTD. ŞTİ.",
+      "domain": "eryilmazagro.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "eryilmaz",
+      "brands": "Agrozera"
+    },
+    {
+      "company": "HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.",
+      "domain": "yesiltat.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "yesiltat",
+      "brands": "YEŞİLTAT ENDÜSTRİYEL ANTEP FISTIĞI"
+    },
+    {
+      "company": "İSTANBUL TİCARET BORSASI",
+      "domain": "istib.org.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "istib",
+      "brands": ""
+    },
+    {
+      "company": "KADRİ TİCARET İTH. İHR. LTD.ŞTİ.",
+      "domain": "kadrigroup.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "kadri",
+      "brands": ""
+    },
+    {
+      "company": "KhalsCO Temsilci Firma",
+      "domain": "khalscompany.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "khalsco",
+      "brands": ""
+    },
+    {
+      "company": "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "domain": "lark.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "lark",
+      "brands": ""
+    },
+    {
+      "company": "LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma",
+      "domain": "lebas.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "lebas",
+      "brands": ""
+    },
+    {
+      "company": "MASTIQE SAKIZ - GLOBAL GROWTH DANIŞMANLIK GIDA A.Ş.",
+      "domain": "mastiqesakiz.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "mastiqe",
+      "brands": "Mastiqe Sakız"
+    },
+    {
+      "company": "Morello Temsilci Firma",
+      "domain": "morellosweets.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "morello",
+      "brands": ""
+    },
+    {
+      "company": "MOST FOOD GIDA ÜRETİM SAN. VE TİC. A.Ş.",
+      "domain": "mostfood.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "most",
+      "brands": ""
+    },
+    {
+      "company": "NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI",
+      "domain": "cerezpazari.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "cerez",
+      "brands": "Çerez Pazarı"
+    },
+    {
+      "company": "NARPA NARİN DIŞ TİCARET A.Ş.",
+      "domain": "narpa.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "narpa",
+      "brands": ""
+    },
+    {
+      "company": "PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma",
+      "domain": "palamidas.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "palamidas",
+      "brands": ""
+    },
+    {
+      "company": "PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "domain": "patiswiss.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "patiswiss",
+      "brands": "Patiswiss"
+    },
+    {
+      "company": "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ",
+      "domain": "porsionfood.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "porsion",
+      "brands": "PorsiOn, Mia's"
+    },
+    {
+      "company": "RELLA GIDA SAN. VE TİC. A.Ş.",
+      "domain": "rellagida.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "rella",
+      "brands": "Rella Mozzarella, Rella Frozen Cake, Rella Powder, Rella Nutrition"
+    },
+    {
+      "company": "ROVEN GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "domain": "roven.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "roven",
+      "brands": "ALPINES, MIR COCO, MEXY, RIXOS, SWEET STAR, FIOLA"
+    },
+    {
+      "company": "SAADET GIDA PAZ SAN VE TİC LTD ŞTİ",
+      "domain": "saadet.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "saadet",
+      "brands": "JELLOPY, YUMMY GUMMY, NAZAR, EKŞİYÜZ, FRESH SMILE, BAY BALON, MİSKET"
+    },
+    {
+      "company": "SALMANLI KURUYEMİŞ GIDA İNŞ. TAAH. OTO. TAR. NAK. PET. İTH VE SAN. TİC. LTD. ŞTİ.",
+      "domain": "salmanlikuruyemis.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "salmanli",
+      "brands": "SALMANLI"
+    },
+    {
+      "company": "SALMANLI KURUYEMİŞ GIDA İNŞ. TAAH. OTO. TAR. NAK. PET. İTH. İHR. VE SAN. TİC. LTD. ŞTİ. Temsilci Firma",
+      "domain": "salmanlikuruyemis.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "salmanli",
+      "brands": ""
+    },
+    {
+      "company": "SARAY BİSKÜVİ VE GIDA SAN. A.Ş.",
+      "domain": "saraybiskuvi.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "saray",
+      "brands": "Saray Gıda ve San. A.Ş."
+    },
+    {
+      "company": "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ",
+      "domain": "turna.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "turna",
+      "brands": "TURNA, SAFFY, EVVEL, LAURA, SHIMAL, ENTAT"
+    },
+    {
+      "company": "ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "domain": "senocaknut.com",
+      "proof": "meaningful_identity_token",
+      "matched_token": "senocak",
+      "brands": ""
+    },
+    {
+      "company": "SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma",
+      "domain": "suphan.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "suphan",
+      "brands": ""
+    },
+    {
+      "company": "UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.",
+      "domain": "unadam tortilla & lavash",
+      "proof": "meaningful_identity_token",
+      "matched_token": "unadam",
+      "brands": ""
+    },
+    {
+      "company": "UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.",
+      "domain": "tada.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "tada",
+      "brands": "TADA, Tada Profesyonel, Tada Outdoor, Sahure Hanım"
+    },
+    {
+      "company": "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.",
+      "domain": "youtopia.com.tr",
+      "proof": "meaningful_identity_token",
+      "matched_token": "utopia",
+      "brands": "YOUTOPİA"
+    }
+  ]
+}

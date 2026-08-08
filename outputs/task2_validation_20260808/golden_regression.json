@@ -1,0 +1,30 @@
+{
+  "run_date": "2026-08-08",
+  "unit_tests": {
+    "passed": 454,
+    "failed": 0
+  },
+  "golden_tiers_45": {
+    "baseline_rows": 45,
+    "current_rows": 45,
+    "changed_rows": 0,
+    "website_correct": 45,
+    "email_correct_given_site": 39,
+    "phone_correct_given_site": 43
+  },
+  "golden_5": {
+    "baseline_rows": 20,
+    "current_rows": 20,
+    "changed_rows": 0
+  },
+  "golden_package_tests": [
+    "golden_manual_validation_20260713",
+    "golden_2_20260714",
+    "golden_3_20260715",
+    "golden_4_20260715",
+    "golden_5_20260716",
+    "golden_6_20260718",
+    "golden_lists_20260804",
+    "maktek_20260720_183017"
+  ]
+}

@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from modules.exhibitor_scraper import (
@@ -6,6 +7,7 @@ from modules.exhibitor_scraper import (
     _fold,
     _maktek_list_rows,
     _maktek_profile_details,
+    _merge_brand_catalog_profile,
     scrape_maktek,
 )
 
@@ -53,6 +55,8 @@ PROFILE_HTML = """
 </main>
 """
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 
 class MaktekScraperTests(unittest.TestCase):
     def test_fold_normalizes_turkish_dotless_i(self):
@@ -72,6 +76,64 @@ class MaktekScraperTests(unittest.TestCase):
         self.assertEqual(
             rows[0]["profile_url"],
             "https://www.foodistexpo.com/brand/ornek-makina",
+        )
+
+    def test_current_foodist_cards_keep_company_brand_and_website_together(self):
+        list_html = (FIXTURES / "foodist_brand_cards_20260808.html").read_text(
+            encoding="utf-8"
+        )
+        rows = _brand_catalog_list_rows(
+            list_html,
+            "https://www.foodistexpo.com",
+            source="foodist_expo_turkiye",
+            sector="gıda ve içecek",
+        )
+        details_by_company = {
+            "4EL GIDA SAN. VE TİC. LTD. ŞTİ.": _maktek_profile_details(
+                (FIXTURES / "foodist_4el_profile_20260808.html").read_text(encoding="utf-8")
+            ),
+            "A.AKSULAR GIDA TİC.VE SAN. A.Ş.": _maktek_profile_details(
+                (FIXTURES / "foodist_aaksular_profile_20260808.html").read_text(
+                    encoding="utf-8"
+                )
+            ),
+        }
+
+        self.assertEqual(
+            [(row["company"], row["brands"]) for row in rows],
+            [
+                ("4EL GIDA SAN. VE TİC. LTD. ŞTİ.", "Torita Tortillas"),
+                ("A.AKSULAR GIDA TİC.VE SAN. A.Ş.", "aly"),
+            ],
+        )
+        for row in rows:
+            self.assertTrue(
+                _merge_brand_catalog_profile(
+                    row, details_by_company[row["company"]], website_field="listed_website"
+                )
+            )
+        self.assertEqual(
+            [row["listed_website"] for row in rows],
+            ["https://www.torita.com.tr", "https://alyfoods.com"],
+        )
+
+        swapped = dict(rows[0], listed_website="")
+        self.assertFalse(
+            _merge_brand_catalog_profile(
+                swapped,
+                details_by_company["A.AKSULAR GIDA TİC.VE SAN. A.Ş."],
+                website_field="listed_website",
+            )
+        )
+        self.assertEqual(swapped["listed_website"], "")
+
+        representative = dict(rows[0], company=rows[0]["company"] + " Temsilci Firma")
+        self.assertTrue(
+            _merge_brand_catalog_profile(
+                representative,
+                details_by_company["4EL GIDA SAN. VE TİC. LTD. ŞTİ."],
+                website_field="listed_website",
+            )
         )
 
     def test_list_parser_keeps_profile_and_location(self):
@@ -100,6 +162,10 @@ class MaktekScraperTests(unittest.TestCase):
 
         def response(_session, url):
             if "brand/" in url:
+                if "ikinci-makina" in url:
+                    return PROFILE_HTML.replace(
+                        "ÖRNEK MAKİNA SAN. VE TİC. A.Ş.", "İKİNCİ MAKİNA A.Ş."
+                    )
                 return PROFILE_HTML
             if "page=2" in url:
                 return page_two
