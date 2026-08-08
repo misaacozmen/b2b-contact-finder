@@ -233,6 +233,27 @@ class CandidateFingerprint:
         )
 
     @property
+    def safe_verified_first_party_route(self) -> bool:
+        """Resolve a domain-backed identity proved by its own site and contact."""
+        domain_identity = bool(
+            self.public_brand_domain
+            or self.primary_domain_exact
+            or self.primary_domain_contextual
+            or (
+                self.structured_business_name_corroborated
+                and self.structured_strength >= 2
+            )
+        )
+        return bool(
+            self.verified_identity
+            and domain_identity
+            and self.page_strength >= 2
+            and self.same_site_contact
+            and self.canonical_domain_consistent
+            and self.has_contact
+        )
+
+    @property
     def domain_specificity(self) -> int:
         """Prefer the domain that names the requested entity, not a sibling."""
         if self.obvious_exact_domain:
@@ -261,6 +282,7 @@ class CandidateFingerprint:
         return bool(
             self.safe_exact_domain_route
             or self.safe_exact_website_route
+            or self.safe_verified_first_party_route
             or (
                 self.verified_identity
                 and self.has_contact
@@ -279,6 +301,7 @@ class CandidateFingerprint:
             and self.official_query_evidence < 2
             and not self.obvious_exact_domain
             and not self.safe_places_contact_route
+            and not self.safe_verified_first_party_route
         )
         if weak_country_homonym:
             return False
@@ -300,9 +323,10 @@ class CandidateFingerprint:
             or self.safe_structured_uniqueness_route
             or self.safe_exact_primary_structured_route
             or self.safe_short_brand_context_route
+            or self.safe_verified_first_party_route
             or (
-            self.verified_identity
-            and (legal_identity or intrinsic_bundle)
+                self.verified_identity
+                and (legal_identity or intrinsic_bundle)
             )
         )
 
@@ -582,6 +606,7 @@ def _identity_key(item: tuple[dict, CandidateFingerprint]) -> tuple[int, ...]:
         int(value.safe_structured_uniqueness_route),
         int(value.safe_exact_primary_structured_route),
         int(value.safe_short_brand_context_route),
+        int(value.safe_verified_first_party_route),
         value.domain_specificity,
         int(value.verified_identity),
         int(value.direct_entity_identity),

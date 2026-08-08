@@ -71,10 +71,10 @@ def configure_blind_run(state_dir: Path = STATE) -> None:
     # Hunter e-mail results are third-party data. Keep them out of publication;
     # use Hunter only to discover a candidate company domain.
     config.ENABLE_HUNTER_FALLBACK = False
-    config.BRIGHTDATA_REQUEST_BUDGET = BRIGHTDATA_BUDGET
-    config.GOOGLE_PLACES_REQUEST_BUDGET = GOOGLE_PLACES_BUDGET
-    config.BRANDFETCH_REQUEST_BUDGET = BRANDFETCH_BUDGET
-    config.HUNTER_REQUEST_BUDGET = HUNTER_DOMAIN_BUDGET
+    config.BRIGHTDATA_REQUEST_HARD_CAP = config.BRIGHTDATA_REQUEST_BUDGET = BRIGHTDATA_BUDGET
+    config.GOOGLE_PLACES_REQUEST_HARD_CAP = config.GOOGLE_PLACES_REQUEST_BUDGET = GOOGLE_PLACES_BUDGET
+    config.BRANDFETCH_REQUEST_HARD_CAP = config.BRANDFETCH_REQUEST_BUDGET = BRANDFETCH_BUDGET
+    config.HUNTER_REQUEST_HARD_CAP = config.HUNTER_REQUEST_BUDGET = HUNTER_DOMAIN_BUDGET
 
     # Let the core size fallback capacity from the actual input row count.
     config.SEARCH_HTTP_REQUEST_BUDGET = 0

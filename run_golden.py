@@ -59,8 +59,8 @@ def main_cli() -> None:
     args = _parse_args()
     config.SEARCH_CACHE_MODE = "replay" if args.rerank_cache else args.search_cache
     config.CRAWL_CACHE_MODE = "replay" if args.rerank_cache else args.crawl_cache
-    config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)
-    config.GOOGLE_PLACES_REQUEST_BUDGET = max(0, args.google_places_budget)
+    config.BRIGHTDATA_REQUEST_HARD_CAP = config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)
+    config.GOOGLE_PLACES_REQUEST_HARD_CAP = config.GOOGLE_PLACES_REQUEST_BUDGET = max(0, args.google_places_budget)
     if args.rerank_cache:
         config.MIN_DELAY_SEC = 0
         config.MAX_DELAY_SEC = 0

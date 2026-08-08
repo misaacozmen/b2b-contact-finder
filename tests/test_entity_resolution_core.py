@@ -393,6 +393,37 @@ class EntityResolutionCoreTests(unittest.TestCase):
         self.assertEqual(result.status, "resolved")
         self.assertIs(result.selected, evaluation)
 
+    def test_verified_intrinsic_domain_with_phone_only_country_resolves(self):
+        evaluation = _evaluation(
+            "https://longmarkproducts.com",
+            reasons=[
+                "page_identity_strong:2/2",
+                "country_identity_tr_phone",
+            ],
+            source_profile=False,
+        )
+        result = entity_resolution.resolve_candidates(
+            "LONGMARK PRODUCTS SANAYI TICARET", [evaluation],
+        )
+        self.assertEqual(result.status, "resolved")
+        self.assertIs(result.selected, evaluation)
+
+    def test_verified_first_party_route_requires_same_site_contact(self):
+        evaluation = _evaluation(
+            "https://longmarkproducts.com",
+            reasons=[
+                "page_identity_strong:2/2",
+                "country_identity_tr_phone",
+            ],
+            source_profile=False,
+        )
+        evaluation["email_source_url"] = "https://directory.example/contact"
+        evaluation["phone_source_url"] = "https://directory.example/contact"
+        result = entity_resolution.resolve_candidates(
+            "LONGMARK PRODUCTS SANAYI TICARET", [evaluation],
+        )
+        self.assertEqual(result.status, "unresolved")
+
     def test_short_brand_domain_still_requires_legal_identity(self):
         evaluation = _evaluation(
             "https://tat.com.tr",

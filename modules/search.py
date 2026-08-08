@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import json
 import re
@@ -139,6 +140,36 @@ def configure_run_budget(company_count: int) -> int:
         _RUN_PAID_QUERY_LIMIT = min(max(1, configured), fair_share)
     runtime.record("search.paid_query_limit_per_company", _RUN_PAID_QUERY_LIMIT)
     return _RUN_PAID_QUERY_LIMIT
+
+
+def scale_paid_api_budgets(company_count: int) -> dict[str, int]:
+    """Scale paid ceilings to the firms that actually need escalation."""
+    count = max(0, int(company_count))
+    budgets = {
+        "brightdata": min(
+            config.BRIGHTDATA_REQUEST_HARD_CAP,
+            math.ceil(count * config.BRIGHTDATA_REQUEST_RATIO),
+        ),
+        "google_places": min(
+            config.GOOGLE_PLACES_REQUEST_HARD_CAP,
+            math.ceil(count * config.GOOGLE_PLACES_REQUEST_RATIO),
+        ),
+        "hunter": min(
+            config.HUNTER_REQUEST_HARD_CAP,
+            math.ceil(count * config.HUNTER_REQUEST_RATIO),
+        ),
+        "brandfetch": min(
+            config.BRANDFETCH_REQUEST_HARD_CAP,
+            math.ceil(count * config.BRANDFETCH_REQUEST_RATIO),
+        ),
+    }
+    config.BRIGHTDATA_REQUEST_BUDGET = budgets["brightdata"]
+    config.GOOGLE_PLACES_REQUEST_BUDGET = budgets["google_places"]
+    config.HUNTER_REQUEST_BUDGET = budgets["hunter"]
+    config.BRANDFETCH_REQUEST_BUDGET = budgets["brandfetch"]
+    for provider, budget in budgets.items():
+        runtime.record(f"budget.{provider}.scaled", budget)
+    return budgets
 
 
 def _effective_paid_query_limit() -> int:
@@ -383,15 +414,20 @@ def _brightdata_text(query: str) -> list[dict]:
         )
     decode_error: BrightDataSearchError | None = None
     data = None
-    for parse_attempt in range(config.MAX_RETRIES + 1):
+    for parse_attempt in range(config.BRIGHTDATA_MAX_DECODE_RETRIES + 1):
         try:
             data = _decode_brightdata_response(response)
             break
         except BrightDataSearchError as exc:
             decode_error = exc
-            if parse_attempt >= config.MAX_RETRIES:
+            if parse_attempt >= config.BRIGHTDATA_MAX_DECODE_RETRIES:
                 raise
             retry_delay = _retry_delay(response, parse_attempt)
+            if not response.text.strip():
+                retry_delay = max(
+                    retry_delay, config.BRIGHTDATA_EMPTY_BODY_RETRY_SEC,
+                )
+                runtime.record("api.brightdata.empty_body_retries")
             cooldown = re.search(
                 r"minimum\s+of\s+(\d+(?:\.\d+)?)\s+seconds?",
                 str(exc),
@@ -534,7 +570,8 @@ def _safe_search_text(query: str) -> list[dict]:
         return results
     except Exception as exc:
         LOGGER.warning("Search query failed; continuing with remaining queries: %s (%s)", query, exc)
-        runtime.record("search.provider_failures")
+        if not isinstance(exc, SearchBudgetExhausted):
+            runtime.record("search.provider_failures")
         if config.SEARCH_PROVIDER == "brightdata":
             if not isinstance(exc, SearchBudgetExhausted):
                 _record_brightdata_result(False)

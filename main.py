@@ -2476,6 +2476,7 @@ def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
         row.pop("__candidate_evaluations", None)
         row.pop("__search_trace", None)
         row.pop("__source_health", None)
+        row.pop("__paid_escalation_complete", None)
     published_rows = [row for row in rows if row.get("status") in report.OK_STATUSES]
     # contacts.xlsx is the publication surface. Review/abstain rows remain in
     # the dedicated audit artifacts and must never look like published firms.
@@ -2713,6 +2714,34 @@ def _deduplicate_company_records(records: list[dict]) -> tuple[list[dict], int]:
     return list(unique.values()), duplicate_count
 
 
+_PAID_ESCALATION_STATUSES = {
+    "REVIEW_NEEDED", "WEBSITE_NOT_FOUND", "WEBSITE_AMBIGUOUS",
+    "WEBSITE_FETCH_FAILED",
+}
+
+
+def _needs_paid_escalation(row: dict) -> bool:
+    return bool(
+        not row.get("__paid_escalation_complete")
+        and (
+            row.get("status") in _PAID_ESCALATION_STATUSES
+            or row.get("reason") == "no_candidate_proved_target_fingerprint"
+        )
+    )
+
+
+def _result_quality_key(row: dict) -> tuple[int, ...]:
+    status = str(row.get("status", ""))
+    return (
+        int(status in report.OK_STATUSES),
+        int(bool(row.get("publication_eligible"))),
+        int(bool(row.get("website"))),
+        int(bool(row.get("email"))) + int(bool(row.get("phone"))),
+        int(row.get("score") or 0),
+        -int(row.get("reason") == "no_candidate_proved_target_fingerprint"),
+    )
+
+
 def run(
     input_file: Path,
     output_dir: Path | None = None,
@@ -2755,6 +2784,21 @@ def run(
         record["company"] for record in company_records
     ])
     paid_query_limit = search.configure_run_budget(len(company_records))
+    paid_settings = {
+        "search_provider": config.SEARCH_PROVIDER,
+        "google_places": config.ENABLE_GOOGLE_PLACES,
+        "brandfetch": config.ENABLE_BRANDFETCH_DOMAIN_SEARCH,
+        "hunter_domain": config.ENABLE_HUNTER_DOMAIN_FINDER,
+    }
+    paid_escalation_enabled = bool(
+        config.SEARCH_CACHE_MODE != "replay"
+        and (
+            paid_settings["search_provider"] == "brightdata"
+            or (paid_settings["google_places"] and config.GOOGLE_PLACES_API_KEY)
+            or paid_settings["brandfetch"]
+            or paid_settings["hunter_domain"]
+        )
+    )
 
     source_preflight = search.preflight_source_profiles(company_records)
     for health in source_preflight:
@@ -2775,6 +2819,7 @@ def run(
             "brandfetch_budget": config.BRANDFETCH_REQUEST_BUDGET,
             "hunter_budget": config.HUNTER_REQUEST_BUDGET,
             "replay_snapshot": str(config.REPLAY_SNAPSHOT_INPUT or ""),
+            "two_pass_paid_escalation": paid_escalation_enabled,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -2803,11 +2848,13 @@ def run(
         for idx, record in enumerate(company_records)
         if idx not in results_by_index and idx >= start_index
     ]
-    try:
+    def execute_phase(items: list[tuple[int, dict]], *, paid_phase: bool) -> None:
+        if not items:
+            return
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures = {
                 executor.submit(process_company, idx, record["company"], logger, record.get("website", ""), record): idx
-                for idx, record in pending
+                for idx, record in items
             }
             for future in as_completed(futures):
                 try:
@@ -2822,6 +2869,15 @@ def run(
                         f"{exc.__class__.__name__}: {exc}",
                     )
                 row["__index"] = idx
+                row["__paid_escalation_complete"] = bool(
+                    paid_phase or not paid_escalation_enabled
+                    or row.get("status") in report.OK_STATUSES
+                )
+                if paid_phase and idx in results_by_index:
+                    previous = results_by_index[idx]
+                    if _result_quality_key(previous) > _result_quality_key(row):
+                        previous["__paid_escalation_complete"] = True
+                        row = previous
                 results_by_index[idx] = row
                 checkpoint.save_result(input_file, idx, row, run_signature)
                 if (
@@ -2831,10 +2887,39 @@ def run(
                 ):
                     replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
                 logger.info("Completed %s/%s: %s", len(results_by_index), len(company_records), row["company"])
+
+    try:
+        if paid_escalation_enabled:
+            config.SEARCH_PROVIDER = "ddgs"
+            config.ENABLE_GOOGLE_PLACES = False
+            config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = False
+            config.ENABLE_HUNTER_DOMAIN_FINDER = False
+            runtime.record("pipeline.free_pass_companies", len(pending))
+        execute_phase(pending, paid_phase=False)
+
+        config.SEARCH_PROVIDER = paid_settings["search_provider"]
+        config.ENABLE_GOOGLE_PLACES = paid_settings["google_places"]
+        config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = paid_settings["brandfetch"]
+        config.ENABLE_HUNTER_DOMAIN_FINDER = paid_settings["hunter_domain"]
+        escalation = [
+            (idx, company_records[idx])
+            for idx, row in sorted(results_by_index.items())
+            if _needs_paid_escalation(row)
+        ]
+        if paid_escalation_enabled and escalation:
+            runtime.record("pipeline.paid_escalation_companies", len(escalation))
+            search.scale_paid_api_budgets(len(escalation))
+            search.configure_run_budget(len(escalation))
+            execute_phase(escalation, paid_phase=True)
     except KeyboardInterrupt:
         replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
         logger.warning("Interrupted. Progress checkpoint was saved.")
         raise
+    finally:
+        config.SEARCH_PROVIDER = paid_settings["search_provider"]
+        config.ENABLE_GOOGLE_PLACES = paid_settings["google_places"]
+        config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = paid_settings["brandfetch"]
+        config.ENABLE_HUNTER_DOMAIN_FINDER = paid_settings["hunter_domain"]
 
     rows = [results_by_index[i] for i in range(len(company_records))]
     report_text = _write_outputs(rows, time.monotonic() - start_time)
@@ -2880,8 +2965,10 @@ if __name__ == "__main__":
         _set_run_state_dir(args.run_state_dir)
     config.SEARCH_CACHE_MODE = "replay" if args.rerank_cache else args.search_cache
     config.CRAWL_CACHE_MODE = "replay" if args.rerank_cache else args.crawl_cache
-    config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)
-    config.GOOGLE_PLACES_REQUEST_BUDGET = max(0, args.google_places_budget)
+    config.BRIGHTDATA_REQUEST_HARD_CAP = max(0, args.brightdata_budget)
+    config.GOOGLE_PLACES_REQUEST_HARD_CAP = max(0, args.google_places_budget)
+    config.BRIGHTDATA_REQUEST_BUDGET = config.BRIGHTDATA_REQUEST_HARD_CAP
+    config.GOOGLE_PLACES_REQUEST_BUDGET = config.GOOGLE_PLACES_REQUEST_HARD_CAP
     config.REPLAY_SNAPSHOT_INPUT = args.replay_snapshot
     if args.rerank_cache:
         config.MIN_DELAY_SEC = 0

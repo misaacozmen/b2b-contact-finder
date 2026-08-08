@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import config
+import main
 from modules import discovery_coverage, query_planner, runtime, search
 
 
@@ -52,6 +53,80 @@ class DiverseQueryBudgetTests(unittest.TestCase):
         ):
             search.configure_run_budget(80)
             self.assertEqual(config.SEARCH_HTTP_REQUEST_BUDGET, 800)
+
+    def test_paid_api_budgets_scale_to_escalation_count_and_hard_caps(self):
+        with patch.object(config, "BRIGHTDATA_REQUEST_HARD_CAP", 500), patch.object(
+            config, "GOOGLE_PLACES_REQUEST_HARD_CAP", 100,
+        ), patch.object(config, "HUNTER_REQUEST_HARD_CAP", 25), patch.object(
+            config, "BRANDFETCH_REQUEST_HARD_CAP", 100,
+        ), patch.object(config, "BRIGHTDATA_REQUEST_RATIO", 1.5), patch.object(
+            config, "GOOGLE_PLACES_REQUEST_RATIO", 0.25,
+        ), patch.object(config, "HUNTER_REQUEST_RATIO", 0.10), patch.object(
+            config, "BRANDFETCH_REQUEST_RATIO", 0.25,
+        ):
+            budgets = search.scale_paid_api_budgets(40)
+        self.assertEqual(budgets, {
+            "brightdata": 60,
+            "google_places": 10,
+            "hunter": 4,
+            "brandfetch": 10,
+        })
+
+    def test_live_pipeline_escalates_only_unresolved_rows_to_paid_sources(self):
+        calls = []
+
+        def process(index, company, logger, known_website="", metadata=None):
+            calls.append((company, config.SEARCH_PROVIDER, config.ENABLE_GOOGLE_PLACES))
+            resolved = company == "FREE OK" or config.SEARCH_PROVIDER == "brightdata"
+            return index, {
+                "company": company,
+                "status": "OK_HIGH_CONFIDENCE" if resolved else "REVIEW_NEEDED",
+                "reason": "verified" if resolved else "no_candidate_proved_target_fingerprint",
+                "website": "https://example.com" if resolved else "",
+                "email": "",
+                "phone": "",
+                "score": 90 if resolved else 0,
+                "publication_eligible": resolved,
+            }
+
+        with tempfile.TemporaryDirectory() as directory, patch.multiple(
+            config,
+            SEARCH_PROVIDER="brightdata", MAX_WORKERS=1,
+            REPLAY_SNAPSHOT_INPUT=None, SEARCH_CACHE_MODE="use",
+            CRAWL_CACHE_MODE="use", ENABLE_GOOGLE_PLACES=True,
+            GOOGLE_PLACES_API_KEY="key",
+            ENABLE_BRANDFETCH_DOMAIN_SEARCH=False,
+            ENABLE_HUNTER_DOMAIN_FINDER=False,
+            BRIGHTDATA_REQUEST_HARD_CAP=10,
+            GOOGLE_PLACES_REQUEST_HARD_CAP=10,
+            HUNTER_REQUEST_HARD_CAP=10,
+            BRANDFETCH_REQUEST_HARD_CAP=10,
+        ), patch.object(
+            main.excel, "read_company_records", return_value=[
+                {"company": "FREE OK"}, {"company": "PAID NEEDED"},
+            ],
+        ), patch.object(
+            main.search, "preflight_source_profiles", return_value=[],
+        ), patch.multiple(
+            main.checkpoint,
+            load_progress=Mock(return_value=None), save_result=Mock(),
+            clear_progress=Mock(),
+        ), patch.multiple(
+            main,
+            process_company=Mock(side_effect=process),
+            _write_outputs=Mock(return_value="done"),
+            ensure_directories=Mock(), setup_logging=Mock(return_value=Mock()),
+        ):
+            input_path = Path(directory) / "input.xlsx"
+            input_path.touch()
+            result = main.run(input_path)
+
+        self.assertEqual(result, "done")
+        self.assertEqual(calls, [
+            ("FREE OK", "ddgs", False),
+            ("PAID NEEDED", "ddgs", False),
+            ("PAID NEEDED", "brightdata", True),
+        ])
 
 
 class DiscoveryCoverageTests(unittest.TestCase):
@@ -171,6 +246,10 @@ class SearchCoverageIntegrationTests(unittest.TestCase):
         ):
             results = search._safe_search_text("nova official website")
         self.assertEqual(results.cache_status, "budget_blocked")
+        self.assertEqual(
+            runtime.snapshot()["counters"].get("search.provider_failures", 0),
+            0,
+        )
 
     def test_brightdata_honors_body_cooldown_before_decode_retry(self):
         failed = Mock(status_code=200, headers={}, text="minimum of 15 seconds")
@@ -197,6 +276,32 @@ class SearchCoverageIntegrationTests(unittest.TestCase):
         self.assertEqual(counters["api.brightdata.queries"], 1)
         self.assertEqual(counters["api.brightdata.requests"], 2)
         self.assertEqual(counters["api.brightdata.retries"], 1)
+
+    def test_brightdata_empty_body_uses_provider_cooldown_and_one_retry(self):
+        failed = Mock(status_code=200, headers={}, text="")
+        failed.json.side_effect = ValueError("not json")
+        succeeded = Mock(status_code=200, headers={}, text='{"organic": []}')
+        succeeded.json.return_value = {"organic": []}
+        with patch.object(config, "BRIGHTDATA_API_KEY", "key"), patch.object(
+            config, "BRIGHTDATA_REQUEST_BUDGET", 5,
+        ), patch.object(
+            config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 0,
+        ), patch.object(
+            config, "BRIGHTDATA_MAX_DECODE_RETRIES", 1,
+        ), patch.object(
+            config, "BRIGHTDATA_EMPTY_BODY_RETRY_SEC", 15,
+        ), patch(
+            "modules.search.requests.post", side_effect=[failed, succeeded],
+        ), patch("modules.search.runtime.wait_for_request_slot"), patch(
+            "modules.search.time.sleep",
+        ) as sleep:
+            results = search._brightdata_text("nova official website")
+        self.assertEqual(results, [])
+        sleep.assert_called_once_with(15)
+        self.assertEqual(
+            runtime.snapshot()["counters"]["api.brightdata.empty_body_retries"],
+            1,
+        )
 
 
 if __name__ == "__main__":
