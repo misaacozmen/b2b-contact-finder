@@ -1,7 +1,9 @@
 import json
+import os
 import socket
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -42,6 +44,19 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             response = crawler._request_with_safe_redirects("https://brand.com.tr", verify=True)
         self.assertEqual(response._b2b_final_url, "https://www.brand.com.tr/")
 
+    def test_sitemap_skips_malformed_urls(self) -> None:
+        sitemap = (
+            "<urlset><url><loc>https://[broken/contact</loc></url>"
+            "<url><loc>https://brand.example/contact</loc></url></urlset>"
+        )
+        with patch.object(crawler, "_try_fetch", return_value=(sitemap, None)):
+            self.assertEqual(
+                crawler._sitemap_contact_urls(
+                    "https://brand.example", ["https://brand.example/sitemap.xml"]
+                ),
+                ["https://brand.example/contact"],
+            )
+
     def test_sqlite_checkpoint_saves_rows_individually_and_resumes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -75,11 +90,61 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             self.assertTrue(list((root / "crawl").glob("*.json.gz")))
             self.assertEqual(cache_store.load(root, "crawl", "key", 30, 1)["html"], "x" * 1000)
 
+    def test_parallel_cache_writes_to_same_key_remain_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                list(executor.map(
+                    lambda value: cache_store.save(
+                        root, "crawl", "shared", {"value": value}, 1,
+                    ),
+                    range(64),
+                ))
+            loaded = cache_store.load(root, "crawl", "shared", 30, 1)
+            self.assertIn(loaded["value"], range(64))
+
+    def test_cache_replace_retries_transient_windows_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real_replace = os.replace
+            attempts = 0
+
+            def flaky_replace(source, target):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("transient lock")
+                return real_replace(source, target)
+
+            with patch("modules.cache_store.os.replace", side_effect=flaky_replace), patch(
+                "modules.cache_store.time.sleep",
+            ):
+                cache_store.save(root, "crawl", "key", {"ok": True}, 1)
+
+            self.assertEqual(cache_store.load(root, "crawl", "key", 30, 1), {"ok": True})
+            self.assertEqual(attempts, 2)
+
     def test_paid_api_budget_is_atomic(self) -> None:
         runtime.reset()
         self.assertTrue(runtime.reserve_api("test", 1))
         self.assertFalse(runtime.reserve_api("test", 1))
         self.assertEqual(runtime.snapshot()["counters"]["api.test.requests"], 1)
+
+    def test_crawler_http_budget_is_atomic(self) -> None:
+        runtime.reset()
+        self.assertTrue(runtime.reserve_crawler_http(1))
+        self.assertFalse(runtime.reserve_crawler_http(1))
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot["counters"]["http.crawler.requests"], 1)
+        self.assertEqual(snapshot["counters"]["http.crawler.budget_blocked"], 1)
+
+    def test_free_search_query_budget_is_atomic(self) -> None:
+        runtime.reset()
+        self.assertTrue(runtime.reserve_search_query(1))
+        self.assertFalse(runtime.reserve_search_query(1))
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot["counters"]["http.search.requests"], 1)
+        self.assertEqual(snapshot["counters"]["http.search.budget_blocked"], 1)
 
     def test_entity_registry_supports_multiple_verified_domains_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

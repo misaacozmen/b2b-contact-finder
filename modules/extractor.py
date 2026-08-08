@@ -105,9 +105,22 @@ def extract_organization_evidence(
         "phones": [], "relationships": [], "claims": [],
     }
 
+    def plausible_organization_name(value: object) -> bool:
+        normalized = scorer.normalize_text(str(value or ""))
+        if not normalized or "@" in normalized or "http" in normalized:
+            return False
+        address_markers = {
+            "mah", "mahallesi", "mh", "cad", "caddesi", "cd", "sok",
+            "sokak", "sk", "bulvari", "blv", "no", "kat", "daire",
+        }
+        words = set(normalized.split())
+        return not (words & address_markers and any(char.isdigit() for char in normalized))
+
     def add(field: str, value: object, method: str, target: str | None = None, relation: str = "") -> None:
         text = str(value or "").strip()
         if not text:
+            return
+        if (target or field) in {"names", "legal_names"} and not plausible_organization_name(text):
             return
         result[target or field].append(text)
         result["claims"].append(evidence_ledger.build_claim(

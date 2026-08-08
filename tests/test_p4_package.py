@@ -164,6 +164,30 @@ class RecoveryCoverageTests(unittest.TestCase):
         self.assertEqual(result["recovery_trace"][0]["stage"], "static_pages")
         render.assert_not_called()
 
+    def test_unreachable_host_skips_static_and_disabled_browser_recovery(self):
+        with patch(
+            "modules.crawler._try_fetch",
+            return_value=(None, "blocked_network_target:dns_unresolved"),
+        ), patch(
+            "modules.crawler._robots_and_sitemaps",
+        ) as sitemaps, patch(
+            "modules.crawler._try_render",
+        ) as render, patch.object(
+            config, "MAX_HOST_VARIANT_ATTEMPTS", 0,
+        ), patch.object(config, "ENABLE_JS_FALLBACK", False):
+            result = crawler._fetch_site_live("https://missing.example")
+
+        self.assertEqual(result["pages"], [])
+        self.assertEqual(
+            result["recovery_trace"][0]["status"],
+            "skipped_unrecoverable_root",
+        )
+        sitemaps.assert_not_called()
+        render.assert_not_called()
+        counters = runtime.snapshot()["counters"]
+        self.assertEqual(counters["recovery.static_skips"], 1)
+        self.assertNotIn("recovery.browser_attempts", counters)
+
 
 def _ranking_item(*, final_score=80, direct=True, components=3, scopes=2):
     return {

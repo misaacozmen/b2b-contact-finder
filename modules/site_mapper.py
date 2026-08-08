@@ -16,7 +16,10 @@ PAGE_MARKERS = {
     "contact": ("contact", "iletisim", "bize-ulas", "bize ulas", "kontakt"),
     "legal": ("kvkk", "aydinlatma", "legal", "imprint", "ticari-bilgi", "sirket-bilgi"),
     "privacy": ("privacy", "gizlilik", "data-protection", "veri-koruma"),
-    "terms": ("terms", "kullanim-kosul", "kullanim sart"),
+    "terms": (
+        "terms", "kullanim-kosul", "kullanim sart", "sozlesme",
+        "mesafeli-satis", "distance-sales", "contract",
+    ),
     "locations": ("location", "lokasyon", "office", "ofis", "sube", "branch", "factory", "fabrika"),
     "distributors": ("distributor", "distributorler", "bayi", "dealer", "temsilci"),
     "about": ("about", "hakkimizda", "kurumsal", "company", "corporate"),
@@ -97,7 +100,12 @@ def discover(html: str, base_url: str, include_documents: bool = True) -> list[d
     return found
 
 
-def balanced_urls(discovered: list[dict], fallback_urls: list[str], limit: int) -> list[str]:
+def balanced_urls(
+    discovered: list[dict],
+    fallback_urls: list[str],
+    limit: int,
+    preferred_kinds: tuple[str, ...] | list[str] | None = None,
+) -> list[str]:
     """Pick different evidence scopes before taking duplicate page types."""
     buckets: dict[str, list[str]] = defaultdict(list)
     seen: set[str] = set()
@@ -115,12 +123,25 @@ def balanced_urls(discovered: list[dict], fallback_urls: list[str], limit: int) 
             seen.add(url)
 
     selected: list[str] = []
-    for kind in KIND_ORDER:
+    preferred = tuple(
+        kind for kind in (preferred_kinds or ())
+        if kind in KIND_ORDER
+    )
+    ordered_kinds = (*preferred, *(
+        kind for kind in KIND_ORDER if kind not in preferred
+    ))
+    for kind in ordered_kinds:
         if buckets[kind]:
             selected.append(buckets[kind].pop(0))
             if len(selected) >= limit:
                 return selected
-    for kind in KIND_ORDER:
+        if len(preferred) > 1 and kind == preferred[1]:
+            primary = preferred[0]
+            if buckets[primary]:
+                selected.append(buckets[primary].pop(0))
+                if len(selected) >= limit:
+                    return selected
+    for kind in ordered_kinds:
         for url in buckets[kind]:
             selected.append(url)
             if len(selected) >= limit:

@@ -90,6 +90,8 @@ class NextAccuracyPackageTests(unittest.TestCase):
         )
         evaluation["candidate"]["role"] = "unknown"
         self.assertTrue(main._unsupported_search_text_candidate("Example Brand", evaluation))
+        evaluation["_identity_resolution"] = "candidate_resolved_by_target_fingerprint"
+        self.assertFalse(main._unsupported_search_text_candidate("Example Brand", evaluation))
 
     def test_trusted_low_score_site_is_preserved_for_review(self):
         reasons = []

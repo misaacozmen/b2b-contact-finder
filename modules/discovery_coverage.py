@@ -108,7 +108,13 @@ def payload(max_queries_per_company: int = 3) -> dict:
         rows = [
             row for row in queries
             if scorer.normalize_text(row["company"]) == company_key
-            and row["cache_status"] in {"replay_miss", "error"}
+            and (
+                row["cache_status"] in {"replay_miss", "error", "budget_blocked"}
+                or (
+                    row["cache_status"] == "live_fallback"
+                    and not row["result_count"]
+                )
+            )
         ]
         selected: list[dict] = []
         seen_intents: set[str] = set()
@@ -123,7 +129,13 @@ def payload(max_queries_per_company: int = 3) -> dict:
             "company": row["company"],
             "query": row["query"],
             "intent": row["intent"],
-            "reason": "unresolved_replay_cache_gap",
+            "reason": (
+                "unresolved_search_budget_gap"
+                if row["cache_status"] == "budget_blocked"
+                else "unresolved_provider_gap"
+                if row["cache_status"] in {"error", "live_fallback"}
+                else "unresolved_replay_cache_gap"
+            ),
             "requires_authorized_search": True,
         } for row in selected)
     return {

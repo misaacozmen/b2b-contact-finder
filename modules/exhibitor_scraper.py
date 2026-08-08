@@ -23,7 +23,8 @@ def _clean(value: str) -> str:
 
 def _fold(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", _clean(value)).casefold()
-    return "".join(char for char in normalized if not unicodedata.combining(char))
+    folded = "".join(char for char in normalized if not unicodedata.combining(char))
+    return folded.replace("ı", "i")
 
 
 def _absolute_url(base_url: str, href: str) -> str:
@@ -118,6 +119,109 @@ def _beauty_label_value(html: str, label_text: str) -> str:
                 values.append(text)
         return _clean(" ".join(values))
     return ""
+
+
+def _metalexpo_list_rows(
+    html: str,
+    list_url: str = "https://www.metalexpo.com.tr/katilimci-listesi-2026",
+) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[dict] = []
+    blocked_hosts = (
+        "metalexpo.com.tr", "linkedin.com", "instagram.com", "facebook.com",
+        "youtube.com", "twitter.com", "x.com", "wa.me",
+    )
+    for block in soup.select(".katilimci-text"):
+        fields = [_clean(item.get_text(" ", strip=True)) for item in block.select(".text")]
+        if not fields or not fields[0]:
+            continue
+        company = fields[0]
+        location = fields[1] if len(fields) > 1 else ""
+        link = block.find_parent("a", href=True)
+        listed_website = _normalize_website(link.get("href", "")) if link else ""
+        if any(host in listed_website.casefold() for host in blocked_hosts):
+            listed_website = ""
+
+        hall_match = re.search(r"\bHALL\s*([0-9]+)\b", location, re.I)
+        hall = hall_match.group(1) if hall_match else ""
+        stand = re.sub(r"^\s*HALL\s*[0-9]+\s*/?\s*", "", location, flags=re.I)
+        if not hall:
+            stand_hall = re.search(r"\b([0-9]+)[A-Z]\s*[-/]", stand, re.I)
+            hall = stand_hall.group(1) if stand_hall else ""
+
+        rows.append({
+            "company": company,
+            "website": "",
+            "listed_website": listed_website,
+            "source": "metalexpo_2026",
+            "country": "",
+            "profile_url": "",
+            "listing_url": list_url,
+            "hall": hall,
+            "stand": stand,
+            "sector": "demir celik metalurji metal isleme",
+            "description": "",
+        })
+    return dedupe_rows(rows)
+
+
+def scrape_metalexpo(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
+    del fetch_details, delay_sec
+    list_url = "https://www.metalexpo.com.tr/katilimci-listesi-2026"
+    session = requests.Session()
+    return _metalexpo_list_rows(_get(session, list_url), list_url)
+
+
+def _texhibition_list_rows(
+    html: str,
+    listing_url: str = "https://www.texhibitionist.com/katilimcilar?v=1",
+) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[dict] = []
+    for link in soup.select('a[href*="/katilimcilar/"]'):
+        item = link.select_one(".item")
+        title = item.select_one(".title") if item else None
+        if not title:
+            continue
+        company = _clean(title.get_text(" ", strip=True))
+        if not company:
+            continue
+        category = item.select_one(".category")
+        rows.append({
+            "company": company,
+            "website": "",
+            "listed_website": "",
+            "source": "texhibition_2026",
+            "country": "",
+            "profile_url": _absolute_url(listing_url, link.get("href", "")),
+            "listing_url": listing_url,
+            "hall": "",
+            "stand": "",
+            "sector": _clean(category.get_text(" ", strip=True)) if category else "",
+            "description": "",
+        })
+    return rows
+
+
+def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
+    del fetch_details
+    listing_url = "https://www.texhibitionist.com/katilimcilar?v=1"
+    session = requests.Session()
+    rows: list[dict] = []
+    page = 1
+    while True:
+        url = listing_url if page == 1 else f"{listing_url}&page={page}"
+        html = _get(session, url)
+        page_rows = _texhibition_list_rows(html, listing_url)
+        if not page_rows:
+            break
+        rows.extend(page_rows)
+        soup = BeautifulSoup(html, "html.parser")
+        if not soup.select_one(f'a[href*="page={page + 1}"]'):
+            break
+        page += 1
+        time.sleep(delay_sec)
+    return dedupe_rows(rows)
 
 
 def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
@@ -435,7 +539,14 @@ def _maktek_profile_details(html: str) -> dict:
     return details
 
 
-def _maktek_list_rows(html: str, base_url: str) -> list[dict]:
+def _brand_catalog_list_rows(
+    html: str,
+    base_url: str,
+    *,
+    source: str,
+    sector: str,
+    listing_url: str = "",
+) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     rows: list[dict] = []
     for card in soup.select('a.brand-link[href^="brand/"], a.brand-link[href*="/brand/"]'):
@@ -459,10 +570,11 @@ def _maktek_list_rows(html: str, base_url: str) -> list[dict]:
         rows.append({
             "company": company,
             "website": "",
-            "source": "maktek_avrasya_2026",
+            "source": source,
             "country": _clean(country_el.get_text(" ", strip=True) if country_el else "Türkiye"),
             "profile_url": _absolute_url(base_url, href),
-            "sector": "makine, takım tezgahları, metal işleme ve üretim teknolojileri",
+            "listing_url": listing_url,
+            "sector": sector,
             "description": "",
             "listed_phone": "",
             "listed_email": "",
@@ -473,6 +585,16 @@ def _maktek_list_rows(html: str, base_url: str) -> list[dict]:
             "representations": "",
         })
     return rows
+
+
+def _maktek_list_rows(html: str, base_url: str) -> list[dict]:
+    return _brand_catalog_list_rows(
+        html,
+        base_url,
+        source="maktek_avrasya_2026",
+        sector="makine, takım tezgahları, metal işleme ve üretim teknolojileri",
+        listing_url=f"{base_url}/katilimci-listesi?country=T%C3%9CRK%C4%B0YE",
+    )
 
 
 def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[dict]:
@@ -506,6 +628,59 @@ def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[di
                     for field, value in details.items():
                         if value:
                             row[field] = value
+                    time.sleep(delay_sec)
+                except requests.RequestException:
+                    pass
+            rows_by_profile[profile_url] = row
+        page += 1
+        if page <= max_page:
+            time.sleep(delay_sec)
+    return list(rows_by_profile.values())
+
+
+def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[dict]:
+    base_url = "https://www.foodistexpo.com"
+    list_url = f"{base_url}/katilimci-listesi?country=T%C3%9CRK%C4%B0YE"
+    session = requests.Session()
+    rows_by_profile: dict[str, dict] = {}
+    page = 1
+    max_page = 1
+
+    while page <= max_page:
+        url = list_url if page == 1 else f"{list_url}&page={page}"
+        html = _get(session, url)
+        soup = BeautifulSoup(html, "html.parser")
+        if page == 1:
+            page_numbers = []
+            for link in soup.select('a[href*="page="]'):
+                match = re.search(r"[?&]page=(\d+)", link.get("href", ""))
+                if match:
+                    page_numbers.append(int(match.group(1)))
+            max_page = max(page_numbers, default=1)
+
+        for row in _brand_catalog_list_rows(
+            html,
+            base_url,
+            source="foodist_expo_turkiye",
+            sector="gıda ve içecek",
+            listing_url=list_url,
+        ):
+            country = _fold(row.get("country", ""))
+            if country and "turkiye" not in country:
+                continue
+            profile_url = row["profile_url"]
+            if profile_url in rows_by_profile:
+                continue
+            if fetch_details:
+                try:
+                    detail_html = _get(session, profile_url)
+                    details = _maktek_profile_details(detail_html)
+                    for field, value in details.items():
+                        if value:
+                            if field == "website":
+                                row["listed_website"] = value
+                            else:
+                                row[field] = value
                     time.sleep(delay_sec)
                 except requests.RequestException:
                     pass

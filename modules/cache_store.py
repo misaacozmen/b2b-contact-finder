@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import gzip
 import json
+import os
 import threading
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +16,26 @@ from typing import Any
 
 import config
 from modules import replay_snapshot, runtime
+
+
+_IO_LOCKS = tuple(threading.RLock() for _ in range(64))
+_REPLACE_RETRIES = 5
+
+
+def _io_lock(path: Path) -> threading.RLock:
+    return _IO_LOCKS[hash(path) % len(_IO_LOCKS)]
+
+
+def _replace_with_retry(source: Path, target: Path, namespace: str) -> None:
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt >= _REPLACE_RETRIES - 1:
+                raise
+            runtime.record(f"cache.{namespace}.write_retry")
+            time.sleep(0.02 * (attempt + 1))
 
 
 def _path(directory: Path, namespace: str, key: str, compressed: bool = False) -> Path:
@@ -49,26 +72,27 @@ def load(
     compressed_path = _path(directory, namespace, key, compressed=True)
     legacy_path = _path(directory, namespace, key)
     try:
-        if compressed_path.exists():
-            with gzip.open(compressed_path, "rt", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        else:
-            payload = json.loads(legacy_path.read_text(encoding="utf-8"))
-        if payload.get("schema_version") != schema_version:
-            return None
-        created = datetime.fromisoformat(payload["created_at"])
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        age = datetime.now(timezone.utc) - created
-        if ttl_days >= 0 and age.total_seconds() > ttl_days * 86400:
-            if not allow_stale:
-                runtime.record(f"cache.{namespace}.expired")
+        with _io_lock(compressed_path):
+            if compressed_path.exists():
+                with gzip.open(compressed_path, "rt", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            else:
+                payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+            if payload.get("schema_version") != schema_version:
                 return None
-            runtime.record(f"cache.{namespace}.stale_hit")
-        runtime.record(f"cache.{namespace}.hit")
-        value = payload.get("value")
-        replay_snapshot.record(store, namespace, key, schema_version, value)
-        return value
+            created = datetime.fromisoformat(payload["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - created
+            if ttl_days >= 0 and age.total_seconds() > ttl_days * 86400:
+                if not allow_stale:
+                    runtime.record(f"cache.{namespace}.expired")
+                    return None
+                runtime.record(f"cache.{namespace}.stale_hit")
+            runtime.record(f"cache.{namespace}.hit")
+            value = payload.get("value")
+            replay_snapshot.record(store, namespace, key, schema_version, value)
+            return value
     except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
         runtime.record(f"cache.{namespace}.miss")
         return None
@@ -82,9 +106,15 @@ def save(directory: Path, namespace: str, key: str, value: Any, schema_version: 
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "value": value,
     }
-    tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
-    with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-    tmp.replace(path)
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+    with _io_lock(path):
+        try:
+            with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
+                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            _replace_with_retry(tmp, path, namespace)
+        finally:
+            tmp.unlink(missing_ok=True)
     replay_snapshot.record(_store_name(directory), namespace, key, schema_version, value)
     runtime.record(f"cache.{namespace}.write")

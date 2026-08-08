@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import config
 from modules import scorer
-from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_registry, evidence, evidence_ledger, excel, extractor, identity, phone, publication_policy, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
+from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_memory, entity_registry, entity_resolution, entity_semantics, evidence, evidence_acquisition, evidence_ledger, excel, extractor, identity, phone, publication_policy, quality_audit, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
 from modules.utils import ensure_directories, random_delay, setup_logging
 
 
@@ -205,6 +205,13 @@ def _country_identity_score(crawl_result: dict, normalized_phones: list[str]) ->
     if domain.endswith(".tr"):
         return 8, "country_identity_tr_tld"
     if normalized_phones:
+        return 8, "country_identity_tr_phone"
+    observed_phones = [
+        phone.normalize_phone(value)
+        for page in crawl_result.get("pages", [])
+        for value in extractor.extract_phones(page.get("html", ""))
+    ]
+    if any(observed_phones):
         return 8, "country_identity_tr_phone"
     text = " ".join(
         scorer.normalize_text(page.get("html", "")[:50000])
@@ -466,6 +473,8 @@ def _has_trusted_website_evidence(
     unique_candidate: bool = False,
 ) -> bool:
     """Verify independent evidence, or a strong first-party bundle after uniqueness."""
+    if "country_identity_unproven" in reasons:
+        return False
     assessment = identity.assess(
         candidate.get("_identity_company", ""), candidate, reasons,
         candidate.get("_structured_identity", {}),
@@ -592,10 +601,13 @@ def _evaluate_candidate(
     metadata: dict | None = None,
     crawl_profile: str = "full",
     verify_email_domain: bool = True,
+    evidence_scopes: tuple[str, ...] | list[str] | None = None,
 ) -> dict:
     candidate["_identity_company"] = company
     crawl_result = crawler.fetch_site(
-        candidate["url"], candidate.get("_contact_seed_urls", []), profile=crawl_profile,
+        candidate["url"], candidate.get("_contact_seed_urls", []),
+        profile=crawl_profile, evidence_scopes=evidence_scopes,
+        identity_seed_urls=candidate.get("_identity_seed_urls", []),
     )
     if not crawl_result["pages"]:
         redirect_target = crawl_result.get("redirect_target", "")
@@ -622,6 +634,7 @@ def _evaluate_candidate(
                 return _evaluate_candidate(
                     company, redirected, metadata,
                     crawl_profile=crawl_profile, verify_email_domain=verify_email_domain,
+                    evidence_scopes=evidence_scopes,
                 )
         return {
             "candidate": candidate,
@@ -659,6 +672,11 @@ def _evaluate_candidate(
         )
         record["verification_status"] = verification["status"]
         record["verification_reason"] = verification["reason"]
+        email_domain = record["value"].rsplit("@", 1)[-1]
+        record["company_domain_identity"] = bool(
+            scorer.domain_identity_match(company, email_domain)[0]
+            or scorer.public_brand_domain_match(company, email_domain)
+        )
 
     ranked_phone_records = _select_phone_records(phone_records)
     contact_policy = contact_publication.filter_records(
@@ -682,11 +700,34 @@ def _evaluate_candidate(
     # directory data (such as Google Places or Hunter) is not published.
     final_score, reasons = _score_candidate_with_site(company, candidate, crawl_result, selected_email, normalized_phones, metadata)
     reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
+    places_phone = phone.normalize_phone(
+        str(candidate.get("external_phone", "") or "")
+    )
+    places_name_matches = any(
+        scorer.business_name_identity_match(
+            company, str(item.get("name", "") or "")
+        )
+        for item in candidate.get("_google_places_evidence", [])
+    )
+    if places_phone and places_phone in normalized_phones and places_name_matches:
+        reasons.append("google_places_first_party_phone_match")
     context_failed = "context_gate_failed" in reasons
     email_failed = "email_gate_failed" in reasons
 
     structured_identity = _structured_identity_score(company, crawl_result["pages"])[2]
     candidate["_structured_identity"] = structured_identity
+    semantic_identity = entity_semantics.assess(
+        company, metadata, crawl_result["pages"],
+    )
+    if semantic_identity["decision"] == "match":
+        reasons.append(
+            f"semantic_entity_type_match:{','.join(semantic_identity['matches'])}"
+        )
+    elif semantic_identity["decision"] == "conflict":
+        reasons.append(
+            f"context_conflict:semantic_entity_type:"
+            f"{','.join(semantic_identity['conflicts'])}"
+        )
     identity_assessment = identity.assess(company, candidate, reasons, structured_identity)
     reasons.append(
         f"identity_evidence:{identity_assessment['support_count']};"
@@ -748,6 +789,7 @@ def _evaluate_candidate(
         "context_failed": context_failed,
         "email_failed": email_failed,
         "structured_identity": structured_identity,
+        "semantic_identity": semantic_identity,
         "identity_assessment": identity_assessment,
     }
 
@@ -802,10 +844,13 @@ def _evaluation_evidence(evaluation: dict) -> dict:
         "final_score": evaluation.get("final_score", 0),
         "reasons": evaluation.get("reasons", []),
         "structured_identity": evaluation.get("structured_identity", {}),
+        "semantic_identity": evaluation.get("semantic_identity", {}),
         "identity_assessment": evaluation.get("identity_assessment", {}),
         "publication_policy": evaluation.get("publication_policy", {}),
         "rerank_evidence": evaluation.get("rerank_evidence", {}),
         "contact_publication": evaluation.get("contact_publication", {}),
+        "identity_resolution": evaluation.get("_identity_resolution", ""),
+        "automation": evaluation.get("_automation", {}),
         "crawl": {
             "url": crawl_result.get("url", ""),
             "cache_status": crawl_result.get("cache_status", ""),
@@ -817,16 +862,153 @@ def _evaluation_evidence(evaluation: dict) -> dict:
     }
 
 
+def _complete_resolution_evidence(
+    company: str,
+    metadata: dict | None,
+    candidates: list[dict],
+    evaluations: list[dict],
+    resolution: entity_resolution.Resolution,
+) -> tuple[list[dict], entity_resolution.Resolution, evidence_acquisition.EvidenceState]:
+    """Run bounded, gap-specific search/crawl rounds for an unresolved entity."""
+    current = evidence_acquisition.analyze(
+        company,
+        evaluations,
+        resolution_status=resolution.status,
+        metadata=metadata,
+        query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+    )
+    previous: evidence_acquisition.EvidenceState | None = None
+    rounds: list[dict] = []
+    attempted_scopes_by_domain: dict[str, set[str]] = {}
+    for round_number in range(1, config.MAX_AUTONOMOUS_RESOLUTION_ROUNDS + 1):
+        if not evidence_acquisition.should_continue(
+            previous,
+            current,
+            round_number - 1,
+            config.MAX_AUTONOMOUS_RESOLUTION_ROUNDS,
+        ):
+            break
+        runtime.record("autonomy.rounds")
+        targeted = search.find_targeted_candidates(
+            company,
+            metadata,
+            current.search_queries,
+            limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+        )
+        known_domains = {
+            scorer.normalize_domain(item.get("url", "")) for item in candidates
+        }
+        for candidate in targeted:
+            domain = scorer.normalize_domain(candidate.get("url", ""))
+            if domain and domain not in known_domains:
+                candidates.append(candidate)
+                known_domains.add(domain)
+        candidates[:] = search.rank_candidates(candidates)
+
+        evaluation_by_domain = {
+            scorer.normalize_domain(item.get("candidate", {}).get("url", "")): item
+            for item in evaluations
+        }
+        candidate_by_domain = {
+            scorer.normalize_domain(candidate.get("url", "")): candidate
+            for candidate in candidates
+            if candidate.get("role") not in identity.EXCLUDED_ROLES
+        }
+        priority_domains = [
+            scorer.normalize_domain(
+                item.get("candidate", {}).get("url", "")
+            )
+            for item in resolution.contenders
+        ]
+        priority_domains.extend(
+            domain for domain in candidate_by_domain
+            if domain not in evaluation_by_domain
+        )
+        current_scopes = set(current.crawl_scopes)
+        selected_domains = list(dict.fromkeys(
+            domain for domain in priority_domains
+            if domain and (
+                domain not in attempted_scopes_by_domain
+                or (
+                    current_scopes
+                    and not current_scopes.issubset(
+                        attempted_scopes_by_domain[domain]
+                    )
+                )
+            )
+        ))[:config.MAX_TARGETED_CRAWLS_PER_ROUND]
+        if not selected_domains:
+            break
+        for domain in selected_domains:
+            runtime.record("autonomy.targeted_crawls")
+            attempted_scopes_by_domain.setdefault(domain, set()).update(
+                current_scopes
+            )
+            candidate = candidate_by_domain.get(domain)
+            if candidate is None:
+                candidate = evaluation_by_domain[domain]["candidate"]
+            evaluation_by_domain[domain] = _evaluate_candidate_with_stage(
+                company,
+                candidate,
+                metadata,
+                evidence_scopes=current.crawl_scopes,
+            )
+        evaluations = list(evaluation_by_domain.values())
+        evaluations.sort(
+            key=lambda item: _evaluation_rank_key(company, item),
+            reverse=True,
+        )
+        previous = current
+        resolution = entity_resolution.resolve_candidates(company, evaluations)
+        current = evidence_acquisition.analyze(
+            company,
+            evaluations,
+            resolution_status=resolution.status,
+            metadata=metadata,
+            query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+        )
+        rounds.append({
+            "round": round_number,
+            "gaps_before": sorted(previous.gaps),
+            "gaps_after": sorted(current.gaps),
+            "crawl_scopes": list(previous.crawl_scopes),
+            "queries": list(previous.search_queries),
+            "evaluated_domains": selected_domains,
+            "resolution_status": resolution.status,
+        })
+        if resolution.status == "resolved":
+            break
+    automation = {
+        "rounds": rounds,
+        "remaining_evidence_gaps": sorted(current.gaps),
+        "terminal_reason": (
+            "resolved_after_evidence_completion"
+            if resolution.status == "resolved" and rounds
+            else current.terminal_reason
+        ),
+    }
+    for evaluation in evaluations:
+        evaluation["_automation"] = automation
+    return evaluations, resolution, current
+
+
 def _evaluate_candidate_with_stage(
     company: str,
     candidate: dict,
     metadata: dict | None = None,
     crawl_profile: str = "full",
     verify_email_domain: bool = True,
+    evidence_scopes: tuple[str, ...] | list[str] | None = None,
 ) -> dict:
-    evaluation = _evaluate_candidate(
-        company, candidate, metadata, crawl_profile, verify_email_domain,
-    )
+    if evidence_scopes:
+        evaluation = _evaluate_candidate(
+            company, candidate, metadata, crawl_profile, verify_email_domain,
+            evidence_scopes=evidence_scopes,
+        )
+    else:
+        evaluation = _evaluate_candidate(
+            company, candidate, metadata, crawl_profile, verify_email_domain,
+        )
     history = candidate.setdefault("_stage_history", [])
     stage = "identity_evaluated" if crawl_profile == "identity" else "full_evaluated"
     history.append({
@@ -853,12 +1035,17 @@ def _preserve_identity_phase_evidence(full_evaluation: dict, identity_evaluation
     identity_assessment = identity_evaluation.get("identity_assessment", {})
     if full_assessment.get("conflicts"):
         return full_evaluation
+    # A light crawl may expose useful legal text, but a merely provisional
+    # single-site bundle must not override a fuller crawl which could not
+    # establish independent identity support.
+    if not identity_assessment.get("publishable"):
+        return full_evaluation
     full_strength = (
-        1 if full_assessment.get("provisionally_publishable") else 0,
+        1 if full_assessment.get("publishable") else 0,
         full_assessment.get("support_count", 0),
     )
     identity_strength = (
-        1 if identity_assessment.get("provisionally_publishable") else 0,
+        1 if identity_assessment.get("publishable") else 0,
         identity_assessment.get("support_count", 0),
     )
     if identity_strength <= full_strength:
@@ -1121,6 +1308,8 @@ def _homonym_conflict(company: str, first: dict, second: dict) -> dict:
     second_domain = scorer.normalize_domain(second.get("candidate", {}).get("url", ""))
     if not first_domain or not second_domain or first_domain == second_domain:
         return {"ambiguous": False, "reason": "same_domain"}
+    if scorer.same_registrable_domain(first_domain, second_domain):
+        return {"ambiguous": False, "reason": "same_registrable_domain"}
     family = _official_family_evidence(first, second, company)
     # Shared phones and cross-domain mailboxes can describe an operational
     # relationship (shop, reseller or call centre), but must not by themselves
@@ -1193,6 +1382,8 @@ def _close_identity_margin_conflict(company: str, first: dict, second: dict) -> 
     second_domain = scorer.normalize_domain(second_candidate.get("url", ""))
     if not first_domain or not second_domain or first_domain == second_domain:
         return False
+    if scorer.same_registrable_domain(first_domain, second_domain):
+        return False
     if _official_family_evidence(first, second, company).get("identity_continuity"):
         return False
     authoritative_queries = {"verified_entity", "verified_alias", "input_website"}
@@ -1217,8 +1408,54 @@ def _close_identity_margin_conflict(company: str, first: dict, second: dict) -> 
     )
 
 
+def _legal_identity_strength(evaluation: dict) -> int:
+    reasons = evaluation.get("reasons", [])
+    if any(reason.startswith((
+        "legal_name_full_match:",
+        "legal_name_ownership_match:",
+    )) for reason in reasons):
+        return 3
+    if any(reason.startswith("legal_name_phrase_match:") for reason in reasons):
+        return 2
+    return 0
+
+
+def _preferred_verified_discovery_route(evaluations: list[dict]) -> dict | None:
+    """Prefer a discovered route only when its own first-party identity is stronger."""
+    publishable = [
+        item for item in evaluations
+        if (
+            item.get("identity_assessment", {}).get("provisionally_publishable")
+            and not item.get("identity_assessment", {}).get("conflicts")
+        )
+    ]
+    routes = [
+        item for item in publishable
+        if item.get("candidate", {}).get("_source_profile_evidence")
+    ]
+    if len(routes) != 1:
+        return None
+    route = routes[0]
+    route_strength = _legal_identity_strength(route)
+    competing_strengths = [
+        _legal_identity_strength(item) for item in publishable if item is not route
+    ]
+    if route_strength < 2 or (
+        competing_strengths and route_strength <= max(competing_strengths)
+    ):
+        return None
+    return route
+
+
 def _unreachable_homonym_conflict(company: str, selected: dict, evaluations: list[dict]) -> dict | None:
     """Keep an inaccessible same-name domain from being silently outranked."""
+    if (
+        selected.get("candidate", {}).get("_source_profile_evidence")
+        and selected.get("identity_assessment", {}).get("provisionally_publishable")
+        and not selected.get("identity_assessment", {}).get("conflicts")
+        and _legal_identity_strength(selected) >= 2
+    ):
+        return None
     selected_candidate = selected.get("candidate", {})
     selected_domain = scorer.normalize_domain(selected_candidate.get("url", ""))
     selected_core = scorer.compact_domain_core(selected_domain)
@@ -1419,6 +1656,10 @@ def _reviewable_authoritative_candidate(company: str, candidate: dict) -> bool:
 
 def _unsupported_search_text_candidate(company: str, evaluation: dict) -> bool:
     """Reject retailer/directory-like results that never prove company identity."""
+    if str(evaluation.get("_identity_resolution", "")).startswith(
+        "candidate_resolved_by_"
+    ):
+        return False
     candidate = evaluation.get("candidate", {})
     reasons = evaluation.get("reasons", [])
     if candidate.get("role") in {"directory", "fair_profile", "news"}:
@@ -1439,6 +1680,70 @@ def _unsupported_search_text_candidate(company: str, evaluation: dict) -> bool:
         for reason in reasons
     )
     return page_missing and structured_missing
+
+
+def _listed_domain_conflict_requires_review(
+    company: str,
+    evaluation: dict,
+    metadata: dict | None,
+) -> bool:
+    """Quarantine a search domain that contradicts a supplied discovery route."""
+    listed_domain = scorer.normalize_domain(
+        str((metadata or {}).get("listed_website", "") or "")
+    )
+    selected_domain = scorer.normalize_domain(
+        evaluation.get("candidate", {}).get("url", "")
+    )
+    if (
+        not listed_domain
+        or not selected_domain
+        or scorer.same_registrable_domain(listed_domain, selected_domain)
+    ):
+        return False
+
+    reasons = evaluation.get("reasons", [])
+    if any(reason.startswith((
+        "legal_name_full_match:",
+        "legal_name_ownership_match:",
+    )) for reason in reasons):
+        return False
+    phrase_match = any(
+        reason.startswith("legal_name_phrase_match:") for reason in reasons
+    )
+    return not (
+        phrase_match
+        and len(scorer.legal_identity_tokens(company)) >= 2
+    )
+
+
+def _weak_search_identity_requires_review(company: str, evaluation: dict) -> bool:
+    if str(evaluation.get("_identity_resolution", "")).startswith(
+        "candidate_resolved_by_"
+    ):
+        return False
+    candidate = evaluation.get("candidate", {})
+    if candidate.get("query") in {
+        "fair_listed_website",
+        "verified_alias",
+        "verified_entity",
+    }:
+        return False
+    reasons = evaluation.get("reasons", [])
+    if any(reason.startswith((
+        "legal_name_full_match:",
+        "legal_name_phrase_match:",
+        "legal_name_ownership_match:",
+    )) for reason in reasons):
+        return False
+    return bool(
+        len(scorer.legal_identity_tokens(company)) >= 2
+        and "no_context_tokens" in reasons
+        and any(
+            reason.startswith("legal_name_phrase_missing:")
+            for reason in reasons
+        )
+        and not _exact_brand_domain(company, candidate)
+    )
 
 
 def _authoritative_unreachable_candidate(candidates: list[dict], company: str = "") -> dict | None:
@@ -1479,6 +1784,118 @@ def _evaluation_rank_key(company: str, item: dict) -> tuple[int, ...]:
     return candidate_reranker.vector_key(vector)
 
 
+def _acquisition_brand_domain_match(company: str, candidate: dict) -> bool:
+    """Allow a bounded crawl for a page-backed brand+descriptor domain."""
+    tokens = scorer.primary_brand_tokens(company, limit=3)
+    brand_index = next(
+        (index for index, token in enumerate(tokens) if token.isalpha() and len(token) >= 5),
+        None,
+    )
+    if brand_index is None:
+        return False
+    brand = tokens[brand_index]
+    numeric_prefix = "".join(
+        token for token in tokens[:brand_index] if token.isdigit()
+    )
+    core = scorer.compact_domain_core(candidate.get("url", ""))
+    return bool(
+        core.startswith(brand)
+        or (numeric_prefix and core.startswith(f"{numeric_prefix}{brand}"))
+    )
+
+
+def _full_crawl_worthy(company: str, evaluation: dict) -> bool:
+    """Spend contact-crawl budget after identity is plausible, not complete.
+
+    Country evidence may live only on contact/legal pages reached by the full
+    crawl. Requiring it here creates a circular gate: no full crawl without a
+    phone/address, and no phone/address without a full crawl. Publication still
+    requires the complete fingerprint in entity_resolution.
+    """
+    fingerprint = entity_resolution.fingerprint(
+        entity_resolution.build_target_profile(company), evaluation,
+    )
+    if not (
+        fingerprint.reachable
+        and fingerprint.eligible_role
+        and fingerprint.conflict_free
+        and fingerprint.canonical_domain_consistent
+    ):
+        return False
+    if fingerprint.provisionally_publishable:
+        return True
+    return bool(
+        fingerprint.obvious_exact_domain
+        or fingerprint.exact_brand_domain
+        or fingerprint.legal_strength >= 1
+        or (
+            (
+                fingerprint.public_brand_domain
+                or _acquisition_brand_domain_match(
+                    company, evaluation.get("candidate", {}),
+                )
+            )
+            and (
+                fingerprint.page_strength >= 2
+                or (
+                    fingerprint.page_strength >= 1
+                    and fingerprint.official_query_evidence >= 3
+                )
+            )
+        )
+    )
+
+
+def _refine_identity_evidence(
+    company: str,
+    metadata: dict | None,
+    ranked_identity: list[dict],
+) -> list[dict]:
+    """Use one gap-directed identity recrawl before any broad contact crawl."""
+    if any(_full_crawl_worthy(company, item) for item in ranked_identity):
+        return ranked_identity
+    refined = list(ranked_identity)
+    attempts = 0
+    for index, evaluation in enumerate(refined):
+        if attempts >= config.MAX_IDENTITY_EVIDENCE_RECRAWLS:
+            break
+        fingerprint = entity_resolution.fingerprint(
+            entity_resolution.build_target_profile(company), evaluation,
+        )
+        if not (
+            fingerprint.reachable
+            and fingerprint.eligible_role
+            and fingerprint.conflict_free
+        ):
+            continue
+        state = evidence_acquisition.analyze(
+            company,
+            [evaluation],
+            resolution_status="unresolved",
+            metadata=metadata,
+            query_limit=0,
+        )
+        if not state.crawl_scopes:
+            continue
+        attempts += 1
+        runtime.record("pipeline.identity_evidence_recrawls")
+        targeted = _evaluate_candidate_with_stage(
+            company,
+            evaluation["candidate"],
+            metadata,
+            crawl_profile="identity",
+            verify_email_domain=False,
+            evidence_scopes=state.crawl_scopes,
+        )
+        if targeted.get("crawl_result", {}).get("pages"):
+            refined[index] = targeted
+    refined.sort(
+        key=lambda item: _evaluation_rank_key(company, item),
+        reverse=True,
+    )
+    return refined
+
+
 def _process_known_website(index: int, company: str, website: str, logger, metadata: dict | None = None) -> tuple[int, dict] | None:
     logger.info("Processing %s with supplied website: %s -> %s", index + 1, company, website)
     candidate = {
@@ -1494,33 +1911,86 @@ def _process_known_website(index: int, company: str, website: str, logger, metad
     evaluation = _evaluate_candidate(company, candidate, metadata)
     if not evaluation["crawl_result"]["pages"]:
         return None
+    row = _finalize_selected_evaluation(company, evaluation, metadata)
+    return index, _attach_candidates(row, [candidate])
 
+
+def _finalize_selected_evaluation(
+    company: str,
+    evaluation: dict,
+    metadata: dict | None,
+) -> dict:
+    """Create the sole publication verdict for a resolved website identity."""
     crawl_result = evaluation["crawl_result"]
     reasons = evaluation["reasons"]
-    final_score = evaluation["final_score"]
-    has_contact = evaluation["has_contact"]
-    identity_verified = _has_trusted_website_evidence(candidate, reasons)
-    if _is_hard_context_failure(evaluation):
+    unsafe_identity = _unsafe_context_identity(company, evaluation)
+    hard_context_failure = _is_hard_context_failure(evaluation)
+    unsupported_candidate = _unsupported_search_text_candidate(company, evaluation)
+    resolution_reason = str(evaluation.get("_identity_resolution", "") or "")
+    exact_domain_resolution = resolution_reason.endswith(
+        "_exact_full_name_domain"
+    )
+    identity_verified = resolution_reason.startswith(
+        "candidate_resolved_by_"
+    ) or exact_domain_resolution or _has_trusted_website_evidence(
+        evaluation["candidate"], reasons, unique_candidate=True,
+    )
+    if unsupported_candidate:
+        reasons.append("unsupported_search_text_candidate_rejected")
+        status, confidence = "WEBSITE_NOT_FOUND", "none"
+    elif unsafe_identity and not _reviewable_authoritative_candidate(
+        company, evaluation["candidate"]
+    ):
+        reasons.append("unverified_website_candidate_preserved_for_review")
+        status, confidence = "REVIEW_NEEDED", "review"
+    elif hard_context_failure and not _reviewable_authoritative_candidate(
+        company, evaluation["candidate"]
+    ):
+        reasons.append("unverified_website_candidate_preserved_for_review")
+        status, confidence = "REVIEW_NEEDED", "review"
+    elif unsafe_identity or hard_context_failure:
+        reasons.append("authoritative_website_preserved_for_review")
         status, confidence = "REVIEW_NEEDED", "review"
     elif _email_failure_blocks_publication(evaluation, identity_verified):
         status, confidence = "REVIEW_NEEDED", "review"
+    elif (
+        resolution_reason
+        and identity_verified
+        and evaluation["has_contact"]
+    ):
+        status, confidence = (
+            ("OK_HIGH_CONFIDENCE", "high")
+            if evaluation["final_score"] >= config.HIGH_CONFIDENCE_SCORE
+            else ("OK_MEDIUM_CONFIDENCE", "medium")
+        )
     else:
         status, confidence = _confidence_status(
-            final_score, has_contact, reasons,
+            evaluation["final_score"],
+            evaluation["has_contact"],
+            reasons,
             identity_verified,
         )
+    if (
+        status.startswith("OK_")
+        and evaluation["candidate"].get("query") != "input_website"
+        and (
+            _listed_domain_conflict_requires_review(company, evaluation, metadata)
+            or _weak_search_identity_requires_review(company, evaluation)
+        )
+    ):
+        reasons.append("search_identity_without_legal_or_context_support")
+        status, confidence = "REVIEW_NEEDED", "review"
     status, confidence = _apply_publication_policy(
         company, evaluation, status, confidence, reasons,
     )
-
     row = {
         "company": company,
         "website": crawl_result["url"],
-        "website_source": candidate["query"],
+        "website_source": evaluation["candidate"]["query"],
         **_contact_output_fields(evaluation),
         "status": status,
         "confidence": confidence,
-        "score": final_score,
+        "score": evaluation["final_score"],
         **_policy_output_fields(evaluation),
         "reason": "; ".join(reason for reason in reasons if reason),
         "__evaluation": _evaluation_evidence(evaluation),
@@ -1531,7 +2001,7 @@ def _process_known_website(index: int, company: str, website: str, logger, metad
         row["selected_website"] = crawl_result["url"]
         _clear_unpublished_contacts(row)
         row["email_verification_reason"] = "website_identity_unverified"
-    return index, _attach_candidates(row, [candidate])
+    return row
 
 
 def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None) -> tuple[int, dict]:
@@ -1547,6 +2017,51 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         except Exception:
             logger.exception("Supplied website evaluation failed for %s, falling back to search", company)
 
+    profile_candidates = search.find_profile_candidates(company, metadata)
+    if profile_candidates:
+        runtime.record("pipeline.profile_candidates_discovered", len(profile_candidates))
+        profile_identity = [
+            _evaluate_candidate_with_stage(
+                company, candidate, metadata,
+                crawl_profile="identity", verify_email_domain=False,
+            )
+            for candidate in profile_candidates
+        ]
+        profile_full = []
+        for identity_evaluation in profile_identity:
+            if not (
+                identity_evaluation.get("crawl_result", {}).get("pages")
+                and identity_evaluation.get("identity_assessment", {}).get(
+                    "provisionally_publishable"
+                )
+            ):
+                continue
+            full_evaluation = _evaluate_candidate_with_stage(
+                company, identity_evaluation["candidate"], metadata,
+            )
+            profile_full.append(
+                _preserve_identity_phase_evidence(
+                    full_evaluation, identity_evaluation,
+                )
+            )
+        runtime.record("pipeline.profile_candidates_evaluated", len(profile_full))
+        profile_resolution = entity_resolution.resolve_profile_anchor(
+            company, profile_full,
+        )
+        if profile_resolution.status == "resolved":
+            profile_resolution.selected["_identity_resolution"] = (
+                profile_resolution.reason
+            )
+            row = _finalize_selected_evaluation(
+                company, profile_resolution.selected, metadata,
+            )
+            if row["status"].startswith("OK_"):
+                row["reason"] = (
+                    f"{profile_resolution.reason}; {row['reason']}"
+                ).strip("; ")
+                random_delay()
+                return index, _attach_candidates(row, profile_candidates)
+
     try:
         candidates = search.find_candidate_domains(company, metadata)
     except Exception as exc:
@@ -1560,10 +2075,23 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         runtime.record("pipeline.source_degraded_companies")
     selectable_candidates = [
         candidate for candidate in candidates
-        if candidate.get("role") not in identity.EXCLUDED_ROLES
+        if (
+            candidate.get("role") not in identity.EXCLUDED_ROLES
+            and (
+                candidate["score"] >= config.MIN_ACCEPT_SCORE
+                or (
+                    candidate["score"] >= config.MIN_ACCEPT_SCORE - 5
+                    and candidate.get("role") == "company_candidate"
+                    and candidate.get("_official_query_evidence", 0) >= 3
+                    and scorer.public_brand_domain_match(
+                        company, candidate.get("url", ""),
+                    )
+                )
+            )
+        )
     ]
     best = selectable_candidates[0] if selectable_candidates else None
-    if not best or best["score"] < config.MIN_ACCEPT_SCORE:
+    if not best:
         random_delay()
         row = _empty_result(company, "WEBSITE_NOT_FOUND", "No candidate passed score threshold")
         return index, _attach_candidates(row, candidates)
@@ -1573,6 +2101,17 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         for candidate in selectable_candidates
         if candidate["score"] >= best["score"] - config.MAX_CANDIDATE_SCORE_GAP
     ][: config.MAX_CANDIDATE_EVALUATIONS]
+    evaluated_domains = {
+        scorer.normalize_domain(candidate.get("url", ""))
+        for candidate in eligible_candidates
+    }
+    eligible_candidates.extend(
+        candidate for candidate in selectable_candidates
+        if (
+            candidate.get("_source_profile_evidence")
+            and scorer.normalize_domain(candidate.get("url", "")) not in evaluated_domains
+        )
+    )
     identity_evaluations = [
         _evaluate_candidate_with_stage(
             company, candidate, metadata,
@@ -1624,9 +2163,130 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         key=lambda item: _evaluation_rank_key(company, item),
         reverse=True,
     )
+    ranked_identity = _refine_identity_evidence(
+        company, metadata, ranked_identity,
+    )
     full_candidates = [
-        item["candidate"] for item in ranked_identity[: config.MAX_FULL_CANDIDATE_EVALUATIONS]
-    ]
+        item["candidate"]
+        for item in ranked_identity
+        if _full_crawl_worthy(company, item)
+    ][: config.MAX_FULL_CANDIDATE_EVALUATIONS]
+    full_candidate_domains = {
+        scorer.normalize_domain(candidate.get("url", ""))
+        for candidate in full_candidates
+    }
+    full_candidates.extend([
+        item["candidate"]
+        for item in ranked_identity
+        if (
+            entity_resolution.fingerprint(
+                entity_resolution.build_target_profile(company), item,
+            ).domain_specificity >= 2
+            and _full_crawl_worthy(company, item)
+            and scorer.normalize_domain(
+                item["candidate"].get("url", "")
+            ) not in full_candidate_domains
+        )
+    ][:2])
+    if not full_candidates:
+        automation_state = evidence_acquisition.analyze(
+            company,
+            ranked_identity,
+            resolution_status="unresolved",
+            metadata=metadata,
+            query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+        )
+        # Do not stop at a diagnosis. When initial discovery produced no
+        # crawl-worthy identity, execute the bounded evidence plan and feed
+        # newly discovered domains back through the same identity gates.
+        targeted_candidates = search.find_targeted_candidates(
+            company,
+            metadata,
+            automation_state.search_queries,
+            limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+        )
+        known_domains = {
+            scorer.normalize_domain(item.get("url", "")) for item in candidates
+        }
+        acquired_identity: list[dict] = []
+        for candidate in targeted_candidates:
+            domain = scorer.normalize_domain(candidate.get("url", ""))
+            if not domain or domain in known_domains:
+                continue
+            known_domains.add(domain)
+            candidates.append(candidate)
+            acquired_identity.append(_evaluate_candidate_with_stage(
+                company,
+                candidate,
+                metadata,
+                crawl_profile="identity",
+                verify_email_domain=False,
+                evidence_scopes=automation_state.crawl_scopes,
+            ))
+            if len(acquired_identity) >= config.MAX_TARGETED_CRAWLS_PER_ROUND:
+                break
+        if acquired_identity:
+            ranked_identity.extend(
+                item for item in acquired_identity
+                if item.get("crawl_result", {}).get("pages")
+            )
+            ranked_identity.sort(
+                key=lambda item: _evaluation_rank_key(company, item),
+                reverse=True,
+            )
+            ranked_identity = _refine_identity_evidence(
+                company, metadata, ranked_identity,
+            )
+            full_candidates = [
+                item["candidate"]
+                for item in ranked_identity
+                if _full_crawl_worthy(company, item)
+            ][: config.MAX_FULL_CANDIDATE_EVALUATIONS]
+            runtime.record(
+                "pipeline.identity_acquisition_candidates",
+                len(acquired_identity),
+            )
+    if not full_candidates:
+        automation_state = evidence_acquisition.analyze(
+            company,
+            ranked_identity,
+            resolution_status="unresolved",
+            metadata=metadata,
+            query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+        )
+        row = _empty_result(
+            company,
+            "REVIEW_NEEDED",
+            "no_candidate_proved_target_fingerprint",
+            ranked_identity[0].get("final_score", 0),
+        )
+        row["confidence"] = "review"
+        row["__evaluation"] = {
+            "candidate_evaluations": [
+                _evaluation_evidence(item) for item in ranked_identity
+            ],
+            "identity_resolution": {
+                "status": "unresolved",
+                "reason": "no_candidate_proved_target_fingerprint",
+            },
+            "remaining_evidence_gaps": sorted(automation_state.gaps),
+            "automation_terminal_reason": automation_state.terminal_reason,
+        }
+        random_delay()
+        return index, _attach_candidates(row, candidates)
+    full_candidate_domains = {
+        scorer.normalize_domain(candidate.get("url", ""))
+        for candidate in full_candidates
+    }
+    full_candidates.extend(
+        item["candidate"] for item in ranked_identity
+        if (
+            item.get("candidate", {}).get("_source_profile_evidence")
+            and item.get("identity_assessment", {}).get("provisionally_publishable")
+            and scorer.normalize_domain(item["candidate"].get("url", ""))
+            not in full_candidate_domains
+        )
+    )
     identity_by_domain = {
         scorer.normalize_domain(item["candidate"].get("url", "")): item
         for item in ranked_identity
@@ -1665,7 +2325,78 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         key=lambda item: _evaluation_rank_key(company, item),
         reverse=True,
     )
-    best_eval = ranked_evaluations[0]
+    resolution = entity_resolution.resolve_candidates(
+        company, ranked_evaluations,
+    )
+    automation_state = evidence_acquisition.analyze(
+        company,
+        ranked_evaluations,
+        resolution_status=resolution.status,
+        metadata=metadata,
+        query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+    )
+    if (
+        resolution.status != "resolved"
+        and all("identity_assessment" in item for item in ranked_evaluations)
+    ):
+        ranked_evaluations, resolution, automation_state = (
+            _complete_resolution_evidence(
+                company,
+                metadata,
+                candidates,
+                ranked_evaluations,
+                resolution,
+            )
+        )
+    if resolution.status == "ambiguous":
+        row = _empty_result(
+            company,
+            "WEBSITE_AMBIGUOUS",
+            resolution.reason,
+            max(
+                (item.get("final_score", 0) for item in resolution.contenders),
+                default=0,
+            ),
+        )
+        row["confidence"] = "review"
+        row["__evaluation"] = {
+            "ambiguous_candidates": [
+                _evaluation_evidence(item) for item in resolution.contenders
+            ],
+            "identity_resolution": {
+                "status": resolution.status,
+                "reason": resolution.reason,
+            },
+            "remaining_evidence_gaps": sorted(automation_state.gaps),
+            "automation_terminal_reason": automation_state.terminal_reason,
+        }
+        random_delay()
+        return index, _attach_candidates(row, candidates)
+    if resolution.status != "resolved" or resolution.selected is None:
+        row = _empty_result(
+            company,
+            "REVIEW_NEEDED",
+            resolution.reason,
+            ranked_evaluations[0].get("final_score", 0),
+        )
+        row["confidence"] = "review"
+        row["__evaluation"] = {
+            "candidate_evaluations": [
+                _evaluation_evidence(item) for item in resolution.contenders
+            ],
+            "identity_resolution": {
+                "status": resolution.status,
+                "reason": resolution.reason,
+            },
+            "remaining_evidence_gaps": sorted(automation_state.gaps),
+            "automation_terminal_reason": automation_state.terminal_reason,
+        }
+        random_delay()
+        return index, _attach_candidates(row, candidates)
+    best_eval = resolution.selected
+    best_eval["_identity_resolution"] = resolution.reason
+    ranked_evaluations.remove(best_eval)
+    ranked_evaluations.insert(0, best_eval)
     unreachable_homonym = _unreachable_homonym_conflict(company, best_eval, identity_evaluations)
     if unreachable_homonym:
         row = _empty_result(
@@ -1684,60 +2415,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         }
         random_delay()
         return index, _attach_candidates(row, candidates)
-    ambiguity_match: tuple[dict, dict, int, dict] | None = None
-    for second_eval in ranked_evaluations[1:]:
-        best_key = candidate_reranker.non_score_key(
-            company, best_eval,
-            hard_context_failure=_is_hard_context_failure(best_eval),
-        )
-        second_key = candidate_reranker.non_score_key(
-            company, second_eval,
-            hard_context_failure=_is_hard_context_failure(second_eval),
-        )
-        score_gap = abs(best_eval["final_score"] - second_eval["final_score"])
-        same_non_score_evidence = best_key == second_key
-        different_domains = scorer.normalize_domain(best_eval["candidate"]["url"]) != scorer.normalize_domain(second_eval["candidate"]["url"])
-        homonym = _homonym_conflict(company, best_eval, second_eval)
-        if (
-            homonym.get("ambiguous")
-            or _close_identity_margin_conflict(company, best_eval, second_eval)
-            or (
-                same_non_score_evidence and different_domains
-                and score_gap <= config.AMBIGUOUS_CANDIDATE_MARGIN
-                and not _same_official_family(best_eval, second_eval, company)
-            )
-        ):
-            ambiguity_match = (best_eval, second_eval, score_gap, homonym)
-            break
-    if ambiguity_match:
-        best_eval, second_eval, score_gap, homonym = ambiguity_match
-        row = _empty_result(
-            company,
-            "WEBSITE_AMBIGUOUS",
-            (
-                f"{homonym.get('reason', 'candidate_margin_conflict')}:{score_gap}; "
-                f"{best_eval['candidate']['url']} vs {second_eval['candidate']['url']}"
-            ),
-            best_eval["final_score"],
-        )
-        row["confidence"] = "review"
-        row["__evaluation"] = {
-            "ambiguous_candidates": [
-                _evaluation_evidence(best_eval),
-                _evaluation_evidence(second_eval),
-            ],
-            "homonym_assessment": homonym,
-        }
-        random_delay()
-        return index, _attach_candidates(row, candidates)
     _merge_official_family_contacts(best_eval, ranked_evaluations[1:], company)
-    crawl_result = best_eval["crawl_result"]
-    selected_email = best_eval["email"]
-    selected_phone = best_eval["phone"]
-    final_score = best_eval["final_score"]
-    reasons = best_eval["reasons"]
-    has_contact = best_eval["has_contact"]
-
     unsafe_identity = _unsafe_context_identity(company, best_eval)
     hard_context_failure = _is_hard_context_failure(best_eval)
     if (unsafe_identity or hard_context_failure) and not _reviewable_authoritative_candidate(
@@ -1764,56 +2442,8 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             random_delay()
             return index, _attach_candidates(row, candidates)
 
-    unsupported_candidate = _unsupported_search_text_candidate(company, best_eval)
-    # All reachable close competitors have already passed through the homonym
-    # and score-margin checks above, so the selected candidate is unique here.
-    identity_verified = _has_trusted_website_evidence(
-        best_eval["candidate"], reasons, unique_candidate=True,
-    )
-    if unsupported_candidate:
-        reasons.append("unsupported_search_text_candidate_rejected")
-        status, confidence = "WEBSITE_NOT_FOUND", "none"
-    elif unsafe_identity and not _reviewable_authoritative_candidate(company, best_eval["candidate"]):
-        reasons.append("unverified_website_candidate_preserved_for_review")
-        status, confidence = "REVIEW_NEEDED", "review"
-    elif hard_context_failure and not _reviewable_authoritative_candidate(company, best_eval["candidate"]):
-        reasons.append("unverified_website_candidate_preserved_for_review")
-        status, confidence = "REVIEW_NEEDED", "review"
-    elif unsafe_identity or hard_context_failure:
-        reasons.append("authoritative_website_preserved_for_review")
-        status, confidence = "REVIEW_NEEDED", "review"
-    elif _email_failure_blocks_publication(best_eval, identity_verified):
-        status, confidence = "REVIEW_NEEDED", "review"
-    else:
-        status, confidence = _confidence_status(
-            final_score, has_contact, reasons,
-            identity_verified,
-        )
-    status, confidence = _apply_publication_policy(
-        company, best_eval, status, confidence, reasons,
-    )
+    row = _finalize_selected_evaluation(company, best_eval, metadata)
     random_delay()
-    row = {
-        "company": company,
-        "website": crawl_result["url"],
-        "website_source": best_eval["candidate"]["query"],
-        **_contact_output_fields(best_eval),
-        "status": status,
-        "confidence": confidence,
-        "score": final_score,
-        **_policy_output_fields(best_eval),
-        "reason": "; ".join(reason for reason in reasons if reason),
-        "__evaluation": _evaluation_evidence(best_eval),
-    }
-    if status == "WEBSITE_NOT_FOUND":
-        _clear_unpublished_contacts(row)
-    elif not identity_verified:
-        # Unverified domains remain fully visible in website_candidates.xlsx and
-        # the review evidence, but are not published as an official website or
-        # allowed to leak their first-party-looking contacts into contacts.xlsx.
-        row["selected_website"] = crawl_result["url"]
-        _clear_unpublished_contacts(row)
-        row["email_verification_reason"] = "website_identity_unverified"
     return index, _attach_candidates(row, candidates)
 
 
@@ -1833,6 +2463,12 @@ def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
             discovery_coverage.mark_published(row.get("company", ""))
     evidence.write_jsonl(config.EVIDENCE_FILE, rows)
     entity_registry.write_observations(config.ENTITY_RELATIONSHIPS_FILE, rows)
+    if (
+        config.SEARCH_CACHE_MODE != "replay"
+        and config.CRAWL_CACHE_MODE != "replay"
+    ):
+        entity_memory.remember(rows)
+    quality_audit.write(config.QUALITY_AUDIT_FILE, rows)
     for row in rows:
         row.pop("__index", None)
         row.pop("__candidates", None)
@@ -1879,7 +2515,18 @@ def _set_output_dir(output_dir: Path) -> None:
     config.ENTITY_RELATIONSHIPS_FILE = output_dir / "entity_relationships.jsonl"
     config.TELEMETRY_FILE = output_dir / "telemetry.json"
     config.DISCOVERY_COVERAGE_FILE = output_dir / "discovery_coverage.json"
+    config.QUALITY_AUDIT_FILE = output_dir / "quality_audit.json"
     config.REPLAY_SNAPSHOT_FILE = output_dir / "replay_snapshot.json.gz"
+
+
+def _set_run_state_dir(state_dir: Path) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    config.STATE_DIR = state_dir
+    config.PROGRESS_FILE = state_dir / "progress.json"
+    config.PROGRESS_DB_FILE = state_dir / "progress.sqlite3"
+    config.SEARCH_CACHE_DIR = state_dir / "search_cache"
+    config.CRAWL_CACHE_DIR = state_dir / "crawl_cache"
+    config.EMAIL_CACHE_DIR = state_dir / "email_cache"
 
 
 def _prompt_api_state(label: str, input_fn=input) -> bool:
@@ -2107,6 +2754,7 @@ def run(
     scorer.configure_company_token_frequencies([
         record["company"] for record in company_records
     ])
+    paid_query_limit = search.configure_run_budget(len(company_records))
 
     source_preflight = search.preflight_source_profiles(company_records)
     for health in source_preflight:
@@ -2122,6 +2770,7 @@ def run(
             "search_cache": config.SEARCH_CACHE_MODE,
             "crawl_cache": config.CRAWL_CACHE_MODE,
             "brightdata_budget": config.BRIGHTDATA_REQUEST_BUDGET,
+            "paid_query_limit_per_company": paid_query_limit,
             "google_places_budget": config.GOOGLE_PLACES_REQUEST_BUDGET,
             "brandfetch_budget": config.BRANDFETCH_REQUEST_BUDGET,
             "hunter_budget": config.HUNTER_REQUEST_BUDGET,
@@ -2197,6 +2846,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="B2B Contact Finder")
     parser.add_argument("--input", type=Path, default=config.INPUT_FILE, help="Path to firms.xlsx")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory")
+    parser.add_argument(
+        "--run-state-dir",
+        type=Path,
+        default=None,
+        help="Run-specific checkpoint and cache directory",
+    )
     parser.add_argument("--companies", default="", help="Comma-separated exact company names")
     parser.add_argument("--only-status", default="", help="Run statuses found in the output directory's existing contacts.xlsx")
     parser.add_argument(
@@ -2221,6 +2876,8 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.run_state_dir:
+        _set_run_state_dir(args.run_state_dir)
     config.SEARCH_CACHE_MODE = "replay" if args.rerank_cache else args.search_cache
     config.CRAWL_CACHE_MODE = "replay" if args.rerank_cache else args.crawl_cache
     config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)

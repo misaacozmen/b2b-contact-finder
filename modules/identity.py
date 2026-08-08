@@ -12,7 +12,10 @@ from __future__ import annotations
 from modules import scorer
 
 
-EXCLUDED_ROLES = {"directory", "fair_profile", "shared_listing", "marketplace", "news"}
+EXCLUDED_ROLES = {
+    "directory", "fair_profile", "shared_listing", "marketplace", "news",
+    "public_body",
+}
 
 
 def _has_reason(reasons: list[str], prefixes: tuple[str, ...]) -> bool:
@@ -108,6 +111,26 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
         signals.append(_signal(
             "search_profile_outbound_link", "neutral", "directory_profile", "discovery_bridge",
             candidate.get("_search_bridge_evidence", [{}])[0].get("source_url", ""), "medium",
+        ))
+    places_name_domain_match = any(
+        scorer.business_name_identity_match(
+            company, str(item.get("name", "") or "")
+        )
+        and scorer.same_registrable_domain(
+            str(item.get("website", "") or ""), candidate.get("url", "")
+        )
+        for item in candidate.get("_google_places_evidence", [])
+    )
+    if places_name_domain_match:
+        signals.append(_signal(
+            (
+                "google_places_domain_phone_identity"
+                if "google_places_first_party_phone_match" in reasons
+                else "google_places_business_domain_identity"
+            ),
+            "support", "google_places",
+            "places_identity", scorer.normalize_domain(candidate.get("url", "")),
+            "strong",
         ))
 
     page_identity_strong = _has_reason(reasons, ("page_identity_strong:",))
@@ -227,7 +250,15 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
                 "structured_owner_difference_resolved", "neutral", "candidate_site",
                 "structured_owner", "explicit_brand_owner_relationship", "strong",
             ))
-        else:
+        elif structured_identity.get("legal_names") or any(
+            token in scorer.normalize_text(str(name)).split()
+            for name in structured_identity.get("names", [])
+            for token in (
+                "holding", "group", "grup", "limited", "ltd", "anonim",
+                "corporation", "corp", "inc", "llc", "sirket", "sirketi",
+                "as",
+            )
+        ):
             names = ", ".join(structured_identity.get("names", [])[:3])
             signals.append(_signal(
                 "structured_owner_mismatch", "conflict", "candidate_site",
@@ -265,7 +296,10 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
 
     if "country_identity_unproven" in reasons:
         signals.append(_signal(
-            "target_country_unproven", "conflict", "candidate_site", "country",
+            # Missing country evidence is an acquisition gap, not contradictory
+            # identity evidence. Publication independently requires positive
+            # country support, so keeping this neutral cannot publish the site.
+            "target_country_unproven", "neutral", "candidate_site", "country",
             "no_tr_tld_phone_or_text", "medium",
         ))
     elif _has_reason(reasons, ("country_identity_tr_",)):
@@ -370,7 +404,8 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
     # Multiple strong identity facts from the candidate itself are not
     # independent sources, so this remains provisional until the caller has
     # compared all plausible domains and confirmed that the candidate is
-    # unique. Hard owner/country/context conflicts always block this path.
+    # unique. Hard owner/context conflicts always block this path; missing
+    # country evidence is tracked separately and still prevents publication.
     strong_first_party_bundle = (
         first_party_bundle_components >= required_bundle_components
         and target_country_supported

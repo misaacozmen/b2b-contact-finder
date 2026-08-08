@@ -9,7 +9,7 @@ import logging
 from functools import lru_cache
 
 import config
-from modules import entity_registry, scorer
+from modules import entity_registry, official_registry, scorer
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -59,6 +59,7 @@ def verified_websites(company: str) -> list[dict]:
             continue
         records.append({"relationship": "official", "source": "company_aliases", "confidence": "verified", **record})
     records.extend(entity_registry.verified_domains(company))
+    records.extend(official_registry.verified_domains(company))
     by_domain = {}
     for record in records:
         domain = scorer.normalize_domain(record.get("url", ""))

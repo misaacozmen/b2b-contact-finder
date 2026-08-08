@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 
 import main
 import calibrate_publication
-from modules import evidence, excel, publication_policy, risk_calibration
+from modules import evidence, excel, publication_policy, report, risk_calibration
 
 
 def _safe_evaluation(**overrides):
@@ -63,6 +63,46 @@ class PublicationPolicyTests(unittest.TestCase):
             minimum_safety_score=75,
         )
         self.assertEqual(review["action"], "retain_legacy_abstention")
+        self.assertFalse(review["eligible"])
+        self.assertTrue(review["risk_eligible"])
+
+    def test_report_separates_complete_review_rows_from_publications(self):
+        rows = [
+            {
+                "company": "PUBLISHED",
+                "website": "https://published.example",
+                "email": "info@published.example",
+                "phone": "02125550000",
+                "status": "OK_HIGH_CONFIDENCE",
+                "publication_eligible": True,
+                "email_verification": "verified",
+            },
+            {
+                "company": "HELD",
+                "website": "https://held.example",
+                "email": "info@held.example",
+                "phone": "02125550001",
+                "status": "REVIEW_NEEDED",
+                "publication_eligible": False,
+                "publication_blockers": "no_candidate_proved_target_fingerprint",
+                "email_verification": "verified",
+            },
+        ]
+        with patch("modules.report.runtime.snapshot", return_value={"counters": {}}), patch(
+            "modules.report.discovery_coverage.payload",
+            return_value={
+                "resolved_companies": 1,
+                "unresolved_companies": 1,
+                "replay_miss_count": 0,
+                "acquisition_plan": [],
+            },
+        ):
+            text = report.build_report(rows, 0)
+        self.assertIn("Yayin politikasina uygun firma: 1 (50.0%)", text)
+        self.assertIn(
+            "Tam iletisim bulundu fakat kimlik incelemesinde: 1 (50.0%)",
+            text,
+        )
 
     def test_identity_conflict_forces_downgrade(self):
         evaluation = _safe_evaluation()

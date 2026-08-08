@@ -47,6 +47,13 @@ class FinalPackageTests(unittest.TestCase):
         self.assertFalse(crawler._contact_page_needs_render(
             "<html><body>Email: info@example.com</body></html>"
         ))
+        self.assertTrue(crawler._contact_page_needs_render(
+            '<html><style>' + ('x{color:red}' * 100) + '</style>'
+            '<body><div id="app"></div><script src="main.js"></script></body></html>'
+        ))
+        self.assertTrue(crawler._contact_page_needs_render(
+            '<html><body><app-root></app-root><script type="module" src="main.js"></script></body></html>'
+        ))
 
     def test_golden_parsers_accept_multiple_sites_and_phone_range(self) -> None:
         self.assertEqual(_hosts("https://a.com\nwww.b.com.tr"), ["a.com", "b.com.tr"])

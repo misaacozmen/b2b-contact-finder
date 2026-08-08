@@ -19,6 +19,7 @@ artifact_work/
 outputs/**/*.inspect.ndjson
 outputs/**/*.png
 outputs/**/formula_errors.ndjson
+outputs/**/node_modules/
 prepare_final*.txt
 
 .env

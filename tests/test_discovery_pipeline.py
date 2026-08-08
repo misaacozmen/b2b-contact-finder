@@ -28,6 +28,7 @@ class DiscoveryPipelineTests(unittest.TestCase):
         for domain in (
             "turkishexporter.com.tr", "turkish-manufacturers.com", "gulfood.com",
             "gso.org.tr", "find.com.tr", "mukellef.info", "europages.com.tr", "bbc.com",
+            "tradeatlas.com",
         ):
             with self.subTest(domain=domain):
                 self.assertTrue(scorer.is_excluded_domain(domain))
@@ -602,6 +603,20 @@ class DiscoveryPipelineTests(unittest.TestCase):
         with patch("modules.email_verifier._domain_mx_status", return_value=("invalid_domain", "mx_missing")):
             result = email_verifier.verify_email("info@example.com")
         self.assertEqual(result, {"status": "invalid_domain", "reason": "mx_missing"})
+
+    def test_transient_mx_timeout_cache_is_retried(self) -> None:
+        transient = {"status": "unverified", "reason": "mx_lookup_timeout"}
+        with patch.object(config, "CRAWL_CACHE_MODE", "use"), patch(
+            "modules.email_verifier.cache_store.load", return_value=transient,
+        ), patch(
+            "modules.email_verifier.cache_store.save",
+        ), patch(
+            "modules.email_verifier._domain_mx_status",
+            return_value=("verified", "mx_present"),
+        ) as lookup:
+            result = email_verifier.verify_email("info@example.com")
+        self.assertEqual(result, {"status": "verified", "reason": "mx_present"})
+        lookup.assert_called_once_with("example.com")
 
     def test_address_record_is_accepted_as_implicit_mx(self) -> None:
         class FakeResolver:

@@ -13,7 +13,10 @@ from modules import identity, scorer
 
 POLICY_VERSION = "evidence-risk-v1"
 OK_STATUSES = {"OK_HIGH_CONFIDENCE", "OK_MEDIUM_CONFIDENCE"}
-EXCLUDED_ROLES = {"directory", "fair_profile", "shared_listing", "marketplace", "news"}
+EXCLUDED_ROLES = {
+    "directory", "fair_profile", "shared_listing", "marketplace", "news",
+    "public_body",
+}
 
 
 def _has_reason(reasons: list[str], prefixes: tuple[str, ...]) -> bool:
@@ -52,7 +55,13 @@ def evaluate(
     role = str(candidate.get("role", ""))
     if role in EXCLUDED_ROLES:
         blockers.append(f"excluded_candidate_role:{role}")
-    if not assessment.get("provisionally_publishable"):
+    exact_domain_resolution = str(
+        evaluation.get("_identity_resolution", "") or ""
+    ).endswith("_exact_full_name_domain")
+    fingerprint_resolution = str(
+        evaluation.get("_identity_resolution", "") or ""
+    ).startswith("candidate_resolved_by_")
+    if not assessment.get("provisionally_publishable") and not fingerprint_resolution:
         blockers.append("identity_not_publishable")
     blockers.extend(
         f"identity_conflict:{item.get('kind', 'unknown')}"
@@ -92,6 +101,8 @@ def evaluate(
         score += 2
     if scorer.domain_identity_match(company, candidate.get("url", ""))[0]:
         score += 5
+    if fingerprint_resolution:
+        score += 18
     score -= min(len(conflicts), 2) * 35
     if evaluation.get("email_failed") and not cross_domain_email_resolved:
         score -= 20
@@ -100,10 +111,14 @@ def evaluate(
     safety_score = _bounded_score(score)
 
     legacy_publishable = proposed_status in OK_STATUSES
-    eligible = not blockers and safety_score >= minimum_safety_score
+    risk_eligible = not blockers and safety_score >= minimum_safety_score
+    # ``eligible`` is the actual publication decision, not an advisory risk
+    # score. A legacy review row remains withheld until its identity status is
+    # resolved, even when its standalone safety score is high.
+    eligible = legacy_publishable and risk_eligible
     if not legacy_publishable:
         action = "retain_legacy_abstention"
-    elif eligible:
+    elif risk_eligible:
         action = "allow_legacy_publication"
     else:
         action = "downgrade_to_review"
@@ -123,6 +138,7 @@ def evaluate(
         "proposed_status": proposed_status,
         "action": action,
         "eligible": eligible,
+        "risk_eligible": risk_eligible,
         "safety_score": safety_score,
         "risk_index": 100 - safety_score,
         "risk_tier": risk_tier,
@@ -133,7 +149,9 @@ def evaluate(
             "independent_support_count": support_count,
             "first_party_bundle_components": bundle_components,
             "strong_first_party_bundle": bool(assessment.get("strong_first_party_bundle")),
+            "exact_full_name_domain_resolution": exact_domain_resolution,
             "has_contact": bool(evaluation.get("has_contact")),
+            "risk_eligible": risk_eligible,
         },
     }
 

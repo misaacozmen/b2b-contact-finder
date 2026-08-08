@@ -78,6 +78,26 @@ class IdentityArchitectureTests(unittest.TestCase):
         self.assertFalse(conflicted["publishable"])
         self.assertTrue(resolved["publishable"])
 
+    def test_public_site_title_is_not_treated_as_legal_owner(self):
+        candidate = {
+            "url": "https://brand.com.tr", "reason": "domain_hits:1/1",
+            "role": "company_candidate",
+        }
+        assessment = identity.assess(
+            "Example Foods", candidate,
+            [
+                "page_identity_strong:2/2",
+                "structured_identity_unmatched:0/2",
+                "legal_name_full_match:2",
+                "country_identity_tr_tld",
+            ],
+            {"names": ["Brand Foods - Taste for Everyone"], "legal_names": []},
+        )
+        self.assertNotIn(
+            "structured_owner_mismatch",
+            {item["kind"] for item in assessment["conflicts"]},
+        )
+
     def test_canonical_urls_without_organization_name_are_neutral(self):
         pages = [{
             "url": "https://example.com",

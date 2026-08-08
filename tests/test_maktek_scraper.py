@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from modules.exhibitor_scraper import (
+    _brand_catalog_list_rows,
+    _fold,
     _maktek_list_rows,
     _maktek_profile_details,
     scrape_maktek,
@@ -53,6 +55,25 @@ PROFILE_HTML = """
 
 
 class MaktekScraperTests(unittest.TestCase):
+    def test_fold_normalizes_turkish_dotless_i(self):
+        self.assertEqual(_fold("Türkı\u0307ye"), "turkiye")
+
+    def test_foodist_brand_catalog_rows_keep_fair_metadata_separate(self):
+        rows = _brand_catalog_list_rows(
+            LIST_HTML,
+            "https://www.foodistexpo.com",
+            source="foodist_expo_turkiye",
+            sector="gıda ve içecek",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "foodist_expo_turkiye")
+        self.assertEqual(rows[0]["sector"], "gıda ve içecek")
+        self.assertEqual(
+            rows[0]["profile_url"],
+            "https://www.foodistexpo.com/brand/ornek-makina",
+        )
+
     def test_list_parser_keeps_profile_and_location(self):
         rows = _maktek_list_rows(LIST_HTML, "https://www.maktekfuari.com")
         self.assertEqual(len(rows), 1)

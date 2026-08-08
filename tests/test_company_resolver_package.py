@@ -178,6 +178,7 @@ class CompanyResolverPackageTests(unittest.TestCase):
             "reasons": ["page_identity_strong:3/3", "legal_name_phrase_match:3"],
             "structured_identity": {"legal_names": ["Example Legal A.S."]},
             "identity_assessment": {
+                "publishable": True,
                 "provisionally_publishable": True, "support_count": 2, "conflicts": [],
             },
         }
@@ -197,7 +198,7 @@ class CompanyResolverPackageTests(unittest.TestCase):
         self.assertNotIn("page_identity_medium:1/3", merged["reasons"])
 
     def test_full_crawl_hard_identity_conflict_is_never_overridden(self):
-        light = {"identity_assessment": {"provisionally_publishable": True, "support_count": 2}}
+        light = {"identity_assessment": {"publishable": True, "provisionally_publishable": True, "support_count": 2}}
         full = {
             "identity_assessment": {
                 "provisionally_publishable": False, "support_count": 0,

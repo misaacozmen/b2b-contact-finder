@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import config
 from modules import discovery_coverage, query_planner, runtime, search
@@ -30,6 +30,28 @@ class DiverseQueryBudgetTests(unittest.TestCase):
             query_planner.diverse_queries(queries, 2),
             ["a resmi sitesi", "a contact"],
         )
+
+    def test_live_paid_budget_is_reserved_and_spread_across_companies(self):
+        with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(
+            config, "SEARCH_CACHE_MODE", "use",
+        ), patch.object(config, "BRIGHTDATA_REQUEST_BUDGET", 2000), patch.object(
+            config, "DEFAULT_PAID_SEARCH_QUERY_LIMIT", 10,
+        ), patch.object(config, "MAX_SEARCH_QUERIES_PER_COMPANY", 0), patch.object(
+            config, "BRIGHTDATA_RETRY_RESERVE_FRACTION", 0.20,
+        ), patch.object(
+            search, "_RUN_PAID_QUERY_LIMIT", None,
+        ):
+            limit = search.configure_run_budget(225)
+        self.assertEqual(limit, 7)
+
+    def test_free_fallback_budget_scales_with_company_count(self):
+        with patch.object(config, "SEARCH_HTTP_REQUEST_BUDGET", 0), patch.object(
+            config, "DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY", 10,
+        ), patch.object(config, "SEARCH_PROVIDER", "ddgs"), patch.object(
+            search, "_RUN_PAID_QUERY_LIMIT", None,
+        ):
+            search.configure_run_budget(80)
+            self.assertEqual(config.SEARCH_HTTP_REQUEST_BUDGET, 800)
 
 
 class DiscoveryCoverageTests(unittest.TestCase):
@@ -65,6 +87,18 @@ class DiscoveryCoverageTests(unittest.TestCase):
         )
         self.assertEqual(discovery_coverage.payload()["acquisition_plan"], [])
 
+    def test_live_budget_gap_enters_acquisition_plan(self):
+        discovery_coverage.record_query(
+            "NOVA", "nova Turkiye official website",
+            "primary", "budget_blocked", 0, {"missing_legal_identity"},
+        )
+        discovery_coverage.finalize_company(
+            "NOVA", resolved=False, candidate_count=1,
+        )
+        plan = discovery_coverage.payload()["acquisition_plan"]
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0]["reason"], "unresolved_search_budget_gap")
+
     def test_published_company_is_removed_from_prior_gap_plan(self):
         discovery_coverage.record_query(
             "NOVA", "nova Turkiye official website",
@@ -96,6 +130,24 @@ class DiscoveryCoverageTests(unittest.TestCase):
 
 
 class SearchCoverageIntegrationTests(unittest.TestCase):
+    def test_brightdata_provider_rate_is_limited_independently(self):
+        response = Mock(status_code=200)
+        search._BRIGHTDATA_NEXT_REQUEST_AT = 0.0
+        with patch.object(
+            config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 12,
+        ), patch(
+            "modules.search.runtime.reserve_api", return_value=True,
+        ), patch(
+            "modules.search.runtime.wait_for_request_slot",
+        ), patch(
+            "modules.search.requests.post", return_value=response,
+        ), patch(
+            "modules.search.time.monotonic", side_effect=[100.0, 100.0],
+        ), patch("modules.search.time.sleep") as sleep:
+            search._brightdata_post("https://provider.example")
+            search._brightdata_post("https://provider.example")
+        sleep.assert_called_once_with(5.0)
+
     def setUp(self):
         runtime.reset()
         discovery_coverage.reset()
@@ -108,6 +160,43 @@ class SearchCoverageIntegrationTests(unittest.TestCase):
         self.assertEqual(results, [])
         self.assertEqual(results.cache_status, "replay_miss")
         live.assert_not_called()
+
+    def test_exhausted_primary_and_fallback_budgets_are_visible(self):
+        with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch(
+            "modules.search._search_text",
+            side_effect=search.SearchBudgetExhausted("paid exhausted"),
+        ), patch(
+            "modules.search._ddgs_text",
+            side_effect=search.SearchBudgetExhausted("free exhausted"),
+        ):
+            results = search._safe_search_text("nova official website")
+        self.assertEqual(results.cache_status, "budget_blocked")
+
+    def test_brightdata_honors_body_cooldown_before_decode_retry(self):
+        failed = Mock(status_code=200, headers={}, text="minimum of 15 seconds")
+        failed.json.side_effect = ValueError("not json")
+        succeeded = Mock(
+            status_code=200,
+            headers={},
+            text='{"organic": []}',
+        )
+        succeeded.json.return_value = {"organic": []}
+        with patch.object(config, "BRIGHTDATA_API_KEY", "key"), patch.object(
+            config, "BRIGHTDATA_REQUEST_BUDGET", 5,
+        ), patch.object(
+            config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 0,
+        ), patch.object(config, "MAX_RETRIES", 1), patch(
+            "modules.search.requests.post", side_effect=[failed, succeeded],
+        ), patch("modules.search.runtime.wait_for_request_slot"), patch(
+            "modules.search.time.sleep",
+        ) as sleep:
+            results = search._brightdata_text("nova official website")
+        self.assertEqual(results, [])
+        sleep.assert_called_once_with(15.0)
+        counters = runtime.snapshot()["counters"]
+        self.assertEqual(counters["api.brightdata.queries"], 1)
+        self.assertEqual(counters["api.brightdata.requests"], 2)
+        self.assertEqual(counters["api.brightdata.retries"], 1)
 
 
 if __name__ == "__main__":

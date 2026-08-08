@@ -107,7 +107,7 @@ def adaptive_queries(
         token for token in scorer.primary_brand_tokens(company_name, limit=2)
         if token not in corporate_words
     ]
-    full_name = " ".join(scorer._raw_company_tokens(company_name)).strip()
+    full_name = re.sub(r"\s+", " ", company_name).strip()
     brand = " ".join(brand_tokens).strip() or full_name
     if not brand:
         return []

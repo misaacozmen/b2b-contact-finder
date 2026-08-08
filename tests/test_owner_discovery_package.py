@@ -139,6 +139,45 @@ class OwnerDiscoveryPackageTests(unittest.TestCase):
             {item["kind"] for item in assessment["conflicts"]},
         )
 
+    def test_translated_activity_in_multisector_name_is_not_a_conflict(self):
+        candidate = {
+            "url": "https://exampletarim.com.tr", "query": "search",
+            "reason": "domain_hits:2/3", "role": "company_candidate",
+        }
+        assessment = identity.assess(
+            "Example Tekstil Tarım",
+            candidate,
+            [
+                "page_identity_strong:2/3@scope=public_brand,pages=2",
+                "structured_identity_medium:1/2@scope=public_brand_partial",
+                "country_identity_tr_tld",
+            ],
+            {"names": ["Example Food & Agriculture Co."]},
+        )
+        self.assertNotIn(
+            "structured_owner_context_mismatch",
+            {item["kind"] for item in assessment["conflicts"]},
+        )
+
+    def test_translated_food_activity_is_not_an_owner_conflict(self):
+        candidate = {
+            "url": "https://examplegida.com.tr", "query": "search",
+            "reason": "domain_hits:1/1", "role": "company_candidate",
+        }
+        assessment = identity.assess(
+            "Example Gida", candidate,
+            [
+                "page_identity_strong:1/1@scope=public_brand,pages=2",
+                "structured_identity_medium:1/1@scope=public_brand",
+                "country_identity_tr_tld",
+            ],
+            {"names": ["Example Food"]},
+        )
+        self.assertNotIn(
+            "structured_owner_context_mismatch",
+            {item["kind"] for item in assessment["conflicts"]},
+        )
+
     def test_profile_plain_domain_needs_nearby_website_label_for_explicit_flag(self):
         search.reset_source_health()
         response = Mock(

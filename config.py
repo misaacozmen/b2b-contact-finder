@@ -9,6 +9,8 @@ STATE_DIR = BASE_DIR / "state"
 DATA_DIR = BASE_DIR / "data"
 COMPANY_ALIASES_FILE = DATA_DIR / "company_aliases.json"
 ENTITY_REGISTRY_FILE = DATA_DIR / "entity_registry.json"
+OFFICIAL_REGISTRY_FILE = DATA_DIR / "official_registry.json"
+VERIFIED_ENTITY_MEMORY_FILE = DATA_DIR / "verified_entity_memory.jsonl"
 
 INPUT_FILE = INPUT_DIR / "firms.xlsx"
 CONTACTS_FILE = OUTPUT_DIR / "contacts.xlsx"
@@ -29,6 +31,7 @@ EVIDENCE_FILE = OUTPUT_DIR / "evidence.jsonl"
 ENTITY_RELATIONSHIPS_FILE = OUTPUT_DIR / "entity_relationships.jsonl"
 TELEMETRY_FILE = OUTPUT_DIR / "telemetry.json"
 DISCOVERY_COVERAGE_FILE = OUTPUT_DIR / "discovery_coverage.json"
+QUALITY_AUDIT_FILE = OUTPUT_DIR / "quality_audit.json"
 REPLAY_SNAPSHOT_FILE = OUTPUT_DIR / "replay_snapshot.json.gz"
 REPLAY_SNAPSHOT_INPUT = (
     Path(os.getenv("REPLAY_SNAPSHOT_INPUT", "")).expanduser()
@@ -39,7 +42,7 @@ REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES = int(
     os.getenv("REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES", str(256 * 1024 * 1024))
 )
 REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL = max(
-    1, int(os.getenv("REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL", "5"))
+    1, int(os.getenv("REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL", "50"))
 )
 
 # CLI overrides these values for normal runs.  "off" as the import-time
@@ -52,12 +55,20 @@ CACHE_SCHEMA_VERSION = 1
 # Crawl discovery changed independently from SERP/MX caches.  Keeping a
 # separate version refreshes official sites without invalidating paid search
 # results that are still reusable.
-CRAWL_CACHE_SCHEMA_VERSION = 3
+CRAWL_CACHE_SCHEMA_VERSION = 7
 
-MAX_WORKERS = 3
+MAX_WORKERS = max(1, int(os.getenv("MAX_WORKERS", "3")))
 MIN_DELAY_SEC = 1.0
 MAX_DELAY_SEC = 3.0
 GLOBAL_REQUESTS_PER_SECOND = float(os.getenv("GLOBAL_REQUESTS_PER_SECOND", "3"))
+BRIGHTDATA_REQUESTS_PER_MINUTE = float(
+    os.getenv("BRIGHTDATA_REQUESTS_PER_MINUTE", "13")
+)
+CRAWLER_HTTP_REQUEST_BUDGET = int(os.getenv("CRAWLER_HTTP_REQUEST_BUDGET", "0"))
+SEARCH_HTTP_REQUEST_BUDGET = int(os.getenv("SEARCH_HTTP_REQUEST_BUDGET", "0"))
+DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY = max(
+    1, int(os.getenv("DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY", "10"))
+)
 BRIGHTDATA_REQUEST_BUDGET = int(os.getenv("BRIGHTDATA_REQUEST_BUDGET", "500"))
 GOOGLE_PLACES_REQUEST_BUDGET = int(os.getenv("GOOGLE_PLACES_REQUEST_BUDGET", "100"))
 HUNTER_REQUEST_BUDGET = int(os.getenv("HUNTER_REQUEST_BUDGET", "25"))
@@ -76,6 +87,19 @@ SEARCH_COUNTRY_QUERY_TEMPLATES = [
 SEARCH_RESULTS_PER_QUERY = 8
 MAX_SEARCH_QUERIES_PER_COMPANY = int(os.getenv("MAX_SEARCH_QUERIES_PER_COMPANY", "0"))
 DEFAULT_PAID_SEARCH_QUERY_LIMIT = int(os.getenv("DEFAULT_PAID_SEARCH_QUERY_LIMIT", "10"))
+BRIGHTDATA_RETRY_RESERVE_FRACTION = min(
+    0.8,
+    max(0.0, float(os.getenv("BRIGHTDATA_RETRY_RESERVE_FRACTION", "0.20"))),
+)
+BRIGHTDATA_CIRCUIT_FAILURE_THRESHOLD = max(
+    1, int(os.getenv("BRIGHTDATA_CIRCUIT_FAILURE_THRESHOLD", "1"))
+)
+BRIGHTDATA_CIRCUIT_COOLDOWN_SEC = max(
+    1, int(os.getenv("BRIGHTDATA_CIRCUIT_COOLDOWN_SEC", "300"))
+)
+BRIGHTDATA_MAX_INFLIGHT_QUERIES = max(
+    1, int(os.getenv("BRIGHTDATA_MAX_INFLIGHT_QUERIES", "2"))
+)
 MAX_FALLBACK_SEARCH_QUERIES = int(os.getenv("MAX_FALLBACK_SEARCH_QUERIES", "3"))
 MAX_ADAPTIVE_SEARCH_QUERIES = int(os.getenv("MAX_ADAPTIVE_SEARCH_QUERIES", "4"))
 # Keep the total paid-query ceiling unchanged: reserve part of the existing
@@ -84,6 +108,15 @@ MAX_ADAPTIVE_SEARCH_QUERIES = int(os.getenv("MAX_ADAPTIVE_SEARCH_QUERIES", "4"))
 PAID_SEARCH_ADAPTIVE_RESERVE = int(os.getenv("PAID_SEARCH_ADAPTIVE_RESERVE", "3"))
 DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY = max(
     1, int(os.getenv("DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY", "3"))
+)
+MAX_AUTONOMOUS_RESOLUTION_ROUNDS = max(
+    0, int(os.getenv("MAX_AUTONOMOUS_RESOLUTION_ROUNDS", "2"))
+)
+MAX_TARGETED_QUERIES_PER_ROUND = max(
+    0, int(os.getenv("MAX_TARGETED_QUERIES_PER_ROUND", "2"))
+)
+MAX_TARGETED_CRAWLS_PER_ROUND = max(
+    1, int(os.getenv("MAX_TARGETED_CRAWLS_PER_ROUND", "3"))
 )
 MAX_SEARCH_BRIDGE_FETCHES = int(os.getenv("MAX_SEARCH_BRIDGE_FETCHES", "2"))
 PROFILE_BRIDGE_BLOCKED_DOMAINS = [
@@ -128,7 +161,9 @@ PUBLICATION_POLICY_MODE = os.getenv("PUBLICATION_POLICY_MODE", "enforce_downgrad
 PUBLICATION_POLICY_MIN_SAFETY_SCORE = int(
     os.getenv("PUBLICATION_POLICY_MIN_SAFETY_SCORE", "75")
 )
-MAX_CANDIDATE_EVALUATIONS = 8
+MAX_CANDIDATE_EVALUATIONS = max(
+    1, int(os.getenv("MAX_CANDIDATE_EVALUATIONS", "8"))
+)
 MAX_CANDIDATE_SCORE_GAP = 24
 AMBIGUOUS_CANDIDATE_MARGIN = int(os.getenv("AMBIGUOUS_CANDIDATE_MARGIN", "5"))
 SOURCE_PROFILE_MAX_SERVER_ERRORS = int(os.getenv("SOURCE_PROFILE_MAX_SERVER_ERRORS", "2"))
@@ -164,6 +199,9 @@ MAX_CONTACT_PAGES = 6
 MAX_CONTACT_ATTEMPTS = int(os.getenv("MAX_CONTACT_ATTEMPTS", "10"))
 MAX_IDENTITY_PAGES = int(os.getenv("MAX_IDENTITY_PAGES", "4"))
 MAX_FULL_CANDIDATE_EVALUATIONS = int(os.getenv("MAX_FULL_CANDIDATE_EVALUATIONS", "3"))
+MAX_IDENTITY_EVIDENCE_RECRAWLS = max(
+    0, int(os.getenv("MAX_IDENTITY_EVIDENCE_RECRAWLS", "1"))
+)
 MAX_FIRST_PARTY_ALIAS_CANDIDATES = int(os.getenv("MAX_FIRST_PARTY_ALIAS_CANDIDATES", "3"))
 MAX_FIRST_PARTY_CONTACT_ALIAS_CANDIDATES = int(
     os.getenv("MAX_FIRST_PARTY_CONTACT_ALIAS_CANDIDATES", "1")
@@ -171,17 +209,24 @@ MAX_FIRST_PARTY_CONTACT_ALIAS_CANDIDATES = int(
 IDENTITY_PAGE_PATHS = [
     "/about", "/about-us", "/hakkimizda", "/kurumsal",
     "/company-information", "/sirket-bilgileri", "/ticari-bilgiler", "/imprint",
-    "/kvkk", "/kvkk-aydinlatma-metni", "/gizlilik-politikasi",
+    "/kvkk", "/kvkk-aydinlatma-metni", "/kvkk-metni",
+    "/aydinlatma-metni", "/kisisel-verilerin-korunmasi",
+    "/gizlilik-politikasi",
     "/privacy", "/privacy-policy", "/legal", "/legal-notice",
     "/terms", "/terms-of-use", "/kullanim-kosullari",
+    "/mesafeli-satis-sozlesmesi", "/satis-sozlesmesi",
+    "/distance-sales-contract",
     "/locations", "/lokasyonlar", "/subeler", "/ofisler",
     "/distributors", "/distributorler", "/bayiler",
 ]
-MAX_SITEMAPS = 4
+MAX_SITEMAPS = max(0, int(os.getenv("MAX_SITEMAPS", "4")))
 MAX_SITEMAP_URLS = 2500
 MAX_DOCUMENT_LINKS = 3
 MAX_STATIC_RECOVERY_PAGES = int(os.getenv("MAX_STATIC_RECOVERY_PAGES", "3"))
-REQUEST_TIMEOUT_SEC = 10
+MAX_HOST_VARIANT_ATTEMPTS = max(
+    0, int(os.getenv("MAX_HOST_VARIANT_ATTEMPTS", "1"))
+)
+REQUEST_TIMEOUT_SEC = max(1, int(os.getenv("REQUEST_TIMEOUT_SEC", "10")))
 MAX_HTTP_REDIRECTS = 5
 MAX_RETRIES = 2
 RETRY_BACKOFF_BASE_SEC = 2.0
@@ -195,6 +240,9 @@ SHARED_CANDIDATE_HOST_MIN_COMPANIES = int(
 )
 ENABLE_JS_FALLBACK = os.getenv("ENABLE_JS_FALLBACK", "1") == "1"
 ENABLE_JS_PROFILE_FALLBACK = os.getenv("ENABLE_JS_PROFILE_FALLBACK", "1") == "1"
+MAX_BROWSER_RENDER_WORKERS = max(
+    1, int(os.getenv("MAX_BROWSER_RENDER_WORKERS", "6"))
+)
 JS_RENDER_TIMEOUT_SEC = int(os.getenv("JS_RENDER_TIMEOUT_SEC", "20"))
 ENABLE_PDF_OCR = os.getenv("ENABLE_PDF_OCR", "1") == "1"
 PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "3"))
@@ -286,6 +334,7 @@ EXCLUDED_DOMAINS = [
     "all.biz",
     "tradekey.com",
     "tradeindia.com",
+    "tradeatlas.com",
     "exportersindia.com",
     "go4worldbusiness.com",
     "made-in-china.com",

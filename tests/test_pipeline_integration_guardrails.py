@@ -36,6 +36,110 @@ def _evaluation(candidate: dict, final_score: int, profile: str = "identity") ->
 
 
 class PipelineIntegrationGuardrailTests(unittest.TestCase):
+    def test_places_candidate_enriches_existing_domain_instead_of_replacing_it(self):
+        existing = {
+            "example.com.tr": {
+                "url": "https://example.com.tr", "score": 90,
+                "query": "official website", "reason": "domain_hits:2/2",
+            },
+        }
+        with patch(
+            "modules.search.google_places.search_company",
+            return_value=[{
+                "website": "https://example.com.tr/contact",
+                "name": "Example Brand", "phone": "+90 212 555 00 00",
+                "place_id": "place-1",
+            }],
+        ):
+            search._add_google_places_results(existing, "Example Brand")
+
+        self.assertEqual(existing["example.com.tr"]["query"], "official website")
+        self.assertEqual(existing["example.com.tr"]["external_phone"], "+90 212 555 00 00")
+        self.assertEqual(
+            existing["example.com.tr"]["_google_places_evidence"][0]["place_id"],
+            "place-1",
+        )
+
+    def test_missing_initial_identity_executes_targeted_acquisition_plan(self):
+        initial = {
+            "url": "https://noise.example", "score": 70,
+            "query": "official website", "reason": "search_text_identity:0/2",
+            "role": "company_candidate",
+        }
+        acquired = {
+            "url": "https://examplebrand.com.tr", "score": 90,
+            "query": '"EXAMPLE BRAND" ticari unvan KVKK',
+            "reason": "domain_hits:2/2", "role": "company_candidate",
+            "_official_query_evidence": 2,
+        }
+
+        def evaluate(company, candidate, metadata=None, crawl_profile="full", verify_email_domain=True, evidence_scopes=None):
+            item = _evaluation(candidate, 95, crawl_profile)
+            if candidate is initial:
+                item["reasons"] = ["page_identity_missing:0/2", "country_identity_unproven"]
+                item["structured_identity"] = {}
+                item["identity_assessment"] = {
+                    "publishable": False, "provisionally_publishable": False,
+                    "support_count": 0, "conflicts": [],
+                }
+                return item
+            item["reasons"].extend([
+                "legal_name_full_match:2", "country_identity_tr_tld",
+            ])
+            item["identity_assessment"] = {
+                "publishable": True, "provisionally_publishable": True,
+                "support_count": 2, "conflicts": [],
+            }
+            if crawl_profile == "full":
+                item.update({
+                    "email": "info@examplebrand.com.tr",
+                    "email_source_url": acquired["url"],
+                    "phone": "02125550000",
+                    "phone_source_url": acquired["url"],
+                    "has_contact": True,
+                })
+            return item
+
+        with patch(
+            "main.search.find_candidate_domains",
+            return_value=search.CandidateList([initial]),
+        ), patch(
+            "main.search.find_targeted_candidates",
+            return_value=search.CandidateList([acquired]),
+        ) as targeted, patch(
+            "main._evaluate_candidate", side_effect=evaluate,
+        ), patch.object(
+            config, "MAX_IDENTITY_EVIDENCE_RECRAWLS", 0,
+        ), patch("main.random_delay"):
+            _, row = main.process_company(0, "EXAMPLE BRAND", Mock())
+
+        targeted.assert_called_once()
+        self.assertTrue(row["status"].startswith("OK_"))
+        self.assertEqual(row["website"], acquired["url"])
+        self.assertEqual(row["email"], "info@examplebrand.com.tr")
+        self.assertEqual(row["phone"], "02125550000")
+
+    def test_provider_circuit_skips_repeated_failing_paid_queries(self):
+        search.reset_source_health()
+        search._record_brightdata_result(True)
+        with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(
+            config, "BRIGHTDATA_CIRCUIT_FAILURE_THRESHOLD", 2,
+        ), patch.object(
+            config, "BRIGHTDATA_CIRCUIT_COOLDOWN_SEC", 300,
+        ), patch(
+            "modules.search._search_text",
+            side_effect=RuntimeError("bad provider payload"),
+        ) as paid, patch(
+            "modules.search._ddgs_text", return_value=[{"href": "https://fallback.example"}],
+        ):
+            search._safe_search_text("first")
+            search._safe_search_text("second")
+            third = search._safe_search_text("third")
+
+        self.assertEqual(paid.call_count, 2)
+        self.assertEqual(third.provider, "ddgs")
+        search._record_brightdata_result(True)
+
     def test_fifteen_profiles_on_one_failing_host_make_only_two_requests(self):
         records = [
             {"profile_url": f"https://fair.example/company/{index}"}
@@ -83,6 +187,35 @@ class PipelineIntegrationGuardrailTests(unittest.TestCase):
         self.assertEqual(calls.count("identity"), 8)
         self.assertLessEqual(calls.count("full"), config.MAX_FULL_CANDIDATE_EVALUATIONS)
         self.assertEqual(calls.count("full"), 3)
+
+    def test_low_scored_role_candidate_cannot_hide_eligible_candidate(self):
+        low = {
+            "url": "https://directory-like.example", "score": 50,
+            "query": "official website", "reason": "domain_hits:1/2",
+            "role": "company_candidate",
+        }
+        eligible = {
+            "url": "https://example-brand.com.tr", "score": 82,
+            "query": "official website", "reason": "domain_hits:2/2",
+            "role": "unknown",
+        }
+        calls: list[str] = []
+
+        def evaluate(company, candidate, metadata=None, crawl_profile="full", verify_email_domain=True):
+            calls.append(candidate["url"])
+            return _evaluation(candidate, 95, crawl_profile)
+
+        with patch(
+            "main.search.find_candidate_domains",
+            return_value=search.CandidateList([low, eligible]),
+        ), patch("main._evaluate_candidate", side_effect=evaluate), patch(
+            "main.random_delay"
+        ):
+            _, row = main.process_company(0, "Example Brand", Mock())
+
+        self.assertNotEqual(row["status"], "WEBSITE_NOT_FOUND")
+        self.assertNotIn(low["url"], calls)
+        self.assertIn(eligible["url"], calls)
 
     def test_identity_phase_never_extracts_contacts_or_checks_mx(self):
         candidate = {

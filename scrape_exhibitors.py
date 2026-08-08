@@ -6,9 +6,12 @@ from modules import excel
 from modules.exhibitor_scraper import (
     dedupe_rows,
     scrape_beauty_eurasia,
+    scrape_foodist,
     scrape_idos,
     scrape_ifco,
     scrape_maktek,
+    scrape_metalexpo,
+    scrape_texhibition,
 )
 from modules.utils import ensure_directories
 
@@ -17,7 +20,10 @@ SCRAPERS = {
     "ifco": scrape_ifco,
     "idos": scrape_idos,
     "beauty": scrape_beauty_eurasia,
+    "foodist": scrape_foodist,
     "maktek": scrape_maktek,
+    "metalexpo": scrape_metalexpo,
+    "texhibition": scrape_texhibition,
 }
 
 

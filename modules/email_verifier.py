@@ -1,5 +1,3 @@
-from functools import lru_cache
-
 try:
     import dns.exception
     import dns.resolver
@@ -25,21 +23,25 @@ def _implicit_mx_status(resolver, domain: str) -> tuple[str, str]:
     return "invalid_domain", "mx_and_address_missing"
 
 
-@lru_cache(maxsize=4096)
 def _domain_mx_status(domain: str) -> tuple[str, str]:
     if not DNS_AVAILABLE:
         return "not_checked", "dnspython_not_installed"
     resolver = dns.resolver.Resolver()
     resolver.timeout = config.EMAIL_DNS_TIMEOUT_SEC
     resolver.lifetime = config.EMAIL_DNS_TIMEOUT_SEC
-    try:
-        answers = resolver.resolve(domain, "MX")
-    except dns.resolver.NXDOMAIN:
-        return "invalid_domain", "mx_nxdomain"
-    except dns.resolver.NoAnswer:
-        return _implicit_mx_status(resolver, domain)
-    except (dns.resolver.Timeout, dns.exception.DNSException) as exc:
-        return "unverified", f"mx_lookup_{exc.__class__.__name__.lower()}"
+    last_error = ""
+    for _ in range(2):
+        try:
+            answers = resolver.resolve(domain, "MX")
+            break
+        except dns.resolver.NXDOMAIN:
+            return "invalid_domain", "mx_nxdomain"
+        except dns.resolver.NoAnswer:
+            return _implicit_mx_status(resolver, domain)
+        except (dns.resolver.Timeout, dns.exception.DNSException) as exc:
+            last_error = f"mx_lookup_{exc.__class__.__name__.lower()}"
+    else:
+        return "unverified", last_error
     if not answers:
         return _implicit_mx_status(resolver, domain)
     if all(str(getattr(answer, "exchange", "")).rstrip(".") == "" for answer in answers):
@@ -60,13 +62,19 @@ def verify_email(email: str) -> dict[str, str]:
             config.EMAIL_CACHE_DIR, "mx", domain,
             config.CRAWL_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION,
         )
-        if cached is not None:
+        if cached is not None and not (
+            cached.get("status") == "unverified"
+            and "timeout" in cached.get("reason", "")
+        ):
             return cached
         if config.CRAWL_CACHE_MODE == "replay":
             return {"status": "not_checked", "reason": "mx_replay_cache_miss"}
     status, reason = _domain_mx_status(domain)
     result = {"status": status, "reason": reason}
-    if config.CRAWL_CACHE_MODE in {"use", "refresh"}:
+    if (
+        config.CRAWL_CACHE_MODE in {"use", "refresh"}
+        and status != "unverified"
+    ):
         cache_store.save(
             config.EMAIL_CACHE_DIR, "mx", domain, result,
             config.CACHE_SCHEMA_VERSION,

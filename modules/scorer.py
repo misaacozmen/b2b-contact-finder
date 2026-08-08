@@ -134,6 +134,14 @@ def is_excluded_domain(domain: str) -> bool:
     return any(domain == excluded or domain.endswith(f".{excluded}") for excluded in config.EXCLUDED_DOMAINS)
 
 
+def is_public_body_domain(domain: str) -> bool:
+    domain = normalize_domain(domain)
+    return domain.endswith((
+        ".gov.tr", ".bel.tr", ".k12.tr", ".edu.tr", ".pol.tr", ".tsk.tr",
+        ".gov", ".edu",
+    ))
+
+
 def is_foreign_country_domain(domain: str) -> bool:
     domain = normalize_domain(domain)
     if not domain:
@@ -219,6 +227,44 @@ def legal_name_full_phrase_match(company_name: str, text: str) -> bool:
     )
 
 
+def business_name_identity_match(company_name: str, business_name: str) -> bool:
+    """Require a directory business name to identify the requested company."""
+    if legal_name_phrase_match(company_name, business_name):
+        return True
+    bridge_noise = {
+        "ic", "dis", "paz", "pazarlama", "tic", "ticaret", "ith", "ihr",
+        "ithalat", "ihracat", "san", "sanayi",
+    }
+    target = [
+        token for token in primary_brand_tokens(company_name, limit=4)
+        if token not in bridge_noise
+    ][:2]
+    observed_tokens = [
+        token for token in legal_identity_tokens(business_name)
+        if token not in bridge_noise
+    ]
+    observed = set(observed_tokens)
+    observed.update(
+        first + second
+        for first, second in zip(observed_tokens, observed_tokens[1:])
+        if len(first) >= 3 and len(second) >= 3
+    )
+
+    def compatible(token: str) -> bool:
+        return any(
+            token == value
+            or (
+                min(len(token), len(value)) >= 6
+                and (token.startswith(value) or value.startswith(token))
+            )
+            for value in observed
+        )
+
+    if len(target) >= 2:
+        return all(compatible(token) for token in target)
+    return bool(target and len(target[0]) >= 3 and compatible(target[0]))
+
+
 def ownership_statement_match(company_name: str, text: str) -> bool:
     """Detect an explicit legal-name/brand ownership statement on the page."""
     tokens = legal_identity_tokens(company_name)
@@ -276,11 +322,25 @@ _IDENTITY_TOKEN_EQUIVALENTS = {
     "tibbi": ("medical",),
     "medikal": ("medical",),
     "medical": ("tibbi", "medikal"),
+    "tekstil": ("textile",),
+    "textile": ("tekstil",),
     "makine": ("machine", "machinery"),
     "makina": ("machine", "machinery"),
     "machine": ("makine", "makina"),
     "machinery": ("makine", "makina"),
 }
+
+
+def primary_brand_domain_compounds(company_name: str, limit: int = 2) -> set[str]:
+    """Return exact compact brand forms, including guarded token translations."""
+    tokens = primary_brand_tokens(company_name, limit=limit)
+    compounds = {"".join(tokens)} if tokens else set()
+    for index, token in enumerate(tokens):
+        for equivalent in _IDENTITY_TOKEN_EQUIVALENTS.get(token, ()):
+            translated = list(tokens)
+            translated[index] = equivalent
+            compounds.add("".join(translated))
+    return compounds
 
 
 def primary_brand_text_hits(company_name: str, text: str, limit: int = 2) -> tuple[int, int, int]:
@@ -318,21 +378,36 @@ def public_brand_domain_match(company_name: str, url_or_domain: str) -> bool:
     much more likely to be a homonym.
     """
     core = compact_domain_core(url_or_domain)
-    brand_tokens = primary_brand_tokens(company_name, limit=2)
-    if not core or not brand_tokens:
+    if not core:
         return False
 
-    compound = "".join(brand_tokens)
-    if len(brand_tokens) >= 2 and len(compound) >= 7 and core == compound:
-        return True
+    # Exhibitor/legal names commonly append an explicit public brand after a
+    # dash or slash. Treat each labelled segment as a possible public name;
+    # the surrounding identity resolver still requires first-party evidence.
+    segments = [
+        part.strip()
+        for part in re.split(r"\s+(?:-|/|\|)\s+", company_name)
+        if part.strip()
+    ]
+    variants = [company_name, *segments] if len(segments) > 1 else [company_name]
+    for variant_index, variant in enumerate(variants):
+        brand_tokens = primary_brand_tokens(variant, limit=2)
+        if not brand_tokens:
+            continue
 
-    primary = brand_tokens[0]
-    if len(primary) < 7 or not core.startswith(primary):
-        return False
-    # Exact long public brands (metafiz.com.tr) and an anchored long brand with
-    # a meaningful descriptor (appsilonadvancedmaterials.com) are accepted.
-    suffix = core[len(primary):]
-    return not suffix or len(suffix) >= 3
+        compound = "".join(brand_tokens)
+        minimum_compound = 5 if variant_index else 7
+        if len(compound) >= minimum_compound and core.startswith(compound):
+            suffix = core[len(compound):]
+            if not suffix or len(suffix) >= 2:
+                return True
+
+        primary = brand_tokens[0]
+        if len(primary) >= 7 and core.startswith(primary):
+            suffix = core[len(primary):]
+            if not suffix or len(suffix) >= 2:
+                return True
+    return False
 
 
 def context_tokens(company_name: str) -> list[str]:
@@ -354,6 +429,30 @@ def explicit_activity_qualifiers(name: str) -> list[str]:
     used only when both names explicitly state different activities, never to
     penalize a site merely for omitting an activity from a legal title.
     """
+    activity_families = {
+        "tarim": "agriculture",
+        "agriculture": "agriculture",
+        "agricultural": "agriculture",
+        "agro": "agriculture",
+        "tekstil": "textile",
+        "textile": "textile",
+        "makine": "machinery",
+        "makina": "machinery",
+        "machine": "machinery",
+        "machinery": "machinery",
+        "medikal": "medical",
+        "tibbi": "medical",
+        "medical": "medical",
+        "saglik": "health",
+        "health": "health",
+        "healthcare": "health",
+    }
+    for canonical, details in config.METADATA_CONTEXTS.items():
+        canonical = normalize_text(canonical)
+        for alias in details.get("aliases", []):
+            normalized_alias = normalize_text(alias)
+            if normalized_alias and " " not in normalized_alias:
+                activity_families[normalized_alias] = canonical
     vocabulary = {
         normalize_text(word)
         for word in (
@@ -362,12 +461,15 @@ def explicit_activity_qualifiers(name: str) -> list[str]:
             *config.CONTEXT_VALIDATION_WORDS,
         )
     }
+    vocabulary.update(activity_families)
     vocabulary -= {
         "ve", "dahili", "hizmetleri", "servis", "satis", "sistemleri",
         "endustri", "endustriyel", "maddeler",
     }
     return list(dict.fromkeys(
-        token for token in _raw_company_tokens(name) if token in vocabulary
+        activity_families.get(token, token)
+        for token in _raw_company_tokens(name)
+        if token in vocabulary
     ))
 
 

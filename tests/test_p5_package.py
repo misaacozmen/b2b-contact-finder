@@ -54,6 +54,19 @@ class FieldPublicationPolicyTests(unittest.TestCase):
         self.assertIn("cross_domain_email_dns_unverified", blocked["reason"])
         self.assertTrue(allowed["eligible"])
 
+        company_domain = contact_publication.evaluate_email(
+            "https://official.example",
+            _email(
+                "sales@official-company.example", source, "unverified",
+                company_domain_identity=True,
+            ),
+        )
+        self.assertTrue(company_domain["eligible"])
+        self.assertEqual(
+            company_domain["reason"],
+            "first_party_cross_domain_company_identity",
+        )
+
     def test_external_source_is_suppressed_per_field(self):
         result = contact_publication.filter_records(
             "https://official.example",

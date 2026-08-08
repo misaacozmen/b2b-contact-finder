@@ -58,6 +58,37 @@ def lookup(store: str, namespace: str, key: str, schema_version: int) -> tuple[b
     return True, value
 
 
+def lookup_prefix(
+    store: str,
+    namespace: str,
+    key_prefix: str,
+    schema_version: int,
+) -> tuple[bool, Any]:
+    """Return the richest cached variant for an exact resource prefix.
+
+    This exists for replay compatibility when bounded crawl settings (for
+    example contact seed lists) changed after a snapshot was recorded.
+    """
+    with _LOCK:
+        matches = [
+            value
+            for marker, value in _ENTRIES.items()
+            if marker[0] == str(store)
+            and marker[1] == str(namespace)
+            and marker[2].startswith(str(key_prefix))
+            and marker[3] == int(schema_version)
+        ]
+    if not matches:
+        return False, None
+    value = max(
+        matches,
+        key=lambda item: len(item.get("pages", []))
+        if isinstance(item, dict) else 0,
+    )
+    runtime.record(f"snapshot.{namespace}.prefix_hit")
+    return True, value
+
+
 def _entry_rows() -> list[dict]:
     with _LOCK:
         items = list(_ENTRIES.items())

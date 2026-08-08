@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import Counter
@@ -21,7 +22,23 @@ _NEXT_REQUEST_AT = 0.0
 def reset() -> None:
     global _COUNTERS, _STARTED_AT, _NEXT_REQUEST_AT
     with _LOCK:
-        _COUNTERS = Counter()
+        _COUNTERS = Counter({
+            "api.brightdata.requests": max(
+                0, int(os.getenv("BRIGHTDATA_REQUEST_OFFSET", "0"))
+            ),
+            "api.google_places.requests": max(
+                0, int(os.getenv("GOOGLE_PLACES_REQUEST_OFFSET", "0"))
+            ),
+            "api.brandfetch.requests": max(
+                0, int(os.getenv("BRANDFETCH_REQUEST_OFFSET", "0"))
+            ),
+            "api.hunter.requests": max(
+                0, int(os.getenv("HUNTER_REQUEST_OFFSET", "0"))
+            ),
+            "api.hunter_domain_finder.requests": max(
+                0, int(os.getenv("HUNTER_REQUEST_OFFSET", "0"))
+            ),
+        })
         _STARTED_AT = time.monotonic()
         _NEXT_REQUEST_AT = 0.0
 
@@ -59,6 +76,28 @@ def reserve_api(provider: str, budget: int) -> bool:
         return True
 
 
+def reserve_crawler_http(budget: int) -> bool:
+    """Atomically reserve one crawler request; zero/negative means unlimited."""
+    with _LOCK:
+        used_key = "http.crawler.requests"
+        if budget > 0 and _COUNTERS[used_key] >= budget:
+            _COUNTERS["http.crawler.budget_blocked"] += 1
+            return False
+        _COUNTERS[used_key] += 1
+        return True
+
+
+def reserve_search_query(budget: int) -> bool:
+    """Atomically reserve one free live-search query; zero means unlimited."""
+    with _LOCK:
+        used_key = "http.search.requests"
+        if budget > 0 and _COUNTERS[used_key] >= budget:
+            _COUNTERS["http.search.budget_blocked"] += 1
+            return False
+        _COUNTERS[used_key] += 1
+        return True
+
+
 def snapshot() -> dict:
     with _LOCK:
         counters = dict(sorted(_COUNTERS.items()))
@@ -69,6 +108,8 @@ def snapshot() -> dict:
         "elapsed_seconds": round(elapsed, 3),
         "counters": counters,
         "budgets": {
+            "crawler_http": config.CRAWLER_HTTP_REQUEST_BUDGET,
+            "search_queries": config.SEARCH_HTTP_REQUEST_BUDGET,
             "brightdata": config.BRIGHTDATA_REQUEST_BUDGET,
             "google_places": config.GOOGLE_PLACES_REQUEST_BUDGET,
             "hunter": config.HUNTER_REQUEST_BUDGET,

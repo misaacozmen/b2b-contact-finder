@@ -13,6 +13,26 @@ from validate_golden_xlsx import evaluate_stages
 
 
 class GeneralImprovementPackageTests(unittest.TestCase):
+    def test_http_decoder_ignores_requests_latin1_default_for_utf8_html(self) -> None:
+        response = requests.Response()
+        response._content = "Sütaş İletişim".encode("utf-8")
+        response.headers["content-type"] = "text/html"
+        response.encoding = "ISO-8859-1"
+        self.assertEqual(
+            crawler._decoded_response_text(response), "Sütaş İletişim",
+        )
+
+    def test_turkish_phone_in_identity_html_proves_country_without_contact_publication(self) -> None:
+        score, reason = main._country_identity_score(
+            {
+                "url": "https://example.com",
+                "pages": [{"html": "Bize ulasin: +90 552 877 49 59"}],
+            },
+            [],
+        )
+        self.assertEqual(score, 8)
+        self.assertEqual(reason, "country_identity_tr_phone")
+
     def test_verified_cross_domain_mailbox_creates_only_discovery_alias(self) -> None:
         evaluation = {
             "crawl_result": {"url": "https://brand.com.tr"},
@@ -400,6 +420,15 @@ class GeneralImprovementPackageTests(unittest.TestCase):
         self.assertFalse(scorer.public_brand_domain_match(
             "KALKAN KOMPOZIT PLASTIK GERI DONUSUM SANAYI TICARET LIMITED SIRKETI",
             "https://kalkan.com.tr",
+        ))
+
+        self.assertTrue(scorer.public_brand_domain_match(
+            "ORNEK GIDA SANAYI LIMITED SIRKETI - MAVI KASE",
+            "https://mavikase.com.tr",
+        ))
+        self.assertTrue(scorer.public_brand_domain_match(
+            "44 BEYDAG GIDA SANAYI LIMITED SIRKETI",
+            "https://44beydaggida.com.tr",
         ))
 
     def test_primary_only_public_brand_domain_needs_onsite_email_corroboration(self) -> None:

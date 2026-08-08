@@ -51,7 +51,12 @@ def read_company_records(path: Path) -> list[dict]:
                 idx = headers.index(name)
                 if idx < len(row) and row[idx] is not None:
                     return str(row[idx]).strip()
-        if fallback_index is not None and fallback_index < len(row) and row[fallback_index] is not None:
+        if (
+            not has_header
+            and fallback_index is not None
+            and fallback_index < len(row)
+            and row[fallback_index] is not None
+        ):
             return str(row[fallback_index]).strip()
         return ""
 
@@ -64,9 +69,13 @@ def read_company_records(path: Path) -> list[dict]:
             {
                 "company": company,
                 "website": value_for(row, ("website", "web sitesi", "websitesi", "site"), 1),
+                "listed_website": value_for(
+                    row, ("listed_website", "fair_website", "fuar web sitesi"), None
+                ),
                 "source": value_for(row, ("source", "kaynak"), None),
                 "country": value_for(row, ("country", "ulke", "ülke"), None),
                 "profile_url": value_for(row, ("profile_url", "profil", "profile"), None),
+                "listing_url": value_for(row, ("listing_url", "liste_url", "liste url"), None),
                 "listed_phone": value_for(row, ("listed_phone", "fair_phone", "fuar telefonu"), None),
                 "listed_email": value_for(row, ("listed_email", "fair_email", "fuar e-posta"), None),
                 "listed_address": value_for(row, ("listed_address", "fair_address", "fuar adresi"), None),
@@ -200,4 +209,13 @@ def write_website_candidates(path: Path, rows: Iterable[dict]) -> None:
 
 
 def write_company_records(path: Path, rows: Iterable[dict]) -> None:
-    _write_rows(path, ["company", "website", "source", "country", "profile_url", "sector", "description"], rows)
+    _write_rows(
+        path,
+        [
+            "company", "website", "listed_website", "source", "country",
+            "profile_url", "listing_url", "listed_phone", "listed_email",
+            "listed_address", "hall", "stand", "brands", "representations",
+            "sector", "description",
+        ],
+        rows,
+    )

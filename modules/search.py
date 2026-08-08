@@ -16,7 +16,7 @@ from ddgs import DDGS
 from ddgs.exceptions import DDGSException
 
 import config
-from modules import aliases, cache_store, company_resolvers, crawler, discovery_coverage, google_places, query_planner, runtime, scorer
+from modules import aliases, cache_store, company_resolvers, crawler, discovery_coverage, entity_memory, google_places, query_planner, runtime, scorer, site_mapper
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -24,12 +24,24 @@ PREFERRED_BACKENDS = ["duckduckgo", "google", "brave", "yahoo", "yandex"]
 FALLBACK_BACKENDS = ["mojeek", "grokipedia"]
 _SOURCE_HEALTH_LOCK = threading.Lock()
 _SOURCE_HEALTH: dict[str, dict] = {}
+_BRIGHTDATA_RATE_LOCK = threading.Lock()
+_BRIGHTDATA_NEXT_REQUEST_AT = 0.0
+_BRIGHTDATA_CIRCUIT_LOCK = threading.Lock()
+_BRIGHTDATA_CONSECUTIVE_FAILURES = 0
+_BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
+_BRIGHTDATA_INFLIGHT = threading.BoundedSemaphore(
+    config.BRIGHTDATA_MAX_INFLIGHT_QUERIES
+)
 _CANDIDATE_HOST_LOCK = threading.Lock()
 _CANDIDATE_HOST_COMPANIES: dict[str, set[str]] = {}
-DISCOVERY_ONLY_ROLES = {"directory", "fair_profile", "shared_listing", "marketplace", "news"}
+_RUN_PAID_QUERY_LIMIT: int | None = None
+DISCOVERY_ONLY_ROLES = {
+    "directory", "fair_profile", "shared_listing", "marketplace", "news",
+    "public_body",
+}
 _ROLE_PRIORITY = {
     "company_candidate": 0, "unknown": 0, "news": 1, "marketplace": 2,
-    "directory": 3, "shared_listing": 4, "fair_profile": 5,
+    "directory": 3, "shared_listing": 4, "fair_profile": 5, "public_body": 6,
 }
 
 
@@ -38,6 +50,10 @@ class SearchBackendError(RuntimeError):
 
 
 class BrightDataSearchError(RuntimeError):
+    pass
+
+
+class SearchBudgetExhausted(BrightDataSearchError):
     pass
 
 
@@ -56,13 +72,83 @@ class SearchResults(list):
 
 
 def reset_source_health() -> None:
+    global _BRIGHTDATA_NEXT_REQUEST_AT, _BRIGHTDATA_CONSECUTIVE_FAILURES
+    global _BRIGHTDATA_CIRCUIT_OPEN_UNTIL
     with _SOURCE_HEALTH_LOCK:
         _SOURCE_HEALTH.clear()
+    with _BRIGHTDATA_RATE_LOCK:
+        _BRIGHTDATA_NEXT_REQUEST_AT = 0.0
+    with _BRIGHTDATA_CIRCUIT_LOCK:
+        _BRIGHTDATA_CONSECUTIVE_FAILURES = 0
+        _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
 
 
 def reset_candidate_host_observations() -> None:
     with _CANDIDATE_HOST_LOCK:
         _CANDIDATE_HOST_COMPANIES.clear()
+
+
+def _brightdata_circuit_open() -> bool:
+    with _BRIGHTDATA_CIRCUIT_LOCK:
+        return time.monotonic() < _BRIGHTDATA_CIRCUIT_OPEN_UNTIL
+
+
+def _record_brightdata_result(success: bool) -> None:
+    global _BRIGHTDATA_CONSECUTIVE_FAILURES, _BRIGHTDATA_CIRCUIT_OPEN_UNTIL
+    with _BRIGHTDATA_CIRCUIT_LOCK:
+        if success:
+            _BRIGHTDATA_CONSECUTIVE_FAILURES = 0
+            _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
+            return
+        _BRIGHTDATA_CONSECUTIVE_FAILURES += 1
+        if (
+            _BRIGHTDATA_CONSECUTIVE_FAILURES
+            >= config.BRIGHTDATA_CIRCUIT_FAILURE_THRESHOLD
+        ):
+            _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = (
+                time.monotonic() + config.BRIGHTDATA_CIRCUIT_COOLDOWN_SEC
+            )
+            runtime.record("search.provider_circuit_opened")
+
+
+def configure_run_budget(company_count: int) -> int:
+    """Reserve retry headroom and spread paid discovery across the full run."""
+    global _RUN_PAID_QUERY_LIMIT
+    if company_count > 0 and config.SEARCH_HTTP_REQUEST_BUDGET <= 0:
+        config.SEARCH_HTTP_REQUEST_BUDGET = (
+            company_count * config.DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY
+        )
+    configured = (
+        config.MAX_SEARCH_QUERIES_PER_COMPANY
+        if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0
+        else config.DEFAULT_PAID_SEARCH_QUERY_LIMIT
+    )
+    if (
+        config.SEARCH_PROVIDER != "brightdata"
+        or config.SEARCH_CACHE_MODE == "replay"
+        or config.BRIGHTDATA_REQUEST_BUDGET <= 0
+        or company_count <= 0
+    ):
+        _RUN_PAID_QUERY_LIMIT = max(0, configured)
+    else:
+        usable_budget = int(
+            config.BRIGHTDATA_REQUEST_BUDGET
+            * (1.0 - config.BRIGHTDATA_RETRY_RESERVE_FRACTION)
+        )
+        fair_share = max(1, usable_budget // company_count)
+        _RUN_PAID_QUERY_LIMIT = min(max(1, configured), fair_share)
+    runtime.record("search.paid_query_limit_per_company", _RUN_PAID_QUERY_LIMIT)
+    return _RUN_PAID_QUERY_LIMIT
+
+
+def _effective_paid_query_limit() -> int:
+    if _RUN_PAID_QUERY_LIMIT is not None:
+        return _RUN_PAID_QUERY_LIMIT
+    return (
+        config.MAX_SEARCH_QUERIES_PER_COMPANY
+        if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0
+        else config.DEFAULT_PAID_SEARCH_QUERY_LIMIT
+    )
 
 
 def _observe_candidate_host(company_name: str, domain: str) -> int:
@@ -159,6 +245,10 @@ def _canonical_site_url(raw_url: str) -> str:
 
 
 def _ddgs_text(query: str) -> list[dict]:
+    if not runtime.reserve_search_query(config.SEARCH_HTTP_REQUEST_BUDGET):
+        LOGGER.warning("Free search query budget exhausted: %s", query)
+        raise SearchBudgetExhausted("Free search query budget exhausted")
+    runtime.wait_for_request_slot()
     had_non_error_response = False
     last_hard_error: Exception | None = None
 
@@ -210,7 +300,19 @@ def _decode_brightdata_response(response: requests.Response) -> dict:
 
 def _brightdata_post(url: str, **kwargs) -> requests.Response:
     if not runtime.reserve_api("brightdata", config.BRIGHTDATA_REQUEST_BUDGET):
-        raise BrightDataSearchError("Bright Data run budget exhausted")
+        raise SearchBudgetExhausted("Bright Data run budget exhausted")
+    global _BRIGHTDATA_NEXT_REQUEST_AT
+    requests_per_minute = max(config.BRIGHTDATA_REQUESTS_PER_MINUTE, 0.0)
+    if requests_per_minute:
+        interval = 60.0 / requests_per_minute
+        with _BRIGHTDATA_RATE_LOCK:
+            now = time.monotonic()
+            wait = max(0.0, _BRIGHTDATA_NEXT_REQUEST_AT - now)
+            _BRIGHTDATA_NEXT_REQUEST_AT = max(
+                now, _BRIGHTDATA_NEXT_REQUEST_AT,
+            ) + interval
+        if wait:
+            time.sleep(wait)
     runtime.wait_for_request_slot()
     return requests.post(url, timeout=config.BRIGHTDATA_TIMEOUT_SEC, **kwargs)
 
@@ -218,6 +320,7 @@ def _brightdata_post(url: str, **kwargs) -> requests.Response:
 def _brightdata_text(query: str) -> list[dict]:
     if not config.BRIGHTDATA_API_KEY:
         raise BrightDataSearchError("BRIGHTDATA_API_KEY is not set")
+    runtime.record("api.brightdata.queries")
 
     search_url = (
         f"https://{config.BRIGHTDATA_GOOGLE_DOMAIN}/search"
@@ -258,6 +361,7 @@ def _brightdata_text(query: str) -> list[dict]:
         last_detail = response.text[:500].replace("\n", " ")
         for attempt in range(config.MAX_RETRIES + 1):
             time.sleep(_retry_delay(response, attempt))
+            runtime.record("api.brightdata.retries")
             response = _brightdata_post(
                 config.BRIGHTDATA_ENDPOINT,
                 json=payload,
@@ -287,7 +391,20 @@ def _brightdata_text(query: str) -> list[dict]:
             decode_error = exc
             if parse_attempt >= config.MAX_RETRIES:
                 raise
-            time.sleep(_retry_delay(response, parse_attempt))
+            retry_delay = _retry_delay(response, parse_attempt)
+            cooldown = re.search(
+                r"minimum\s+of\s+(\d+(?:\.\d+)?)\s+seconds?",
+                str(exc),
+                re.IGNORECASE,
+            )
+            if cooldown:
+                retry_delay = max(
+                    retry_delay,
+                    min(float(cooldown.group(1)), config.MAX_RETRY_AFTER_SEC),
+                )
+                runtime.record("api.brightdata.cooldown_retries")
+            time.sleep(retry_delay)
+            runtime.record("api.brightdata.retries")
             response = _brightdata_post(
                 config.BRIGHTDATA_ENDPOINT,
                 json=payload,
@@ -319,7 +436,10 @@ def _brightdata_text(query: str) -> list[dict]:
 
 def _search_text_live(query: str) -> list[dict]:
     if config.SEARCH_PROVIDER == "brightdata":
-        return _brightdata_text(query)
+        with _BRIGHTDATA_INFLIGHT:
+            if _brightdata_circuit_open():
+                raise BrightDataSearchError("Bright Data circuit is open")
+            return _brightdata_text(query)
     return _ddgs_text(query)
 
 
@@ -393,15 +513,47 @@ def _search_text(query: str) -> list[dict]:
 
 def _safe_search_text(query: str) -> list[dict]:
     """A single provider timeout must not discard every result for a firm."""
+    if config.SEARCH_PROVIDER == "brightdata" and _brightdata_circuit_open():
+        try:
+            fallback = _ddgs_text(query)
+            runtime.record(
+                "search.circuit_fallback.success" if fallback
+                else "search.circuit_fallback.empty"
+            )
+            return SearchResults(fallback, "circuit_fallback", "ddgs")
+        except SearchBudgetExhausted:
+            runtime.record("search.circuit_fallback.budget_blocked")
+            return SearchResults([], "budget_blocked", "ddgs")
     try:
-        return _search_text(query)
+        results = _search_text(query)
+        if (
+            config.SEARCH_PROVIDER == "brightdata"
+            and getattr(results, "cache_status", "") == "live"
+        ):
+            _record_brightdata_result(True)
+        return results
     except Exception as exc:
         LOGGER.warning("Search query failed; continuing with remaining queries: %s (%s)", query, exc)
+        runtime.record("search.provider_failures")
         if config.SEARCH_PROVIDER == "brightdata":
+            if not isinstance(exc, SearchBudgetExhausted):
+                _record_brightdata_result(False)
             try:
-                return SearchResults(_ddgs_text(query), "live_fallback", "ddgs")
+                fallback = _ddgs_text(query)
+                runtime.record(
+                    "search.fallback.success" if fallback
+                    else "search.fallback.empty"
+                )
+                return SearchResults(fallback, "live_fallback", "ddgs")
+            except SearchBudgetExhausted as fallback_exc:
+                LOGGER.warning("Free search fallback budget exhausted: %s (%s)", query, fallback_exc)
+                runtime.record("search.fallback.budget_blocked")
+                return SearchResults([], "budget_blocked", "ddgs")
             except Exception as fallback_exc:
                 LOGGER.warning("Free search fallback also failed: %s (%s)", query, fallback_exc)
+                runtime.record("search.fallback.error")
+        if isinstance(exc, SearchBudgetExhausted):
+            return SearchResults([], "budget_blocked", config.SEARCH_PROVIDER)
         return SearchResults([], "error", config.SEARCH_PROVIDER)
 
 
@@ -486,6 +638,8 @@ def _candidate_search_control_key(item: dict) -> tuple[int, ...]:
 def _candidate_role(company_name: str, url: str, title: str, snippet: str) -> str:
     """Classify entity-profile results before considering domain similarity."""
     domain = scorer.normalize_domain(url)
+    if scorer.is_public_body_domain(domain):
+        return "public_body"
     intrinsic_company_domain = scorer.domain_identity_match(company_name, url)[0]
     raw_path = unquote(urlparse(url).path).casefold()
     uuid_company_record = bool(re.search(
@@ -495,8 +649,6 @@ def _candidate_role(company_name: str, url: str, title: str, snippet: str) -> st
     ))
     if uuid_company_record:
         return "directory"
-    if intrinsic_company_domain:
-        return "company_candidate"
     path = scorer.normalize_text(unquote(urlparse(url).path.replace("/", " ")))
     raw_query = unquote(urlparse(url).query).casefold()
     text = scorer.normalize_text(f"{domain} {path} {title} {snippet}")
@@ -509,6 +661,17 @@ def _candidate_role(company_name: str, url: str, title: str, snippet: str) -> st
     marketplace_markers = ("marketplace", "urunleri", "products", "supplier", "satici", "magaza")
     news_markers = ("haber", "news", "basin bulteni", "press release")
     directory_hits = sum(marker in text for marker in directory_markers)
+    fair_host = any(marker in domain for marker in ("expo", "fuar", "exhibition"))
+    fair_page = any(marker in text for marker in (
+        "katilimci", "exhibitor", "trade fair", "fuari", "fuarÄ±",
+        "salon", "stant", "hall", "booth",
+    ))
+    if fair_host and fair_page:
+        return "fair_profile"
+    if any(marker in domain for marker in (
+        "haber", "gazete", "news", "medya", "insesi",
+    )):
+        return "news"
     shared_host_count = _observe_candidate_host(company_name, domain)
     profile_path = any(marker in path.split() for marker in (
         "company", "companies", "firma", "firmalar", "profile", "supplier",
@@ -528,6 +691,8 @@ def _candidate_role(company_name: str, url: str, title: str, snippet: str) -> st
     ))
     if entity_query or entity_detail_variant or numbered_company_record:
         return "directory"
+    if intrinsic_company_domain:
+        return "company_candidate"
     if any(marker in path for marker in (
         "basin odasi", "basin bulteni", "press room", "press release", "news", "haber",
     )):
@@ -814,6 +979,7 @@ def _add_search_results(
         )
         hit["role"] = candidate_role
         contact_seed_urls = list(existing.get("_contact_seed_urls", ())) if existing else []
+        identity_seed_urls = list(existing.get("_identity_seed_urls", ())) if existing else []
         contact_path = any(
             marker in scorer.normalize_text(unquote(url))
             for marker in ("contact", "iletisim", "bize-ulas")
@@ -822,7 +988,18 @@ def _add_search_results(
         # Keep it as a crawl seed only when the result itself carries the legal
         # name or an explicit owner/brand relationship; a generic deep link
         # must not steer crawling on weak search evidence alone.
-        seed_identity_supported = legal_name_evidence or ownership_evidence
+        seed_identity_supported = bool(
+            legal_name_evidence
+            or ownership_evidence
+            or (
+                existing
+                and (
+                    existing.get("_legal_name_evidence")
+                    or existing.get("_ownership_evidence")
+                    or existing.get("_source_profile_evidence")
+                )
+            )
+        )
         if (
             (_query_priority(query) == 0 or seed_identity_supported)
             and scorer.same_registrable_domain(domain, url)
@@ -830,6 +1007,16 @@ def _add_search_results(
             and url not in contact_seed_urls
         ):
             contact_seed_urls.append(url)
+        identity_kind = site_mapper.classify(unquote(url))
+        if (
+            (legal_name_evidence or ownership_evidence)
+            and identity_kind in {
+                "legal", "privacy", "terms", "about", "locations", "distributors",
+            }
+            and scorer.same_registrable_domain(domain, url)
+            and url not in identity_seed_urls
+        ):
+            identity_seed_urls.append(url)
         official_query_evidence = sum(1 for evidence_query in evidence_queries if _query_trust_bonus(evidence_query))
         best_base_score = max(base_score, existing.get("_base_score", 0) if existing else 0)
         consensus_bonus = min(max(len(evidence_queries) - 1, 0) * 4, 8)
@@ -878,6 +1065,7 @@ def _add_search_results(
             "_public_brand_domain": scorer.public_brand_domain_match(company_name, domain),
             "_search_evidence": search_evidence,
             "_contact_seed_urls": contact_seed_urls,
+            "_identity_seed_urls": identity_seed_urls,
         }
         if existing and existing.get("_source_profile_evidence"):
             # A link extracted directly from the supplied exhibitor/profile page
@@ -908,6 +1096,7 @@ def _add_search_results(
             existing["_public_brand_domain"] = existing.get("_public_brand_domain", False) or candidate["_public_brand_domain"]
             existing["_search_evidence"] = search_evidence
             existing["_contact_seed_urls"] = contact_seed_urls
+            existing["_identity_seed_urls"] = identity_seed_urls
             if not existing.get("title"):
                 existing["title"] = title
             if not existing.get("snippet"):
@@ -943,6 +1132,7 @@ def _add_search_results(
             existing["_public_brand_domain"] = existing.get("_public_brand_domain", False) or candidate["_public_brand_domain"]
             existing["_search_evidence"] = search_evidence
             existing["_contact_seed_urls"] = contact_seed_urls
+            existing["_identity_seed_urls"] = identity_seed_urls
             existing["reason"] = re.sub(
                 r"query_evidence:\d+; consensus_bonus:\d+",
                 f"query_evidence:{len(evidence_queries)}; consensus_bonus:{consensus_bonus}",
@@ -1005,6 +1195,14 @@ def _domain_has_address(domain: str) -> bool:
 def _primary_queries(company_name: str, metadata: dict | None) -> list[str]:
     queries: list[str] = []
     seen_queries = set()
+    full_name = re.sub(r"\s+", " ", company_name).strip()
+    if full_name:
+        for query in (
+            f'"{full_name}" Turkiye official website',
+            f'"{full_name}" resmi sitesi',
+        ):
+            queries.append(query)
+            seen_queries.add(query)
     query_inputs = scorer.search_name_variants(company_name)
     for alias in aliases.search_terms(company_name):
         query_inputs.extend(scorer.search_name_variants(alias))
@@ -1028,6 +1226,14 @@ def _primary_queries(company_name: str, metadata: dict | None) -> list[str]:
     if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0:
         return sorted(queries, key=_query_priority, reverse=True)[: config.MAX_SEARCH_QUERIES_PER_COMPANY]
     return sorted(queries, key=_query_priority, reverse=True)
+
+
+def _query_covers_full_identity(company_name: str, query: str) -> bool:
+    tokens = scorer.legal_identity_tokens(company_name)
+    normalized_query = set(re.findall(
+        r"[a-z0-9]+", scorer.normalize_text(query),
+    ))
+    return bool(tokens) and all(token in normalized_query for token in tokens)
 
 
 def _fallback_queries(company_name: str, metadata: dict | None) -> list[str]:
@@ -1301,10 +1507,27 @@ def _add_google_places_results(candidates_by_domain: dict[str, dict], company_na
             "reason": f"{details['reason']}; google_places_match; rank:{rank}",
             "role": "company_candidate",
             "_search_evidence": [{"source": "google_places", "rank": rank, "place_id": place.get("place_id", "")}],
+            "_google_places_evidence": [{
+                "place_id": place.get("place_id", ""),
+                "name": place.get("name", ""),
+                "phone": place.get("phone", ""),
+                "website": website,
+            }],
         }
         existing = candidates_by_domain.get(domain)
-        if existing is None or candidate["score"] > existing["score"]:
+        if existing is None:
             candidates_by_domain[domain] = candidate
+            continue
+        evidence = list(existing.get("_google_places_evidence", ()))
+        evidence.extend(candidate["_google_places_evidence"])
+        existing["_google_places_evidence"] = list({
+            item.get("place_id") or f"{item.get('name')}|{item.get('website')}": item
+            for item in evidence
+        }.values())
+        existing["external_phone"] = (
+            existing.get("external_phone") or place.get("phone", "")
+        )
+        existing["score"] = max(existing.get("score", 0), candidate["score"])
 
 
 def _add_verified_alias_candidate(candidates_by_domain: dict[str, dict], company_name: str) -> None:
@@ -1327,6 +1550,38 @@ def _add_verified_alias_candidate(candidates_by_domain: dict[str, dict], company
             "_entity_relationship": record.get("relationship", "official"),
             "_entity_evidence_url": record.get("evidence_url", ""),
             "_entity_verified_at": record.get("verified_at", ""),
+        }
+
+
+def _add_entity_memory_candidates(
+    candidates_by_domain: dict[str, dict],
+    company_name: str,
+) -> None:
+    for rank, record in enumerate(entity_memory.candidates(company_name)):
+        domain = scorer.normalize_domain(record.get("domain", ""))
+        if (
+            not domain
+            or scorer.is_excluded_domain(domain)
+            or domain in candidates_by_domain
+        ):
+            continue
+        candidates_by_domain[domain] = {
+            "domain": domain,
+            "url": _canonical_site_url(domain),
+            "score": min(
+                config.PRE_CRAWL_SCORE_CAP,
+                config.MIN_ACCEPT_SCORE + 5,
+            ),
+            "title": "",
+            "snippet": "",
+            "query": "verified_entity_memory",
+            "rank": rank,
+            "reason": (
+                "verified_entity_memory_discovery_hint;"
+                " requires_first_party_revalidation"
+            ),
+            "role": "company_candidate",
+            "_entity_memory_evidence_urls": record.get("evidence_urls", []),
         }
 
 
@@ -1381,12 +1636,21 @@ def _profile_render_fallback(url: str, html: str = "", force: bool = False) -> t
     return html, False
 
 
-def _profile_external_websites(profile_url: str) -> list[dict]:
+def _profile_external_websites(
+    profile_url: str,
+    *,
+    allow_forced_render: bool = True,
+) -> list[dict]:
     if not profile_url:
         return []
+    cache_namespace = (
+        "source_profile_links_v5_render"
+        if allow_forced_render
+        else "source_profile_links_v5_static"
+    )
     if config.SEARCH_CACHE_MODE in {"use", "replay"}:
         cached = cache_store.load(
-            config.SEARCH_CACHE_DIR, "source_profile_links_v4", profile_url,
+            config.SEARCH_CACHE_DIR, cache_namespace, profile_url,
             config.SEARCH_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION,
         )
         if cached is not None:
@@ -1437,7 +1701,10 @@ def _profile_external_websites(profile_url: str) -> list[dict]:
         LOGGER.info("Exhibitor profile could not be read: %s (%s)", profile_url, exc)
         if status_code not in {401, 403, 429}:
             return []
-        rendered_html, rendered = _profile_render_fallback(profile_url, force=True)
+        rendered_html, rendered = _profile_render_fallback(
+            profile_url,
+            force=allow_forced_render,
+        )
         if not rendered:
             return []
         pages.append((profile_url, rendered_html, True))
@@ -1531,13 +1798,51 @@ def _profile_external_websites(profile_url: str) -> list[dict]:
     websites = websites[:5]
     if config.SEARCH_CACHE_MODE in {"use", "refresh"}:
         cache_store.save(
-            config.SEARCH_CACHE_DIR, "source_profile_links_v4", profile_url, websites,
+            config.SEARCH_CACHE_DIR, cache_namespace, profile_url, websites,
             config.CACHE_SCHEMA_VERSION,
         )
     return websites
 
 
 def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name: str, metadata: dict | None) -> None:
+    listed_website = str((metadata or {}).get("listed_website", "") or "").strip()
+    listing_url = str((metadata or {}).get("listing_url", "") or "").strip()
+    listed_domain = scorer.normalize_domain(listed_website)
+    if listed_domain and not scorer.is_excluded_domain(listed_domain):
+        brand_tokens = scorer.domain_identity_tokens(company_name)
+        candidates_by_domain[listed_domain] = {
+            "domain": listed_domain,
+            "url": listed_website,
+            "score": config.PRE_CRAWL_SCORE_CAP,
+            "title": "",
+            "snippet": "",
+            "query": "fair_listed_website",
+            "rank": 0,
+            "reason": "fair_listed_website_discovery_only",
+            "role": "company_candidate",
+            "_source_profile_evidence": 1,
+            "_official_query_evidence": 0,
+            "_query_trust_bonus": 0,
+            "_metadata_context_matches": 0,
+            # These signals only prioritize which domain to crawl. The fair
+            # listing remains non-authoritative and cannot satisfy identity or
+            # publication gates by itself.
+            "_exact_brand_domain": (
+                bool(brand_tokens)
+                and scorer.compact_domain_core(listed_domain) == "".join(brand_tokens)
+            ),
+            "_public_brand_domain": scorer.public_brand_domain_match(
+                company_name, listed_domain
+            ),
+            "_search_evidence": [{
+                "source": "fair_listing",
+                "profile_url": listing_url,
+                "rank": 0,
+            }],
+            "_profile_url": listing_url,
+            "_profile_source_page_url": listing_url,
+        }
+
     profile_url = (metadata or {}).get("profile_url", "")
     for rank, link_record in enumerate(_profile_external_websites(profile_url), start=1):
         # String support keeps old fixtures and hand-written integrations
@@ -1582,6 +1887,24 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
         existing = candidates_by_domain.get(domain)
         if existing is None or candidate["score"] >= existing["score"]:
             candidates_by_domain[domain] = candidate
+
+
+def find_profile_candidates(
+    company_name: str,
+    metadata: dict | None,
+) -> CandidateList:
+    """Discover only explicit company-site routes supplied by a source profile."""
+    candidates_by_domain: dict[str, dict] = {}
+    _add_profile_candidates(candidates_by_domain, company_name, metadata)
+    source_health = _source_health_snapshot((metadata or {}).get("profile_url", ""))
+    trace = []
+    if source_health.get("host"):
+        trace.append({"source": "exhibitor_profile_health", **source_health})
+    return CandidateList(
+        sorted(candidates_by_domain.values(), key=_candidate_rank_key, reverse=True),
+        trace,
+        source_health,
+    )
 
 
 def _bridge_entity_anchor_supported(company_name: str, title: str, source_url: str) -> bool:
@@ -1693,7 +2016,10 @@ def _expand_search_bridge_candidates(
     for source in pending:
         source_url = source["url"]
         expanded_urls.add(source_url)
-        links = _profile_external_websites(source_url)
+        links = _profile_external_websites(
+            source_url,
+            allow_forced_render=False,
+        )
         trace.append({
             "source": "search_bridge_profile", "profile_url": source_url,
             "result_count": len(links), "role": source.get("role", ""),
@@ -1763,7 +2089,9 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     expanded_bridge_urls: set[str] = set()
     executed_queries: set[str] = set()
     related_name_hints: list[str] = []
+    full_identity_query_with_results = False
     _add_verified_alias_candidate(candidates_by_domain, company_name)
+    _add_entity_memory_candidates(candidates_by_domain, company_name)
     _add_profile_candidates(candidates_by_domain, company_name, metadata)
     source_health = _source_health_snapshot((metadata or {}).get("profile_url", ""))
     if source_health.get("host"):
@@ -1814,11 +2142,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         config.SEARCH_PROVIDER == "brightdata"
         and config.SEARCH_CACHE_MODE != "replay"
     ):
-        paid_total_limit = (
-            config.MAX_SEARCH_QUERIES_PER_COMPANY
-            if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0
-            else config.DEFAULT_PAID_SEARCH_QUERY_LIMIT
-        )
+        paid_total_limit = _effective_paid_query_limit()
         if paid_total_limit > 0:
             reserve = min(config.PAID_SEARCH_ADAPTIVE_RESERVE, max(paid_total_limit - 1, 0))
             primary_queries = query_planner.diverse_queries(
@@ -1834,11 +2158,14 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         # consuming the paid allowance; this keeps old regressions comparable.
         primary_queries = primary_queries[: config.DEFAULT_PAID_SEARCH_QUERY_LIMIT]
     for query in primary_queries:
-        run_query(query, "primary")
+        results = run_query(query, "primary")
+        if results and _query_covers_full_identity(company_name, query):
+            full_identity_query_with_results = True
         best = _best_candidate(candidates_by_domain)
         if (
             best
             and best["score"] >= config.EARLY_STOP_SCORE_THRESHOLD
+            and full_identity_query_with_results
             and _can_early_stop(company_name, best, metadata)
         ):
             break
@@ -1920,9 +2247,12 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         _add_resolver_candidates(candidates_by_domain, company_name, trace)
         best = _best_candidate(candidates_by_domain)
 
-    if not best or best["score"] < config.MIN_ACCEPT_SCORE:
+    if config.ENABLE_GOOGLE_PLACES:
         _add_google_places_results(candidates_by_domain, company_name)
-        trace.append({"source": "google_places", "status": "consulted_after_search_miss"})
+        trace.append({
+            "source": "google_places",
+            "status": "consulted_for_identity_corroboration",
+        })
 
     best = _best_candidate(candidates_by_domain)
     has_domain_identity_candidate = any(
@@ -1953,6 +2283,47 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         sorted(candidates_by_domain.values(), key=_candidate_rank_key, reverse=True),
         trace,
         source_health,
+    )
+
+
+def find_targeted_candidates(
+    company_name: str,
+    metadata: dict | None,
+    queries: list[str] | tuple[str, ...],
+    *,
+    limit: int = 2,
+) -> CandidateList:
+    """Run bounded gap-specific discovery; results still require site proof."""
+    candidates_by_domain: dict[str, dict] = {}
+    trace: list[dict] = []
+    for query in list(dict.fromkeys(queries))[:max(0, int(limit))]:
+        results = _safe_search_text(query)
+        discovery_coverage.record_query(
+            company_name,
+            query,
+            "evidence_completion",
+            getattr(results, "cache_status", "unknown"),
+            len(results),
+            {"post_crawl_evidence_gap"},
+        )
+        _add_search_results(
+            candidates_by_domain, company_name, query, results, metadata,
+        )
+        trace.append({
+            "source": config.SEARCH_PROVIDER,
+            "query": query,
+            "phase": "evidence_completion",
+            "cache_status": getattr(results, "cache_status", "unknown"),
+            "result_count": len(results),
+        })
+        runtime.record("autonomy.targeted_queries")
+    return CandidateList(
+        sorted(
+            candidates_by_domain.values(),
+            key=_candidate_rank_key,
+            reverse=True,
+        ),
+        trace,
     )
 
 

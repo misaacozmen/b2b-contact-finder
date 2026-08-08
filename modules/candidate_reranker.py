@@ -5,7 +5,10 @@ from __future__ import annotations
 from modules import identity, scorer
 
 
-EXCLUDED_ROLES = {"directory", "fair_profile", "news", "marketplace", "shared_listing"}
+EXCLUDED_ROLES = {
+    "directory", "fair_profile", "news", "marketplace", "shared_listing",
+    "public_body",
+}
 
 
 def _strength(reasons: list[str], prefix: str) -> int:

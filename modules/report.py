@@ -33,6 +33,14 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
     phone_count = sum(1 for row in rows if row.get("phone"))
     complete_count = sum(1 for row in rows if row.get("website") and row.get("email") and row.get("phone"))
     verified_rows = [row for row in rows if row.get("status") in OK_STATUSES]
+    publication_eligible_count = sum(
+        1 for row in rows if row.get("publication_eligible") is True
+    )
+    complete_held_count = sum(
+        1 for row in rows
+        if row.get("website") and row.get("email") and row.get("phone")
+        and row.get("status") not in OK_STATUSES
+    )
     verified_website_count = sum(1 for row in verified_rows if row.get("website"))
     verified_complete_count = sum(
         1 for row in verified_rows if row.get("website") and row.get("email") and row.get("phone")
@@ -87,6 +95,27 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
         1 for row in verified_rows
         if row.get("publication_risk_tier") == "controlled"
     )
+    identity_unproved_count = sum(
+        1 for row in rows
+        if row.get("publication_blockers") == "no_candidate_proved_target_fingerprint"
+        or row.get("reason") == "no_candidate_proved_target_fingerprint"
+    )
+    fetch_failed_count = sum(
+        1 for row in rows if row.get("status") == "WEBSITE_FETCH_FAILED"
+    )
+    not_found_count = sum(
+        1 for row in rows if row.get("status") == "WEBSITE_NOT_FOUND"
+    )
+    brightdata_queries = int(counters.get("api.brightdata.queries", 0))
+    brightdata_retries = int(counters.get("api.brightdata.retries", 0))
+    brightdata_cooldowns = int(counters.get("api.brightdata.cooldown_retries", 0))
+    brightdata_blocked = int(counters.get("api.brightdata.budget_blocked", 0))
+    search_provider_failures = int(counters.get("search.provider_failures", 0))
+    crawler_blocked = int(counters.get("http.crawler.budget_blocked", 0))
+    static_skips = int(counters.get("recovery.static_skips", 0))
+    host_variant_attempts = int(counters.get("recovery.host_variant_attempts", 0))
+    host_variant_successes = int(counters.get("recovery.host_variant_successes", 0))
+    paid_query_limit = int(counters.get("search.paid_query_limit_per_company", 0))
 
     return "\n".join(
         [
@@ -101,12 +130,15 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
             f"Telefon bulundu: {phone_count} ({_pct(phone_count, total)})",
             f"Tam iletisim bilgisi bulunan firma (website+email+phone): {complete_count} ({_pct(complete_count, total)})",
             f"Otomatik kullanima uygun dogrulanmis firma: {len(verified_rows)} ({_pct(len(verified_rows), total)})",
+            f"Yayin politikasina uygun firma: {publication_eligible_count} ({_pct(publication_eligible_count, total)})",
             f"Dogrulanmis tam iletisim: {verified_complete_count} ({_pct(verified_complete_count, total)})",
+            f"Tam iletisim bulundu fakat kimlik incelemesinde: {complete_held_count} ({_pct(complete_held_count, total)})",
             f"Yuksek guvenli OK: {high_confidence_count} ({_pct(high_confidence_count, total)})",
             f"Orta guvenli OK: {medium_confidence_count} ({_pct(medium_confidence_count, total)})",
             f"Manuel kontrol gereken: {review_count} ({_pct(review_count, total)})",
             f"Website adayi belirsiz: {ambiguous_count} ({_pct(ambiguous_count, total)})",
             f"Yayinlanmayan/geri cekilen sonuc: {total - len(verified_rows)} ({_pct(total - len(verified_rows), total)})",
+            f"Kimlik izi kanitlanamayan: {identity_unproved_count}; website erisim hatasi: {fetch_failed_count}; aday bulunamayan: {not_found_count}",
             f"P3 politika dusurmesi: {policy_downgrades}",
             f"P3 dusuk/kontrollu riskli yayin: {low_risk_publications}/{controlled_risk_publications}",
             "--------------------------------",
@@ -115,13 +147,14 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
             f"Hafif kimlik taramasi/firma: {(identity_evaluations / total):.1f}" if total else "Hafif kimlik taramasi/firma: 0.0",
             f"Tam iletisim taramasi/firma: {(full_evaluations / total):.1f}" if total else "Tam iletisim taramasi/firma: 0.0",
             f"Crawler HTTP istegi/firma: {(crawler_requests / total):.1f}" if total else "Crawler HTTP istegi/firma: 0.0",
-            f"Fuar profil 5xx: {source_5xx}; devre kesici atlamasi: {source_skips}",
-            f"P4 statik kurtarma: {static_successes}/{static_attempts}",
+            f"Kaynak profil 5xx: {source_5xx}; devre kesici atlamasi: {source_skips}",
+            f"P4 statik kurtarma: {static_successes}/{static_attempts}; gereksiz deneme atlamasi={static_skips}",
+            f"P4 host varyanti: {host_variant_successes}/{host_variant_attempts}",
             f"P4 browser kurtarma: {browser_successes}/{browser_attempts}",
             f"P4 PDF metin kurtarma: {pdf_successes}/{pdf_attempts}",
             f"P4 replay snapshot: yuklenen={snapshot_loaded}; isabet={snapshot_hits}; eski-cache-isabeti={stale_hits}",
-            f"P5 e-posta alan karari: izin={email_field_allowed}; baskilanan={email_field_suppressed}",
-            f"P5 telefon alan karari: izin={phone_field_allowed}; baskilanan={phone_field_suppressed}",
+            f"P5 aday e-posta alan karari: izin={email_field_allowed}; baskilanan={email_field_suppressed}",
+            f"P5 aday telefon alan karari: izin={phone_field_allowed}; baskilanan={phone_field_suppressed}",
             (
                 "P6 discovery kapsami: "
                 f"cozulen={coverage['resolved_companies']}; "
@@ -129,7 +162,9 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
                 f"replay-eksigi={coverage['replay_miss_count']}; "
                 f"edinim-plani={len(coverage['acquisition_plan'])}"
             ),
-            f"Bright Data API istekleri: {brightdata_requests}",
+            f"Firma basi ucretli sorgu siniri: {paid_query_limit}",
+            f"Bright Data: sorgu={brightdata_queries}; HTTP={brightdata_requests}; retry={brightdata_retries}; cooldown={brightdata_cooldowns}; butce-engeli={brightdata_blocked}; saglayici-hatasi={search_provider_failures}",
+            f"Crawler butce engeli: {crawler_blocked}",
             f"Google Places API istekleri: {places_requests}",
             f"Islem suresi: {elapsed}",
             "================================",
