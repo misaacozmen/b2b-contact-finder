@@ -1,0 +1,43 @@
+================================
+B2B Contact Finder - Sonuc Raporu
+================================
+Toplam firma: 60
+Website bulundu: 40 (66.7%)
+Otomatik kullanima uygun dogrulanmis website: 34 (56.7%)
+E-posta bulundu: 40 (66.7%)
+MX/A kaydi bulunan e-posta domaini: 39 (65.0%)
+Telefon bulundu: 38 (63.3%)
+Tam iletisim bilgisi bulunan firma (website+email+phone): 38 (63.3%)
+Otomatik kullanima uygun dogrulanmis firma: 34 (56.7%)
+Yayin politikasina uygun firma: 34 (56.7%)
+Dogrulanmis tam iletisim: 32 (53.3%)
+Tam iletisim bulundu fakat kimlik incelemesinde: 6 (10.0%)
+Yuksek guvenli OK: 22 (36.7%)
+Orta guvenli OK: 12 (20.0%)
+Manuel kontrol gereken: 26 (43.3%)
+Website adayi belirsiz: 0 (0.0%)
+Yayinlanmayan/geri cekilen sonuc: 26 (43.3%)
+Kimlik izi kanitlanamayan: 20; website erisim hatasi: 0; aday bulunamayan: 0
+P3 politika dusurmesi: 0
+P3 dusuk/kontrollu riskli yayin: 31/3
+--------------------------------
+Ortalama skor: 88.7
+Kesfedilen aday/firma: 9.4
+Hafif kimlik taramasi/firma: 4.9
+Tam iletisim taramasi/firma: 1.5
+Crawler HTTP istegi/firma: 90.7
+Kaynak profil 5xx: 0; devre kesici atlamasi: 0
+P4 statik kurtarma: 2/198; gereksiz deneme atlamasi=50
+P4 host varyanti: 0/116
+P4 browser kurtarma: 171/194
+P4 PDF metin kurtarma: 0/32
+P4 replay snapshot: yuklenen=0; isabet=0; eski-cache-isabeti=0
+P5 aday e-posta alan karari: izin=257; baskilanan=12
+P5 aday telefon alan karari: izin=300; baskilanan=0
+P6 discovery kapsami: cozulen=36; acik=24; replay-eksigi=0; edinim-plani=3
+Firma basi ucretli sorgu siniri: 2
+Bright Data: sorgu=73; HTTP=39; retry=9; cooldown=0; butce-engeli=43; saglayici-hatasi=3
+Crawler butce engeli: 0
+Google Places API istekleri: 7
+Islem suresi: 0:51:53
+================================

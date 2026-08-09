@@ -1,0 +1,1374 @@
+{
+  "policy_version": "discovery-coverage-v1",
+  "company_count": 60,
+  "resolved_companies": 20,
+  "unresolved_companies": 40,
+  "query_count": 116,
+  "replay_miss_count": 0,
+  "cached_empty_count": 0,
+  "acquisition_plan": [],
+  "queries": [
+    {
+      "company": "ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş.",
+      "query": "\"ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal",
+        "no_candidates"
+      ]
+    },
+    {
+      "company": "ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal",
+        "no_candidates"
+      ]
+    },
+    {
+      "company": "AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş",
+      "query": "\"AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş",
+      "query": "\"AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 2,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş",
+      "query": "\"AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 4,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.",
+      "query": "\"AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.",
+      "query": "\"AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.",
+      "query": "\"AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.",
+      "query": "\"AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.",
+      "query": "\"AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.",
+      "query": "\"AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "BANNAN DIŞ TİCARET ÇİMENTO VE GIDA ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"BANNAN DIŞ TİCARET ÇİMENTO VE GIDA ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal",
+        "no_candidates"
+      ]
+    },
+    {
+      "company": "BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.",
+      "query": "\"BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.",
+      "query": "\"BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.",
+      "query": "\"BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.",
+      "query": "\"BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.",
+      "query": "\"BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 4,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.",
+      "query": "\"BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma",
+      "query": "\"burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "Dide Tunçman Temsilci Firma",
+      "query": "\"Dide Tunçman Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal",
+        "no_candidates"
+      ]
+    },
+    {
+      "company": "EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ",
+      "query": "\"EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ",
+      "query": "\"EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ",
+      "query": "\"EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma",
+      "query": "\"ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma\" official website",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma",
+      "query": "\"ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma",
+      "query": "\"ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.",
+      "query": "\"GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "circuit_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.",
+      "query": "\"GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "circuit_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.",
+      "query": "\"GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.",
+      "query": "\"HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 2,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.",
+      "query": "\"HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.",
+      "query": "\"HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "HLEKS GIDA SAN. VE TİC. A.Ş.",
+      "query": "\"HLEKS GIDA SAN. VE TİC. A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 3,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "HLEKS GIDA SAN. VE TİC. A.Ş.",
+      "query": "\"HLEKS GIDA SAN. VE TİC. A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "HLEKS GIDA SAN. VE TİC. A.Ş.",
+      "query": "\"HLEKS GIDA SAN. VE TİC. A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 6,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "KADRİ TİCARET İTH. İHR. LTD.ŞTİ.",
+      "query": "\"KADRİ TİCARET İTH. İHR. LTD.ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "KADRİ TİCARET İTH. İHR. LTD.ŞTİ.",
+      "query": "\"KADRİ TİCARET İTH. İHR. LTD.ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "KADRİ TİCARET İTH. İHR. LTD.ŞTİ.",
+      "query": "\"KADRİ TİCARET İTH. İHR. LTD.ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "KhalsCO Temsilci Firma",
+      "query": "\"KhalsCO Temsilci Firma\" official website",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "KhalsCO Temsilci Firma",
+      "query": "\"KhalsCO Temsilci Firma\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "KhalsCO Temsilci Firma",
+      "query": "\"KhalsCO Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "circuit_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "query": "\"LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 2,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "query": "\"LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "query": "\"LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 2,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma",
+      "query": "\"LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma\" official website",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma",
+      "query": "\"LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma",
+      "query": "\"LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "Morello Temsilci Firma",
+      "query": "\"Morello Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI",
+      "query": "\"NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI",
+      "query": "\"NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI",
+      "query": "\"NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "NARPA NARİN DIŞ TİCARET A.Ş.",
+      "query": "\"NARPA NARİN DIŞ TİCARET A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live_fallback",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "NARPA NARİN DIŞ TİCARET A.Ş.",
+      "query": "\"NARPA NARİN DIŞ TİCARET A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "NARPA NARİN DIŞ TİCARET A.Ş.",
+      "query": "\"NARPA NARİN DIŞ TİCARET A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma",
+      "query": "\"PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma\" official website",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma",
+      "query": "\"PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma",
+      "query": "\"PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "POLER TARIM VE GIDA A.Ş.",
+      "query": "\"POLER TARIM VE GIDA A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ",
+      "query": "\"PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ",
+      "query": "\"PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ",
+      "query": "\"PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ",
+      "query": "\"REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ",
+      "query": "\"REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ",
+      "query": "\"REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "SAADET GIDA PAZ SAN VE TİC LTD ŞTİ",
+      "query": "\"SAADET GIDA PAZ SAN VE TİC LTD ŞTİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "circuit_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ",
+      "query": "\"SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ",
+      "query": "\"SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ",
+      "query": "\"SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "query": "\"ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "query": "\"ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.",
+      "query": "\"ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "circuit_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "STAR FOOD GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ",
+      "query": "\"STAR FOOD GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "SUNJOY TRADING CO., LTD.",
+      "query": "\"SUNJOY TRADING CO., LTD.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SUNJOY TRADING CO., LTD.",
+      "query": "\"SUNJOY TRADING CO., LTD.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma",
+      "query": "\"SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma\" official website",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma",
+      "query": "\"SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma",
+      "query": "\"SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma\" Turkiye official website",
+      "phase": "primary",
+      "intent": "relationship",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live",
+      "result_count": 0,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live",
+      "result_count": 1,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal",
+        "no_candidates"
+      ]
+    },
+    {
+      "company": "TÜRK TARIM VE GIDA SANAYİ TİCARET ANONİM ŞİRKETİ",
+      "query": "\"TÜRK TARIM VE GIDA SANAYİ TİCARET ANONİM ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 2,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.",
+      "query": "\"UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live_fallback",
+      "result_count": 7,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.",
+      "query": "\"UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 7,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.",
+      "query": "\"UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal"
+      ]
+    },
+    {
+      "company": "UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.",
+      "query": "\"UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live_fallback",
+      "result_count": 7,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.",
+      "query": "\"UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 7,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.",
+      "query": "\"UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 1,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live_fallback",
+      "result_count": 1,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 7,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.",
+      "query": "\"UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 2,
+      "evidence_gaps": [
+        "ambiguous_candidates",
+        "missing_intrinsic_domain",
+        "missing_legal_name"
+      ]
+    },
+    {
+      "company": "ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ\" official website",
+      "phase": "evidence_completion",
+      "intent": "official",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ\" ticari unvan KVKK",
+      "phase": "evidence_completion",
+      "intent": "legal_identity",
+      "cache_status": "live_fallback",
+      "result_count": 4,
+      "evidence_gaps": [
+        "post_crawl_evidence_gap"
+      ]
+    },
+    {
+      "company": "ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ",
+      "query": "\"ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ\" Turkiye official website",
+      "phase": "primary",
+      "intent": "country_official",
+      "cache_status": "live_fallback",
+      "result_count": 8,
+      "evidence_gaps": [
+        "missing_intrinsic_domain",
+        "missing_legal_name",
+        "missing_local_signal",
+        "no_candidates"
+      ]
+    }
+  ]
+}

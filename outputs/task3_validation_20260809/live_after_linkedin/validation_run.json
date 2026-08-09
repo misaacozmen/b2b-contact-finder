@@ -1,0 +1,15 @@
+{
+  "label": "task3_after_linkedin_082d067",
+  "repo": "C:\\Users\\ISAAC\\Documents\\Python b2b",
+  "revision": "082d067cdbdda7dc4e49ec38b58d422b0c8c460d",
+  "input": "C:\\Users\\ISAAC\\Documents\\Python b2b\\outputs\\task2_validation_20260808\\validation_subset_seed_314365_60.xlsx",
+  "search_cache_mode": "off",
+  "crawl_cache_mode": "off",
+  "budgets": {
+    "brightdata": 120,
+    "linkedin_company": 60,
+    "google_places": 60,
+    "brandfetch": 60,
+    "hunter": 60
+  }
+}

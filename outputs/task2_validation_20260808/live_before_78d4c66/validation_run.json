@@ -1,0 +1,14 @@
+{
+  "label": "before_78d4c66",
+  "repo": "C:\\Users\\ISAAC\\Documents\\Python b2b-task2-old",
+  "revision": "78d4c668aeccc903941d97db1a9b20c7fc99ff0d",
+  "input": "C:\\Users\\ISAAC\\Documents\\Python b2b\\outputs\\task2_validation_20260808\\validation_subset_seed_314365_60.xlsx",
+  "search_cache_mode": "off",
+  "crawl_cache_mode": "off",
+  "budgets": {
+    "brightdata": 120,
+    "google_places": 60,
+    "brandfetch": 60,
+    "hunter": 60
+  }
+}

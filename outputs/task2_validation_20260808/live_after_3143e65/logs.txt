@@ -1,0 +1,317 @@
+2026-08-08 15:11:46,639 | INFO | Source profile preflight: host=foodistexpo.com status=available server_errors=0 circuit_open=False
+2026-08-08 15:11:46,642 | INFO | Processing 1: ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:11:46,643 | INFO | Processing 2: AGRO SEEDS GIDA SAN.VE TİC.LTD.ŞTİ.
+2026-08-08 15:11:46,643 | INFO | Processing 3: ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş.
+2026-08-08 15:11:46,644 | INFO | Processing 4: ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:11:46,645 | INFO | Processing 5: AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş
+2026-08-08 15:11:46,646 | INFO | Processing 6: AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.
+2026-08-08 15:11:46,647 | INFO | Processing 7: AYDIN KURUYEMİŞ SAN.VE TİC.A.Ş.
+2026-08-08 15:11:46,648 | INFO | Processing 8: AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.
+2026-08-08 15:11:46,649 | INFO | Processing 9: BANNAN DIŞ TİCARET ÇİMENTO VE GIDA ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:11:46,650 | INFO | Processing 10: BEŞEM GIDA SANAYİ VE TİC. LTD. ŞTİ. Temsilci Firma
+2026-08-08 15:11:46,650 | INFO | Processing 11: BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.
+2026-08-08 15:11:46,651 | INFO | Processing 12: BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:11:49,934 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/besem-gida-sanayi-ve-tic-ltd-sti (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/besem-gida-sanayi-ve-tic-ltd-sti)
+2026-08-08 15:12:13,723 | INFO | Processing 13: BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.
+2026-08-08 15:12:13,756 | INFO | Completed 1/60: AYDIN KURUYEMİŞ SAN.VE TİC.A.Ş.
+2026-08-08 15:12:17,711 | INFO | Processing 14: burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma
+2026-08-08 15:12:17,724 | INFO | Completed 2/60: BEŞEM GIDA SANAYİ VE TİC. LTD. ŞTİ. Temsilci Firma
+2026-08-08 15:12:19,390 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1 (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1)
+2026-08-08 15:12:23,634 | INFO | Processing 15: Chef Seasons Gıda San ve Tic A.Ş. Temsilci Firma
+2026-08-08 15:12:23,672 | INFO | Completed 3/60: AGRO SEEDS GIDA SAN.VE TİC.LTD.ŞTİ.
+2026-08-08 15:12:24,054 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/chef-seasons-gida-san-ve-tic-as-1 (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/chef-seasons-gida-san-ve-tic-as-1)
+2026-08-08 15:12:40,965 | INFO | Processing 16: Dide Tunçman Temsilci Firma
+2026-08-08 15:12:40,978 | INFO | Completed 4/60: AVŞAR DOĞAL MADEN SUYU - ŞUAYP DEMİREL MADENSUYU SAN. VE TİC. A.Ş.
+2026-08-08 15:12:41,110 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/dide-tuncman (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/dide-tuncman)
+2026-08-08 15:12:41,416 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/dide-tuncman (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/dide-tuncman)
+2026-08-08 15:13:05,478 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/anka-seker-gida-pazarlama-sanayi-ve-ticaret-ltd-sirketi-98089119/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/anka-seker-gida-pazarlama-sanayi-ve-ticaret-ltd-sirketi-98089119/)
+2026-08-08 15:13:10,984 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.aynira_gida_sanayi_ve_ticaret_limited_sirketi.f35826b7e3788f8cf5119eb69ef6f5fb.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.aynira_gida_sanayi_ve_ticaret_limited_sirketi.f35826b7e3788f8cf5119eb69ef6f5fb.html)
+2026-08-08 15:13:35,342 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.bannan_dis_ticaret_cimento_ve_gida_urunleri_sanayi_ve_ticaret_limited_sirketi.60d225e0123622c534578beb21a2d897.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.bannan_dis_ticaret_cimento_ve_gida_urunleri_sanayi_ve_ticaret_limited_sirketi.60d225e0123622c534578beb21a2d897.html)
+2026-08-08 15:13:44,337 | INFO | Exhibitor profile could not be read: https://listofcompany.com/tr/firmalar/gida-ve-tarim-urunleri-c-11/anako-yumurta-ve-urunleri-gida-sanayi-ihr-ith-ve-tic-a-s-c-6322 (403 Client Error: Forbidden for url: https://listofcompany.com/tr/firmalar/gida-ve-tarim-urunleri-c-11/anako-yumurta-ve-urunleri-gida-sanayi-ihr-ith-ve-tic-a-s-c-6322)
+2026-08-08 15:13:47,500 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.bilgem_elektrik_elektronik_tarim_gida_hayvancilik_turizm_tasimacilik_nakliyat_ithalat_ihracat_sanayi_ve_ticaret_limited_sirketi.060dfe938086c711a140a163a1ea8db8.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.bilgem_elektrik_elektronik_tarim_gida_hayvancilik_turizm_tasimacilik_nakliyat_ithalat_ihracat_sanayi_ve_ticaret_limited_sirketi.060dfe938086c711a140a163a1ea8db8.html)
+2026-08-08 15:14:08,839 | INFO | Processing 17: DURUM GIDA SANAYİ VE TİCARET A.Ş.
+2026-08-08 15:14:08,852 | INFO | Completed 5/60: Chef Seasons Gıda San ve Tic A.Ş. Temsilci Firma
+2026-08-08 15:14:12,493 | INFO | Exhibitor profile could not be read: https://iyifirma.com/bannan-dis-ticaret-cimento-ve-gida-urunleri-sanayi-ve-ticaret-limited-sirketi/ (403 Client Error: Forbidden for url: https://iyifirma.com/bannan-dis-ticaret-cimento-ve-gida-urunleri-sanayi-ve-ticaret-limited-sirketi/)
+2026-08-08 15:14:18,831 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.besler_kuruyemis_ve_gida_maddeleri_imalat_ve_pazarlama_ticaret_anonim_sirketi.8860196f3e759bc31031cb0afcab8921.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.besler_kuruyemis_ve_gida_maddeleri_imalat_ve_pazarlama_ticaret_anonim_sirketi.8860196f3e759bc31031cb0afcab8921.html)
+2026-08-08 15:14:20,495 | INFO | Exhibitor profile could not be read: https://listofcompany.com/tr/firmalar/err/anako-yumurta-ve-urunleri-gida-sanayi-ihr-ith-ve-tic-a-s-c-6322/urunler/pastorize-sivi-yumurta-sarisi-c-6721 (403 Client Error: Forbidden for url: https://listofcompany.com/tr/firmalar/err/anako-yumurta-ve-urunleri-gida-sanayi-ihr-ith-ve-tic-a-s-c-6322/urunler/pastorize-sivi-yumurta-sarisi-c-6721)
+2026-08-08 15:14:22,828 | INFO | Exhibitor profile could not be read: https://iyifirma.com/anako-yumurta-ve-urunleri-gida-sanayi-ihracat-ithalat-ve-ticaret-anonim-sirketi/ (403 Client Error: Forbidden for url: https://iyifirma.com/anako-yumurta-ve-urunleri-gida-sanayi-ihracat-ithalat-ve-ticaret-anonim-sirketi/)
+2026-08-08 15:14:25,996 | INFO | Processing 18: EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ
+2026-08-08 15:14:26,011 | INFO | Completed 6/60: DURUM GIDA SANAYİ VE TİCARET A.Ş.
+2026-08-08 15:14:35,914 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.ady_grup_gida_sanayi_ve_ticaret_limited_sirketi.54153009a264c808fe1f136a198f0aa1.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.ady_grup_gida_sanayi_ve_ticaret_limited_sirketi.54153009a264c808fe1f136a198f0aa1.html)
+2026-08-08 15:14:36,357 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1 (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1)
+2026-08-08 15:14:48,674 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/dide-tuncman (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/dide-tuncman)
+2026-08-08 15:14:50,360 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/en/brand/dide-tuncman (404 Client Error: Not Found for url: https://www.foodistexpo.com/en/brand/dide-tuncman)
+2026-08-08 15:15:31,950 | INFO | Processing 19: EKREM AGRO DIŞ TİC. A.Ş.
+2026-08-08 15:15:32,459 | INFO | Completed 7/60: ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:16:21,820 | INFO | Processing 20: ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma
+2026-08-08 15:16:21,849 | INFO | Completed 8/60: EKREM AGRO DIŞ TİC. A.Ş.
+2026-08-08 15:16:23,732 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/elatli-un-ve-hamur-entegre-tesisleri-ltd-sti (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/elatli-un-ve-hamur-entegre-tesisleri-ltd-sti)
+2026-08-08 15:16:37,357 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.burcu_gida_konservecilik_ve_salca_sanayi_anonim_sirketi.3525c1f952f290425cb751e397ff71be.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.burcu_gida_konservecilik_ve_salca_sanayi_anonim_sirketi.3525c1f952f290425cb751e397ff71be.html)
+2026-08-08 15:16:56,066 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/elatli-un-ve-hamur-entegre-tesisleri-ltd-sti (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/elatli-un-ve-hamur-entegre-tesisleri-ltd-sti)
+2026-08-08 15:17:03,324 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/ekol-gida-urunleri-sanayi-ve-dis-tic-ltd-4000619/contacts/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/ekol-gida-urunleri-sanayi-ve-dis-tic-ltd-4000619/contacts/)
+2026-08-08 15:17:44,303 | INFO | Exhibitor profile could not be read: https://www.forie.com/tr/firmalar/aromsa-besin-aroma-ve-katki-maddeleri-sanayi-ve-ticaret-as-37872/ (403 Client Error: Forbidden for url: https://www.forie.com/tr/firmalar/aromsa-besin-aroma-ve-katki-maddeleri-sanayi-ve-ticaret-as-37872/)
+2026-08-08 15:17:46,451 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.aromsa_besin_aroma_ve_katki_maddeleri_sanayi_ve_ticaret_anonim_sirketi.a52d221e0d8ae77e74b84cec779a35e8.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.aromsa_besin_aroma_ve_katki_maddeleri_sanayi_ve_ticaret_anonim_sirketi.a52d221e0d8ae77e74b84cec779a35e8.html)
+2026-08-08 15:17:47,044 | INFO | Processing 21: ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:17:47,063 | INFO | Completed 9/60: ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş.
+2026-08-08 15:17:47,967 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.elatli_un_ve_hamur_entegre_tesisleri_limited_sirketi.838fa137c0dc633bf25e2e468065a65b.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.elatli_un_ve_hamur_entegre_tesisleri_limited_sirketi.838fa137c0dc633bf25e2e468065a65b.html)
+2026-08-08 15:17:50,336 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/elatli-un-ve-hamur-entegre-tesisleri-ltd-sti (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/elatli-un-ve-hamur-entegre-tesisleri-ltd-sti)
+2026-08-08 15:17:53,982 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/tr/firmalar/ekol-gida-urunleri-sanayi-ve-dis-ticaret-limited-sirketi-8062/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/tr/firmalar/ekol-gida-urunleri-sanayi-ve-dis-ticaret-limited-sirketi-8062/)
+2026-08-08 15:17:55,005 | INFO | Processing 22: ERYILMAZ AGRO GRUP GIDA MEDİKAL ELEKTRİK TEKSTİL SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:17:55,018 | INFO | Completed 10/60: AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.
+2026-08-08 15:17:55,973 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.ekol_gida_urunleri_sanayi_ve_dis_ticaret_limited_sirketi.5c7c5c3b6fd36537f243c7d4ed868ee6.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.ekol_gida_urunleri_sanayi_ve_dis_ticaret_limited_sirketi.5c7c5c3b6fd36537f243c7d4ed868ee6.html)
+2026-08-08 15:18:18,723 | INFO | Processing 23: GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.
+2026-08-08 15:18:18,742 | INFO | Completed 11/60: ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:18:22,221 | INFO | Processing 24: HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:18:22,236 | INFO | Completed 12/60: ERYILMAZ AGRO GRUP GIDA MEDİKAL ELEKTRİK TEKSTİL SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:18:28,952 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.erissan_helva_kurumeyva_ve_gida_maddeleri_sanayi_ve_ticaret_limited_sirketi.2c9ada60ad3336c1a9e822e8069263ce.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.erissan_helva_kurumeyva_ve_gida_maddeleri_sanayi_ve_ticaret_limited_sirketi.2c9ada60ad3336c1a9e822e8069263ce.html)
+2026-08-08 15:18:31,645 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/en/companies/erissan-helva-ltd-sti-81936/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/en/companies/erissan-helva-ltd-sti-81936/)
+2026-08-08 15:18:39,736 | INFO | Processing 25: HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:18:39,935 | INFO | Completed 13/60: Dide Tunçman Temsilci Firma
+2026-08-08 15:19:12,090 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/tr/firmalar/erissan-helva-ltd-sti-81936/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/tr/firmalar/erissan-helva-ltd-sti-81936/)
+2026-08-08 15:19:16,308 | INFO | Processing 26: HLEKS GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:19:16,329 | INFO | Completed 14/60: BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:19:17,667 | INFO | Processing 27: İSTANBUL TİCARET BORSASI
+2026-08-08 15:19:17,687 | INFO | Completed 15/60: BANNAN DIŞ TİCARET ÇİMENTO VE GIDA ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:19:41,689 | INFO | Processing 28: KADRİ TİCARET İTH. İHR. LTD.ŞTİ.
+2026-08-08 15:19:41,711 | INFO | Completed 16/60: İSTANBUL TİCARET BORSASI
+2026-08-08 15:20:22,611 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.gundogdu_dairy_industry_dis_ticaret_anonim_sirketi.4a090f6614d53a922727c2cd5b5c5c03.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.gundogdu_dairy_industry_dis_ticaret_anonim_sirketi.4a090f6614d53a922727c2cd5b5c5c03.html)
+2026-08-08 15:20:40,563 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.hacibaba_lokumlari_gida_sanayi_ve_ticaret_anonim_sirketi.b9b8034a586d2262fce464ce667a1931.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.hacibaba_lokumlari_gida_sanayi_ve_ticaret_anonim_sirketi.b9b8034a586d2262fce464ce667a1931.html)
+2026-08-08 15:20:54,579 | INFO | Exhibitor profile could not be read: https://www.firmabulucu.com/isletme/haleplioglu-endustriyel-fistik-gida-sanayi-ve-ticaret-limited-sirketi/ (403 Client Error: Forbidden for url: https://www.firmabulucu.com/isletme/haleplioglu-endustriyel-fistik-gida-sanayi-ve-ticaret-limited-sirketi/)
+2026-08-08 15:21:03,713 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.gundogdu_gida_sut_urunleri_sanayi_ve_dis_ticaret_anonim_sirketi.ce574997b90abcc181279bc1e864aeec.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.gundogdu_gida_sut_urunleri_sanayi_ve_dis_ticaret_anonim_sirketi.ce574997b90abcc181279bc1e864aeec.html)
+2026-08-08 15:21:17,323 | INFO | Processing 29: KhalsCO Temsilci Firma
+2026-08-08 15:21:17,341 | INFO | Completed 17/60: ELATLI UN VE HAMUR ENTEGRE TESİSLERİ LTD ŞTİ Temsilci Firma
+2026-08-08 15:21:31,840 | INFO | Processing 30: LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:21:31,858 | INFO | Completed 18/60: EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ
+2026-08-08 15:21:39,682 | INFO | Exhibitor profile could not be read: https://isinolsun.com/firma-profil/hacibaba-lokumlari-gida-san-ve-tic-as-c154877 (HTTPSConnectionPool(host='isinolsun.com', port=443): Read timed out. (read timeout=10))
+2026-08-08 15:22:08,381 | INFO | Processing 31: LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma
+2026-08-08 15:22:08,399 | INFO | Completed 19/60: burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma
+2026-08-08 15:22:19,239 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.hleks_gida_sanayi_ve_ticaret_anonim_sirketi.3facf0d48f4aae9a54176d71f8e7fae7.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.hleks_gida_sanayi_ve_ticaret_anonim_sirketi.3facf0d48f4aae9a54176d71f8e7fae7.html)
+2026-08-08 15:22:24,907 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.lark_gida_ambalaj_insaat_sanayi_ticaret_limited_sirketi.81341d6b24d461fc71653a928ba11f17.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.lark_gida_ambalaj_insaat_sanayi_ticaret_limited_sirketi.81341d6b24d461fc71653a928ba11f17.html)
+2026-08-08 15:22:51,984 | INFO | Processing 32: MASTIQE SAKIZ - GLOBAL GROWTH DANIŞMANLIK GIDA A.Ş.
+2026-08-08 15:22:53,428 | INFO | Completed 20/60: AROMSA BESİN AROMA VE KATKI MAD.SAN. VE TİC.A.Ş
+2026-08-08 15:22:55,033 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/tr/firmalar/lebas-leblebi-gida-ltd-sti-152471/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/tr/firmalar/lebas-leblebi-gida-ltd-sti-152471/)
+2026-08-08 15:23:02,612 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.net/tr/companies/lark-gida-ltd-sti_N120588 (403 Client Error: Forbidden for url: https://www.turkishexporter.net/tr/companies/lark-gida-ltd-sti_N120588)
+2026-08-08 15:23:05,264 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/lark-gida-ambalaj-insaat-sanayi-ticaret-limited-90428829/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/lark-gida-ambalaj-insaat-sanayi-ticaret-limited-90428829/)
+2026-08-08 15:23:06,327 | INFO | Exhibitor profile could not be read: https://www.globixo.com/leba-leblebi-gida-san-ve-tic-ltd-ti (HTTPSConnectionPool(host='www.globixo.com', port=443): Max retries exceeded with url: /leba-leblebi-gida-san-ve-tic-ltd-ti (Caused by ConnectTimeoutError(<HTTPSConnection(host='www.globixo.com', port=443) at 0x172f99a8e10>, 'Connection to www.globixo.com timed out. (connect timeout=10)')))
+2026-08-08 15:23:11,613 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/hleks-gida-sanayi-ve-ticaret-a-s-2773297/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/hleks-gida-sanayi-ve-ticaret-a-s-2773297/)
+2026-08-08 15:23:13,827 | INFO | Processing 33: MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:23:13,847 | INFO | Completed 21/60: BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.
+2026-08-08 15:23:19,073 | INFO | Processing 34: Morello Temsilci Firma
+2026-08-08 15:23:19,090 | INFO | Completed 22/60: HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:23:34,085 | INFO | Processing 35: MOST FOOD GIDA ÜRETİM SAN. VE TİC. A.Ş.
+2026-08-08 15:23:34,097 | INFO | Completed 23/60: MASTIQE SAKIZ - GLOBAL GROWTH DANIŞMANLIK GIDA A.Ş.
+2026-08-08 15:23:43,545 | INFO | Processing 36: NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI
+2026-08-08 15:23:43,569 | INFO | Completed 24/60: ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:23:46,970 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/nakal-tasimacilik-gida-ins-tur-san-ve-tic-as-cerez-pazari (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/nakal-tasimacilik-gida-ins-tur-san-ve-tic-as-cerez-pazari)
+2026-08-08 15:23:50,296 | INFO | Processing 37: NARPA NARİN DIŞ TİCARET A.Ş.
+2026-08-08 15:23:50,417 | INFO | Completed 25/60: BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.
+2026-08-08 15:24:06,369 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/nakal-tasimacilik-gida-ins-tur-san-ve-tic-as-cerez-pazari (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/nakal-tasimacilik-gida-ins-tur-san-ve-tic-as-cerez-pazari)
+2026-08-08 15:24:35,698 | INFO | Processing 38: PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma
+2026-08-08 15:24:36,343 | INFO | Completed 26/60: MOST FOOD GIDA ÜRETİM SAN. VE TİC. A.Ş.
+2026-08-08 15:24:44,393 | INFO | Processing 39: PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:24:44,978 | INFO | Completed 27/60: KADRİ TİCARET İTH. İHR. LTD.ŞTİ.
+2026-08-08 15:25:07,249 | INFO | Processing 40: POLER TARIM VE GIDA A.Ş.
+2026-08-08 15:25:07,268 | INFO | Completed 28/60: LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:25:22,432 | INFO | Processing 41: PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ
+2026-08-08 15:25:22,447 | INFO | Completed 29/60: GÜNDOGDU DAIRY INDUSTRY DIŞ TİC. A.Ş.
+2026-08-08 15:25:23,849 | INFO | Processing 42: RELLA GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:25:23,864 | INFO | Completed 30/60: KhalsCO Temsilci Firma
+2026-08-08 15:26:05,673 | INFO | Processing 43: REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ
+2026-08-08 15:26:05,689 | INFO | Completed 31/60: RELLA GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:26:26,096 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/nakal-tasimacilik-gida-ins-tur-san-2796294/contacts/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/nakal-tasimacilik-gida-ins-tur-san-2796294/contacts/)
+2026-08-08 15:26:26,838 | INFO | Exhibitor profile could not be read: https://firmamaps.com/meycan-gida/659163 (403 Client Error: Forbidden for url: https://firmamaps.com/meycan-gida/659163)
+2026-08-08 15:26:52,836 | INFO | Exhibitor profile could not be read: https://www.exporthub.com/palamidastableolives-oliveoilturkey/ (403 Client Error: Forbidden for url: https://www.exporthub.com/palamidastableolives-oliveoilturkey/)
+2026-08-08 15:26:59,845 | INFO | Processing 44: ROVEN GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:26:59,897 | INFO | Completed 32/60: HLEKS GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:27:01,517 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.patisfood_grup_gida_sanayi_ve_ticaret_anonim_sirketi.1e204eb38cac7f6c1c801e30396a8fc2.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.patisfood_grup_gida_sanayi_ve_ticaret_anonim_sirketi.1e204eb38cac7f6c1c801e30396a8fc2.html)
+2026-08-08 15:27:02,813 | INFO | Processing 45: SAADET GIDA PAZ SAN VE TİC LTD ŞTİ
+2026-08-08 15:27:02,830 | INFO | Completed 33/60: Morello Temsilci Firma
+2026-08-08 15:27:07,859 | INFO | Exhibitor profile could not be read: https://www.volza.com/company-profile/nakal-tasimacilik-gida-ins-tur-san-2796294/ (403 Client Error: Forbidden for url: https://www.volza.com/company-profile/nakal-tasimacilik-gida-ins-tur-san-2796294/)
+2026-08-08 15:27:30,979 | INFO | Processing 46: SALMANLI KURUYEMİŞ GIDA İNŞ. TAAH. OTO. TAR. NAK. PET. İTH VE SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:27:30,998 | INFO | Completed 34/60: NARPA NARİN DIŞ TİCARET A.Ş.
+2026-08-08 15:27:32,361 | INFO | Processing 47: SALMANLI KURUYEMİŞ GIDA İNŞ. TAAH. OTO. TAR. NAK. PET. İTH. İHR. VE SAN. TİC. LTD. ŞTİ. Temsilci Firma
+2026-08-08 15:27:32,377 | INFO | Completed 35/60: ROVEN GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:27:49,069 | INFO | Processing 48: SARAY BİSKÜVİ VE GIDA SAN. A.Ş.
+2026-08-08 15:27:49,182 | INFO | Completed 36/60: SAADET GIDA PAZ SAN VE TİC LTD ŞTİ
+2026-08-08 15:28:01,118 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.porsi10_gida_sanayi_ve_ticaret_limited_sirketi.d3970b86f925d92ee81d32435cdbf784.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.porsi10_gida_sanayi_ve_ticaret_limited_sirketi.d3970b86f925d92ee81d32435cdbf784.html)
+2026-08-08 15:28:05,489 | INFO | Processing 49: SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ
+2026-08-08 15:28:05,504 | INFO | Completed 37/60: SALMANLI KURUYEMİŞ GIDA İNŞ. TAAH. OTO. TAR. NAK. PET. İTH VE SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:28:19,507 | INFO | Processing 50: ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:28:19,525 | INFO | Completed 38/60: SALMANLI KURUYEMİŞ GIDA İNŞ. TAAH. OTO. TAR. NAK. PET. İTH. İHR. VE SAN. TİC. LTD. ŞTİ. Temsilci Firma
+2026-08-08 15:28:27,004 | INFO | Processing 51: SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:28:27,021 | INFO | Completed 39/60: SARAY BİSKÜVİ VE GIDA SAN. A.Ş.
+2026-08-08 15:28:35,469 | INFO | Exhibitor profile could not be read: https://www.firmabulucu.com/isletme/porsi10-gida-sanayi-ve-ticaret-limited-sirketi/ (403 Client Error: Forbidden for url: https://www.firmabulucu.com/isletme/porsi10-gida-sanayi-ve-ticaret-limited-sirketi/)
+2026-08-08 15:28:44,886 | INFO | Processing 52: STAR FOOD GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:28:44,910 | INFO | Completed 40/60: HACIBABA LOKUMLARI GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:29:01,894 | INFO | Processing 53: SUNJOY TRADING CO., LTD.
+2026-08-08 15:29:01,915 | INFO | Completed 41/60: MEYCAN GIDA TEM. İNŞ. MAK. TURİZM TAAH. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:29:13,920 | INFO | Processing 54: SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma
+2026-08-08 15:29:13,939 | INFO | Completed 42/60: LEBAŞ LEBLEBİ GIDA SAN.TİC.LTD.ŞTİ Temsilci Firma
+2026-08-08 15:29:15,151 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/suphan-tarim-urunleri-sabayi-ve-ticaret-as (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/suphan-tarim-urunleri-sabayi-ve-ticaret-as)
+2026-08-08 15:29:27,890 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/suphan-tarim-urunleri-sabayi-ve-ticaret-as (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/suphan-tarim-urunleri-sabayi-ve-ticaret-as)
+2026-08-08 15:30:47,614 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.sevincler_insaat_nakliyat_gida_sanayi_ve_ticaret_anonim_sirketi.dfc82de32f00c931f12239c94d8b757e.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.sevincler_insaat_nakliyat_gida_sanayi_ve_ticaret_anonim_sirketi.dfc82de32f00c931f12239c94d8b757e.html)
+2026-08-08 15:30:49,693 | INFO | Processing 55: TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:30:49,712 | INFO | Completed 43/60: ŞENOCAK GIDA FIN. ENT. TURZ. NAK. İNŞ. SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:30:56,113 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/tr/firmalar/sevincler-insaat-nakliyat-gida-sanayi-ve-ticaret-anonim-sirketi-132449/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/tr/firmalar/sevincler-insaat-nakliyat-gida-sanayi-ve-ticaret-anonim-sirketi-132449/)
+2026-08-08 15:30:57,996 | INFO | Processing 56: TÜRK TARIM VE GIDA SANAYİ TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:30:58,015 | INFO | Completed 44/60: POLER TARIM VE GIDA A.Ş.
+2026-08-08 15:31:13,915 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.sayinlar_gida_maddeleri_sanayi_ve_ticaret_anonim_sirketi.f92a957c7fae668f2885c47e0ff18c59.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.sayinlar_gida_maddeleri_sanayi_ve_ticaret_anonim_sirketi.f92a957c7fae668f2885c47e0ff18c59.html)
+2026-08-08 15:31:18,266 | INFO | Exhibitor profile could not be read: https://www.firmabulucu.com/isletme/star-food-gida-sanayi-ve-ticaret-limited-sirketi/ (403 Client Error: Forbidden for url: https://www.firmabulucu.com/isletme/star-food-gida-sanayi-ve-ticaret-limited-sirketi/)
+2026-08-08 15:31:19,517 | INFO | Processing 57: UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.
+2026-08-08 15:31:19,723 | INFO | Completed 45/60: NAKAL TAŞIMACILIK GIDA İNŞ. TUR. SAN. VE TİC. A.Ş. - ÇEREZ PAZARI
+2026-08-08 15:31:32,536 | INFO | Processing 58: UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.
+2026-08-08 15:31:32,717 | INFO | Completed 46/60: PALAMİDAS OLIVE OIL (TURKISH OLIVE OIL PRODUCER) Temsilci Firma
+2026-08-08 15:31:34,886 | INFO | Processing 59: UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:31:34,911 | INFO | Completed 47/60: SÜPHAN TARIM ÜRÜNLERİ SABAYİ VE TİCARET A.Ş. Temsilci Firma
+2026-08-08 15:31:58,928 | INFO | Exhibitor profile could not be read: https://iyifirma.com/sayinlar-gida-yildirim/ (403 Client Error: Forbidden for url: https://iyifirma.com/sayinlar-gida-yildirim/)
+2026-08-08 15:32:29,615 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/en/companies/utopia-gida-tarim-urunleri-turizm-sanayi-ve-ticaret-limited-sirketi-946460/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/en/companies/utopia-gida-tarim-urunleri-turizm-sanayi-ve-ticaret-limited-sirketi-946460/)
+2026-08-08 15:32:46,997 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.tatbey_cikolata_sekerleme_gida_sanayi_ve_ticaret_anonim_sirketi.2688aff82d6e6175d65c287ec9e76f88.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.tatbey_cikolata_sekerleme_gida_sanayi_ve_ticaret_anonim_sirketi.2688aff82d6e6175d65c287ec9e76f88.html)
+2026-08-08 15:32:50,792 | INFO | Processing 60: ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:32:50,807 | INFO | Completed 48/60: SEVİNÇLER İNŞAAT NAKLİYAT GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:33:10,168 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.turk_tarim_ve_gida_sanayi_ticaret_anonim_sirketi.0e5c14c9bf697ae380e4df97e8b5a010.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.turk_tarim_ve_gida_sanayi_ticaret_anonim_sirketi.0e5c14c9bf697ae380e4df97e8b5a010.html)
+2026-08-08 15:33:12,263 | INFO | Exhibitor profile could not be read: https://www.forie.com/en/companies/utopia-gida-tarim-urunleri-turizm-sanayi-ve-ticaret-limited-sirketi-946460/ (403 Client Error: Forbidden for url: https://www.forie.com/en/companies/utopia-gida-tarim-urunleri-turizm-sanayi-ve-ticaret-limited-sirketi-946460/)
+2026-08-08 15:33:13,923 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/tr/firmalar/utopia-gida-tarim-urunleri-turizm-sanayi-ve-ticaret-limited-sirketi-946460/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/tr/firmalar/utopia-gida-tarim-urunleri-turizm-sanayi-ve-ticaret-limited-sirketi-946460/)
+2026-08-08 15:33:43,232 | INFO | Exhibitor profile could not be read: https://www.forie.com/tr/firmalar/tatbey-cikolata-74316/ (403 Client Error: Forbidden for url: https://www.forie.com/tr/firmalar/tatbey-cikolata-74316/)
+2026-08-08 15:33:48,289 | INFO | Exhibitor profile could not be read: https://www.forie.com/tr/firmalar/unifo-gida-san-tic-as-60151/ (403 Client Error: Forbidden for url: https://www.forie.com/tr/firmalar/unifo-gida-san-tic-as-60151/)
+2026-08-08 15:33:54,472 | INFO | Completed 49/60: REM GIDA İHTİYAÇ MADDELERİ PAZ. SAN. VE TİC. LTD. ŞTİ
+2026-08-08 15:34:20,804 | INFO | Completed 50/60: PATİSFOOD GRUP GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:34:28,432 | INFO | Exhibitor profile could not be read: https://www.turkishexporter.com.tr/tr/firmalar/unifo-gida-san-tic-as-60151/ (403 Client Error: Forbidden for url: https://www.turkishexporter.com.tr/tr/firmalar/unifo-gida-san-tic-as-60151/)
+2026-08-08 15:34:58,573 | INFO | Exhibitor profile could not be read: https://iyifirma.com/zer-yag-sanayi-ve-ticaret-anonim-sirketi/ (403 Client Error: Forbidden for url: https://iyifirma.com/zer-yag-sanayi-ve-ticaret-anonim-sirketi/)
+2026-08-08 15:35:18,589 | INFO | Completed 51/60: TÜRK TARIM VE GIDA SANAYİ TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:35:25,017 | INFO | Completed 52/60: PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ
+2026-08-08 15:35:35,402 | INFO | Completed 53/60: STAR FOOD GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:35:36,042 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.zer_yag_sanayi_ve_ticaret_anonim_sirketi.b80b13d295a78cbf792c12418e8e053d.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.zer_yag_sanayi_ve_ticaret_anonim_sirketi.b80b13d295a78cbf792c12418e8e053d.html)
+2026-08-08 15:35:38,164 | INFO | Completed 54/60: SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ
+2026-08-08 15:35:43,323 | INFO | Completed 55/60: UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.
+2026-08-08 15:37:06,263 | INFO | Completed 56/60: UNİFO GIDA VE SAVUNMA SAN. VE TİC A.Ş.
+2026-08-08 15:37:09,698 | INFO | Completed 57/60: TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:38:33,165 | INFO | Completed 58/60: UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:39:38,878 | INFO | Completed 59/60: ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:43:24,949 | INFO | Completed 60/60: SUNJOY TRADING CO., LTD.
+2026-08-08 15:43:25,081 | INFO | Processing 1: ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:43:25,081 | INFO | Processing 3: ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş.
+2026-08-08 15:43:25,082 | INFO | Processing 4: ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:43:25,083 | INFO | Processing 8: AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.
+2026-08-08 15:43:25,083 | INFO | Processing 9: BANNAN DIŞ TİCARET ÇİMENTO VE GIDA ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:43:25,084 | INFO | Processing 11: BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.
+2026-08-08 15:43:25,085 | INFO | Processing 12: BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:43:25,086 | INFO | Processing 13: BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.
+2026-08-08 15:43:25,086 | INFO | Processing 14: burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma
+2026-08-08 15:43:25,087 | INFO | Processing 16: Dide Tunçman Temsilci Firma
+2026-08-08 15:43:25,088 | INFO | Processing 18: EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ
+2026-08-08 15:43:25,088 | INFO | Processing 21: ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:43:28,100 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1 (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1)
+2026-08-08 15:43:28,410 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/dide-tuncman (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/dide-tuncman)
+2026-08-08 15:43:32,157 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/dide-tuncman (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/dide-tuncman)
+2026-08-08 15:43:43,479 | WARNING | Search query failed; continuing with remaining queries: "ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş." Turkiye official website (Bright Data returned non-JSON body: This query recently failed and cannot be attempted at this time. Please try again later, after a minimum of 15 seconds. https://docs.brightdata.com/scraping-automation/serp-api/debugging#serp-api-error-catalog)
+2026-08-08 15:43:45,804 | WARNING | Search query failed; continuing with remaining queries: "ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ" Turkiye official website (Bright Data returned non-JSON body: This query recently failed and cannot be attempted at this time. Please try again later, after a minimum of 15 seconds. https://docs.brightdata.com/scraping-automation/serp-api/debugging#serp-api-error-catalog)
+2026-08-08 15:43:52,770 | INFO | Exhibitor profile could not be read: https://listofcompany.com/tr/firmalar/gida-ve-tarim-urunleri-c-11/anako-yumurta-ve-urunleri-gida-sanayi-ihr-ith-ve-tic-a-s-c-6322 (403 Client Error: Forbidden for url: https://listofcompany.com/tr/firmalar/gida-ve-tarim-urunleri-c-11/anako-yumurta-ve-urunleri-gida-sanayi-ihr-ith-ve-tic-a-s-c-6322)
+2026-08-08 15:43:55,802 | INFO | Exhibitor profile could not be read: http://expomedistanbul.com/en/exhibitor-list/anako-yumurta-ve-urunleri-gida-sanayi-ihracat-ithalat-ve-tic-as-161061-3250 (404 Client Error: Not Found for url: https://expomedistanbul.com/en/exhibitor-list/anako-yumurta-ve-urunleri-gida-sanayi-ihracat-ithalat-ve-tic-as-161061-3250)
+2026-08-08 15:44:01,638 | INFO | Processing 25: HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:44:01,660 | INFO | Completed 60/60: BANNAN DIŞ TİCARET ÇİMENTO VE GIDA ÜRÜNLERİ SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:44:15,575 | INFO | Processing 26: HLEKS GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:44:15,592 | INFO | Completed 60/60: Dide Tunçman Temsilci Firma
+2026-08-08 15:44:34,352 | WARNING | Google Places run budget exhausted
+2026-08-08 15:44:41,117 | WARNING | Google Places run budget exhausted
+2026-08-08 15:44:41,564 | WARNING | Google Places run budget exhausted
+2026-08-08 15:44:53,717 | WARNING | Google Places run budget exhausted
+2026-08-08 15:45:01,518 | INFO | Processing 28: KADRİ TİCARET İTH. İHR. LTD.ŞTİ.
+2026-08-08 15:45:01,535 | INFO | Completed 60/60: ADY GRUP GIDA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:45:30,851 | INFO | Processing 29: KhalsCO Temsilci Firma
+2026-08-08 15:45:30,866 | INFO | Completed 60/60: ERİŞSAN HELVA KURUMEYVA VE GIDA MAD. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:45:33,306 | WARNING | Google Places run budget exhausted
+2026-08-08 15:45:35,189 | INFO | Processing 30: LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:45:35,735 | INFO | Completed 60/60: ANKA ŞEKER GIDA PAZARLAMA SANAYİ VE TİCARET LİMİTED ŞİRKETİ
+2026-08-08 15:45:49,640 | WARNING | Google Places run budget exhausted
+2026-08-08 15:45:56,737 | INFO | Exhibitor profile could not be read: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1 (404 Client Error: Not Found for url: https://www.foodistexpo.com/brand/burcu-gida-konservecilik-ve-salca-sanas-1)
+2026-08-08 15:46:12,319 | INFO | Processing 34: Morello Temsilci Firma
+2026-08-08 15:46:12,338 | INFO | Completed 60/60: HALEPLİOĞLU ENDÜSTRİYEL FISTIK GIDA SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:46:17,707 | WARNING | Google Places run budget exhausted
+2026-08-08 15:46:42,508 | INFO | Processing 37: NARPA NARİN DIŞ TİCARET A.Ş.
+2026-08-08 15:46:42,525 | INFO | Completed 60/60: BİLGEM ELEKTRİK ELEKTRONİK TARIM GIDA HAYVANCILIK TUR. TAŞ. NAK. İTH. İHR. SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:46:44,448 | WARNING | Search query failed; continuing with remaining queries: "ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş." ticari unvan KVKK (Bright Data returned non-JSON body: This query recently failed and cannot be attempted at this time. Please try again later, after a minimum of 15 seconds. https://docs.brightdata.com/scraping-automation/serp-api/debugging#serp-api-error-catalog)
+2026-08-08 15:46:57,977 | WARNING | Google Places run budget exhausted
+2026-08-08 15:47:03,650 | INFO | Processing 41: PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ
+2026-08-08 15:47:03,650 | WARNING | Search query failed; continuing with remaining queries: "AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ." official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,650 | WARNING | Search query failed; continuing with remaining queries: "EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ" official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,651 | WARNING | Search query failed; continuing with remaining queries: "KhalsCO Temsilci Firma" official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,651 | WARNING | Search query failed; continuing with remaining queries: "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ." Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,652 | WARNING | Search query failed; continuing with remaining queries: "HLEKS GIDA SAN. VE TİC. A.Ş." official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,651 | WARNING | Search query failed; continuing with remaining queries: "Morello Temsilci Firma" Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,652 | WARNING | Search query failed; continuing with remaining queries: "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş." Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,652 | WARNING | Search query failed; continuing with remaining queries: "NARPA NARİN DIŞ TİCARET A.Ş." Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:47:03,667 | INFO | Completed 60/60: BEŞLER KURUYEMİŞ VE GIDA MAD.İML.VE PAZ.TİC.A.Ş.
+2026-08-08 15:47:04,982 | WARNING | Search query failed; continuing with remaining queries: "KADRİ TİCARET İTH. İHR. LTD.ŞTİ." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:47:11,695 | WARNING | Search query failed; continuing with remaining queries: "HLEKS GIDA SAN. VE TİC. A.Ş." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:47:11,940 | WARNING | Google Places run budget exhausted
+2026-08-08 15:47:12,233 | WARNING | Search query failed; continuing with remaining queries: "KhalsCO Temsilci Firma" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:47:12,692 | WARNING | Search query failed; continuing with remaining queries: "AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:47:14,353 | WARNING | Google Places run budget exhausted
+2026-08-08 15:47:15,936 | WARNING | Search query failed; continuing with remaining queries: "EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:47:16,646 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.burcu_gida_konservecilik_ve_salca_sanayi_anonim_sirketi.3525c1f952f290425cb751e397ff71be.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.burcu_gida_konservecilik_ve_salca_sanayi_anonim_sirketi.3525c1f952f290425cb751e397ff71be.html)
+2026-08-08 15:47:19,618 | WARNING | Google Places run budget exhausted
+2026-08-08 15:47:19,985 | WARNING | Google Places run budget exhausted
+2026-08-08 15:47:20,078 | INFO | Processing 49: SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ
+2026-08-08 15:47:20,095 | INFO | Completed 60/60: KhalsCO Temsilci Firma
+2026-08-08 15:47:27,944 | WARNING | Search query failed; continuing with remaining queries: "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ" Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:47:34,860 | WARNING | Search query failed; continuing with remaining queries: "Morello Temsilci Firma" official website (Bright Data run budget exhausted)
+2026-08-08 15:47:42,386 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.porsi10_gida_sanayi_ve_ticaret_limited_sirketi.d3970b86f925d92ee81d32435cdbf784.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.porsi10_gida_sanayi_ve_ticaret_limited_sirketi.d3970b86f925d92ee81d32435cdbf784.html)
+2026-08-08 15:47:45,119 | WARNING | Search query failed; continuing with remaining queries: "Morello Temsilci Firma" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:47:46,296 | WARNING | Google Places run budget exhausted
+2026-08-08 15:48:01,984 | WARNING | Search query failed; continuing with remaining queries: "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ." official website (Bright Data run budget exhausted)
+2026-08-08 15:48:03,299 | WARNING | Search query failed; continuing with remaining queries: "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ" Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:48:12,672 | WARNING | Search query failed; continuing with remaining queries: "LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:48:24,287 | WARNING | Google Places run budget exhausted
+2026-08-08 15:48:24,539 | INFO | Processing 53: SUNJOY TRADING CO., LTD.
+2026-08-08 15:48:24,558 | INFO | Completed 60/60: EKOL GIDA ÜRÜNLERİ SAN VE DIŞ TİC LTD ŞTİ
+2026-08-08 15:48:33,114 | INFO | Processing 55: TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:48:33,133 | INFO | Completed 60/60: ANAKO YUMURTA VE ÜRÜNLERİ GIDA SANAYİ İHRACAT İTHALAT VE TİC. A.Ş.
+2026-08-08 15:48:38,302 | WARNING | Search query failed; continuing with remaining queries: "TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ" Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:48:51,004 | INFO | Exhibitor profile could not be read: https://www.dnb.com/business-directory/company-profiles.tatbey_cikolata_sekerleme_gida_sanayi_ve_ticaret_anonim_sirketi.2688aff82d6e6175d65c287ec9e76f88.html (403 Client Error: Forbidden for url: https://www.dnb.com/business-directory/company-profiles.tatbey_cikolata_sekerleme_gida_sanayi_ve_ticaret_anonim_sirketi.2688aff82d6e6175d65c287ec9e76f88.html)
+2026-08-08 15:49:02,171 | INFO | Processing 57: UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.
+2026-08-08 15:49:02,189 | INFO | Completed 60/60: Morello Temsilci Firma
+2026-08-08 15:49:05,002 | WARNING | Google Places run budget exhausted
+2026-08-08 15:49:05,557 | WARNING | Search query failed; continuing with remaining queries: "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ" official website (Bright Data run budget exhausted)
+2026-08-08 15:49:05,941 | WARNING | Search query failed; continuing with remaining queries: "UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş." Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:49:17,719 | INFO | Processing 59: UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:49:17,918 | WARNING | Google Places run budget exhausted
+2026-08-08 15:49:18,006 | INFO | Processing 60: ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:49:18,349 | INFO | Completed 60/60: HLEKS GIDA SAN. VE TİC. A.Ş.
+2026-08-08 15:49:18,518 | INFO | Completed 60/60: UNADAM UNLU MAMÜLLER GIDA İMALAT TURİZM NAKLİYAT SAN. VE TİC. A.Ş.
+2026-08-08 15:49:20,543 | WARNING | Search query failed; continuing with remaining queries: "PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:49:21,288 | WARNING | Search query failed; continuing with remaining queries: "ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ" Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:49:22,694 | INFO | Completed 60/60: burcu gıda konservecilik ve salça san.a.ş. Temsilci Firma
+2026-08-08 15:49:26,866 | INFO | Completed 60/60: KADRİ TİCARET İTH. İHR. LTD.ŞTİ.
+2026-08-08 15:49:30,524 | WARNING | Search query failed; continuing with remaining queries: "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ." Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:49:30,650 | INFO | Completed 60/60: PORSİ10 GIDA SANAYİ VE TİC. LTD. ŞTİ
+2026-08-08 15:49:32,232 | WARNING | Search query failed; continuing with remaining queries: "NARPA NARİN DIŞ TİCARET A.Ş." official website (Bright Data run budget exhausted)
+2026-08-08 15:49:37,376 | INFO | Exhibitor profile could not be read: https://iyifirma.com/zer-yag-sanayi-ve-ticaret-anonim-sirketi-baspinar-subesi/ (403 Client Error: Forbidden for url: https://iyifirma.com/zer-yag-sanayi-ve-ticaret-anonim-sirketi-baspinar-subesi/)
+2026-08-08 15:49:37,425 | WARNING | Google Places run budget exhausted
+2026-08-08 15:49:39,943 | WARNING | Google Places run budget exhausted
+2026-08-08 15:49:40,643 | WARNING | Search query failed; continuing with remaining queries: "NARPA NARİN DIŞ TİCARET A.Ş." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:49:56,435 | INFO | Completed 60/60: LARK GIDA AMBALAJ İNŞ. SAN. TİC. LTD. ŞTİ.
+2026-08-08 15:50:03,272 | WARNING | Search query failed; continuing with remaining queries: "ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ" official website (Bright Data run budget exhausted)
+2026-08-08 15:50:07,636 | WARNING | Search query failed; continuing with remaining queries: "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ." official website (Bright Data run budget exhausted)
+2026-08-08 15:50:11,173 | WARNING | Search query failed; continuing with remaining queries: "ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:50:15,705 | WARNING | Search query failed; continuing with remaining queries: "UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:50:16,060 | WARNING | Search query failed; continuing with remaining queries: "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş." official website (Bright Data run budget exhausted)
+2026-08-08 15:50:27,222 | WARNING | Search query failed; continuing with remaining queries: "BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş." ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:50:30,439 | INFO | Completed 60/60: UTOPIA GIDA TARIM ÜRÜNLERİ TURİZM SAN. VE TİC. LTD. ŞTİ.
+2026-08-08 15:50:32,969 | INFO | Completed 60/60: AYNİRA GIDA SAN.VE TİC.LTD.ŞTİ.
+2026-08-08 15:50:40,177 | INFO | Completed 60/60: ZER YAĞ SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:50:47,953 | WARNING | Search query failed; continuing with remaining queries: "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ" official website (Bright Data run budget exhausted)
+2026-08-08 15:50:52,816 | WARNING | Search query failed; continuing with remaining queries: "TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ" official website (Bright Data run budget exhausted)
+2026-08-08 15:50:55,429 | WARNING | Search query failed; continuing with remaining queries: "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:51:03,994 | WARNING | Search query failed; continuing with remaining queries: "TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:51:24,065 | WARNING | Search query failed; continuing with remaining queries: "NARPA NARİN DIŞ TİCARET A.Ş." official website (Bright Data run budget exhausted)
+2026-08-08 15:51:31,488 | WARNING | Search query failed; continuing with remaining queries: "NARPA NARİN DIŞ TİCARET A.Ş." gıda ve içecek Turkiye (Bright Data run budget exhausted)
+2026-08-08 15:51:48,595 | WARNING | Search query failed; continuing with remaining queries: "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ" official website (Bright Data run budget exhausted)
+2026-08-08 15:51:50,488 | INFO | Completed 60/60: TATBEY ÇİKOLATA ŞEKERLEME GIDA SANAYİ VE TİCARET ANONİM ŞİRKETİ
+2026-08-08 15:51:56,321 | WARNING | Search query failed; continuing with remaining queries: "SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ" ticari unvan KVKK (Bright Data run budget exhausted)
+2026-08-08 15:52:03,805 | INFO | Completed 60/60: NARPA NARİN DIŞ TİCARET A.Ş.
+2026-08-08 15:52:03,821 | INFO | Completed 60/60: SAYINLAR GIDA MADDELERİ SAN. VE TİC. A.Ş. - TURNA YAĞ
+2026-08-08 15:53:10,894 | INFO | Completed 60/60: BURCU GIDA KONSERVECİLİK VE SALÇA SAN.A.Ş.
+2026-08-08 15:54:09,336 | WARNING | Search query failed; continuing with remaining queries: "SUNJOY TRADING CO., LTD." Turkiye official website (Bright Data run budget exhausted)
+2026-08-08 15:54:16,561 | WARNING | Google Places run budget exhausted
+2026-08-08 16:00:44,921 | WARNING | Search query failed; continuing with remaining queries: "SUNJOY TRADING CO., LTD." official website (Bright Data run budget exhausted)
+2026-08-08 16:03:39,338 | INFO | Completed 60/60: SUNJOY TRADING CO., LTD.
