@@ -56,6 +56,7 @@ class CandidateFingerprint:
     places_phone_corroborated: bool
     places_business_corroborated: bool
     structured_business_name_corroborated: bool
+    linkedin_website_match: bool
 
     @property
     def verified_identity(self) -> bool:
@@ -254,6 +255,18 @@ class CandidateFingerprint:
         )
 
     @property
+    def safe_linkedin_corroborated_route(self) -> bool:
+        """Use LinkedIn's declared website as independent identity evidence."""
+        return bool(
+            self.reachable
+            and self.eligible_role
+            and self.conflict_free
+            and self.country_supported
+            and self.canonical_domain_consistent
+            and self.linkedin_website_match
+        )
+
+    @property
     def domain_specificity(self) -> int:
         """Prefer the domain that names the requested entity, not a sibling."""
         if self.obvious_exact_domain:
@@ -302,6 +315,7 @@ class CandidateFingerprint:
             and not self.obvious_exact_domain
             and not self.safe_places_contact_route
             and not self.safe_verified_first_party_route
+            and not self.safe_linkedin_corroborated_route
         )
         if weak_country_homonym:
             return False
@@ -324,6 +338,7 @@ class CandidateFingerprint:
             or self.safe_exact_primary_structured_route
             or self.safe_short_brand_context_route
             or self.safe_verified_first_party_route
+            or self.safe_linkedin_corroborated_route
             or (
                 self.verified_identity
                 and (legal_identity or intrinsic_bundle)
@@ -591,6 +606,9 @@ def fingerprint(
                 )
             )
         ),
+        linkedin_website_match=bool(
+            evaluation.get("linkedin_company_evidence", {}).get("verified")
+        ),
     )
 
 
@@ -607,6 +625,7 @@ def _identity_key(item: tuple[dict, CandidateFingerprint]) -> tuple[int, ...]:
         int(value.safe_exact_primary_structured_route),
         int(value.safe_short_brand_context_route),
         int(value.safe_verified_first_party_route),
+        int(value.safe_linkedin_corroborated_route),
         value.domain_specificity,
         int(value.verified_identity),
         int(value.direct_entity_identity),
@@ -619,6 +638,7 @@ def _identity_key(item: tuple[dict, CandidateFingerprint]) -> tuple[int, ...]:
         int(value.public_brand_domain),
         int(value.exact_brand_domain),
         int(value.intrinsic_domain),
+        int(value.linkedin_website_match),
         int(value.has_contact),
         int(value.semantic_match),
         -int(value.semantic_conflict),
@@ -792,6 +812,10 @@ def resolve_candidates(
                 selected_fingerprint.safe_exact_domain_route
                 or selected_fingerprint.safe_exact_website_route
             )
-            else "candidate_resolved_by_target_fingerprint"
+            else (
+                "candidate_resolved_by_linkedin_website_match"
+                if selected_fingerprint.safe_linkedin_corroborated_route
+                else "candidate_resolved_by_target_fingerprint"
+            )
         ),
     )

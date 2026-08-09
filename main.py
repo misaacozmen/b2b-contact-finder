@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import config
 from modules import scorer
-from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_memory, entity_registry, entity_resolution, entity_semantics, evidence, evidence_acquisition, evidence_ledger, excel, extractor, identity, phone, publication_policy, quality_audit, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
+from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_memory, entity_registry, entity_resolution, entity_semantics, evidence, evidence_acquisition, evidence_ledger, excel, extractor, identity, linkedin_company, phone, publication_policy, quality_audit, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
 from modules.utils import ensure_directories, random_delay, setup_logging
 
 
@@ -848,6 +848,9 @@ def _evaluation_evidence(evaluation: dict) -> dict:
         "identity_assessment": evaluation.get("identity_assessment", {}),
         "publication_policy": evaluation.get("publication_policy", {}),
         "rerank_evidence": evaluation.get("rerank_evidence", {}),
+        "linkedin_company_evidence": evaluation.get(
+            "linkedin_company_evidence", {}
+        ),
         "contact_publication": evaluation.get("contact_publication", {}),
         "identity_resolution": evaluation.get("_identity_resolution", ""),
         "automation": evaluation.get("_automation", {}),
@@ -990,6 +993,33 @@ def _complete_resolution_evidence(
     for evaluation in evaluations:
         evaluation["_automation"] = automation
     return evaluations, resolution, current
+
+
+def _try_linkedin_company_corroboration(
+    company: str,
+    evaluations: list[dict],
+    resolution: entity_resolution.Resolution,
+) -> entity_resolution.Resolution:
+    """Ask LinkedIn only for existing candidates that are still stuck."""
+    if resolution.status != "unresolved" or not evaluations:
+        return resolution
+    profile = entity_resolution.build_target_profile(company)
+    targets = [
+        item for item in evaluations
+        if item.get("crawl_result", {}).get("pages")
+        and not entity_resolution.fingerprint(profile, item).candidate_ready
+    ]
+    for target in targets:
+        linkedin_evidence = linkedin_company.corroborate(company, target)
+        if not linkedin_evidence:
+            continue
+        target["linkedin_company_evidence"] = linkedin_evidence
+        target.setdefault("candidate", {})["_linkedin_company_evidence"] = (
+            linkedin_evidence
+        )
+        if linkedin_evidence.get("verified"):
+            break
+    return entity_resolution.resolve_candidates(company, evaluations)
 
 
 def _evaluate_candidate_with_stage(
@@ -2348,6 +2378,10 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
                 resolution,
             )
         )
+    if resolution.status == "unresolved":
+        resolution = _try_linkedin_company_corroboration(
+            company, ranked_evaluations, resolution,
+        )
     if resolution.status == "ambiguous":
         row = _empty_result(
             company,
@@ -2761,6 +2795,7 @@ def run(
         )
     search.reset_source_health()
     search.reset_candidate_host_observations()
+    linkedin_company.reset()
     logger = setup_logging()
     start_time = time.monotonic()
     company_records = excel.read_company_records(input_file)
@@ -2814,6 +2849,8 @@ def run(
             "search_cache": config.SEARCH_CACHE_MODE,
             "crawl_cache": config.CRAWL_CACHE_MODE,
             "brightdata_budget": config.BRIGHTDATA_REQUEST_BUDGET,
+            "linkedin_company_budget": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
+            "linkedin_company_enabled": config.ENABLE_LINKEDIN_COMPANY_LOOKUP,
             "paid_query_limit_per_company": paid_query_limit,
             "google_places_budget": config.GOOGLE_PLACES_REQUEST_BUDGET,
             "brandfetch_budget": config.BRANDFETCH_REQUEST_BUDGET,
@@ -2955,6 +2992,7 @@ def parse_args() -> argparse.Namespace:
         help="Portable replay_snapshot.json.gz created by an earlier run",
     )
     parser.add_argument("--brightdata-budget", type=int, default=config.BRIGHTDATA_REQUEST_BUDGET, help="Maximum paid Bright Data HTTP requests for this run")
+    parser.add_argument("--linkedin-company-budget", type=int, default=config.LINKEDIN_COMPANY_REQUEST_BUDGET, help="Maximum Bright Data LinkedIn Company requests for this run")
     parser.add_argument("--google-places-budget", type=int, default=config.GOOGLE_PLACES_REQUEST_BUDGET, help="Maximum paid Google Places requests for this run")
     return parser.parse_args()
 
@@ -2968,6 +3006,8 @@ if __name__ == "__main__":
     config.BRIGHTDATA_REQUEST_HARD_CAP = max(0, args.brightdata_budget)
     config.GOOGLE_PLACES_REQUEST_HARD_CAP = max(0, args.google_places_budget)
     config.BRIGHTDATA_REQUEST_BUDGET = config.BRIGHTDATA_REQUEST_HARD_CAP
+    config.LINKEDIN_COMPANY_REQUEST_HARD_CAP = max(0, args.linkedin_company_budget)
+    config.LINKEDIN_COMPANY_REQUEST_BUDGET = config.LINKEDIN_COMPANY_REQUEST_HARD_CAP
     config.GOOGLE_PLACES_REQUEST_BUDGET = config.GOOGLE_PLACES_REQUEST_HARD_CAP
     config.REPLAY_SNAPSHOT_INPUT = args.replay_snapshot
     if args.rerank_cache:

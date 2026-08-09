@@ -54,6 +54,9 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
     elapsed = str(timedelta(seconds=int(elapsed_seconds)))
     counters = runtime.snapshot().get("counters", {})
     brightdata_requests = int(counters.get("api.brightdata.requests", 0))
+    linkedin_company_requests = int(counters.get("api.linkedin_company.requests", 0))
+    linkedin_company_blocked = int(counters.get("api.linkedin_company.budget_blocked", 0))
+    linkedin_company_matches = int(counters.get("api.linkedin_company.matches", 0))
     places_requests = int(counters.get("api.google_places.requests", 0))
     crawler_requests = int(counters.get("http.crawler.requests", 0))
     candidate_count = int(counters.get("pipeline.candidates_discovered", 0))
@@ -164,6 +167,7 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
             ),
             f"Firma basi ucretli sorgu siniri: {paid_query_limit}",
             f"Bright Data: sorgu={brightdata_queries}; HTTP={brightdata_requests}; retry={brightdata_retries}; cooldown={brightdata_cooldowns}; butce-engeli={brightdata_blocked}; saglayici-hatasi={search_provider_failures}",
+            f"LinkedIn Company: eslesme={linkedin_company_matches}; HTTP={linkedin_company_requests}; butce-engeli={linkedin_company_blocked}",
             f"Crawler butce engeli: {crawler_blocked}",
             f"Google Places API istekleri: {places_requests}",
             f"Islem suresi: {elapsed}",

@@ -47,15 +47,18 @@ def main_cli() -> None:
     config.BRANDFETCH_CLIENT_ID = saved["brandfetch"]
     config.HUNTER_API_KEY = saved["hunter"]
     config.ENABLE_GOOGLE_PLACES = True
+    config.ENABLE_LINKEDIN_COMPANY_LOOKUP = True
     config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = True
     config.ENABLE_HUNTER_DOMAIN_FINDER = True
     config.ENABLE_HUNTER_FALLBACK = False
     config.BRIGHTDATA_REQUEST_BUDGET = 120
+    config.LINKEDIN_COMPANY_REQUEST_BUDGET = 60
     config.GOOGLE_PLACES_REQUEST_BUDGET = 60
     config.BRANDFETCH_REQUEST_BUDGET = 60
     config.HUNTER_REQUEST_BUDGET = 60
     for name, value in (
         ("BRIGHTDATA_REQUEST_HARD_CAP", 120),
+        ("LINKEDIN_COMPANY_REQUEST_HARD_CAP", 60),
         ("GOOGLE_PLACES_REQUEST_HARD_CAP", 60),
         ("BRANDFETCH_REQUEST_HARD_CAP", 60),
         ("HUNTER_REQUEST_HARD_CAP", 60),
@@ -87,6 +90,7 @@ def main_cli() -> None:
         "crawl_cache_mode": config.CRAWL_CACHE_MODE,
         "budgets": {
             "brightdata": config.BRIGHTDATA_REQUEST_BUDGET,
+            "linkedin_company": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
             "google_places": config.GOOGLE_PLACES_REQUEST_BUDGET,
             "brandfetch": config.BRANDFETCH_REQUEST_BUDGET,
             "hunter": config.HUNTER_REQUEST_BUDGET,
