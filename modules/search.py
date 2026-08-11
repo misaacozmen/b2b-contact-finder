@@ -939,7 +939,9 @@ def _add_search_results(
     for rank, result in enumerate(results, start=1):
         url = _result_url(result)
         domain = scorer.normalize_domain(url)
-        if not domain:
+        if not domain or scorer.is_mirror_directory_domain(company_name, domain):
+            if domain:
+                runtime.record("search.candidate.mirror_rejected")
             continue
 
         title = result.get("title", "")
@@ -2127,9 +2129,20 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     executed_queries: set[str] = set()
     related_name_hints: list[str] = []
     full_identity_query_with_results = False
+
+    def remove_mirror_candidates() -> None:
+        rejected = [
+            domain for domain in candidates_by_domain
+            if scorer.is_mirror_directory_domain(company_name, domain)
+        ]
+        for domain in rejected:
+            candidates_by_domain.pop(domain, None)
+            runtime.record("search.candidate.mirror_rejected")
+
     _add_verified_alias_candidate(candidates_by_domain, company_name)
     _add_entity_memory_candidates(candidates_by_domain, company_name)
     _add_profile_candidates(candidates_by_domain, company_name, metadata)
+    remove_mirror_candidates()
     source_health = _source_health_snapshot((metadata or {}).get("profile_url", ""))
     if source_health.get("host"):
         trace.append({"source": "exhibitor_profile_health", **source_health})
@@ -2171,6 +2184,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             bridge_sources, company_name, query, results, metadata,
         )
         _add_search_results(candidates_by_domain, company_name, query, results, metadata)
+        remove_mirror_candidates()
         return results
 
     primary_queries = _primary_queries(company_name, metadata)
@@ -2286,6 +2300,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
 
     if config.ENABLE_GOOGLE_PLACES:
         _add_google_places_results(candidates_by_domain, company_name)
+        remove_mirror_candidates()
         trace.append({
             "source": "google_places",
             "status": "consulted_for_identity_corroboration",
@@ -2301,6 +2316,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         and (not best or best["score"] < config.MIN_ACCEPT_SCORE or not has_domain_identity_candidate)
     ):
         _add_domain_guesses(candidates_by_domain, company_name)
+
+    remove_mirror_candidates()
 
     discovery_coverage.finalize_company(
         company_name,
@@ -2346,6 +2363,13 @@ def find_targeted_candidates(
         _add_search_results(
             candidates_by_domain, company_name, query, results, metadata,
         )
+        rejected = [
+            domain for domain in candidates_by_domain
+            if scorer.is_mirror_directory_domain(company_name, domain)
+        ]
+        for domain in rejected:
+            candidates_by_domain.pop(domain, None)
+            runtime.record("search.candidate.mirror_rejected")
         trace.append({
             "source": config.SEARCH_PROVIDER,
             "query": query,

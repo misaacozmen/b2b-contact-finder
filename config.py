@@ -381,6 +381,14 @@ EXCLUDED_DOMAINS = [
     "rocketreach.co",
 ]
 
+# Services that publish a mirrored company page under a host shaped like
+# ``<company-domain>.<mirror-service>``.  These pages may repeat first-party
+# contact details, but the host is owned by the mirror and is never the
+# company's official website.
+MIRROR_DIRECTORY_DOMAINS = [
+    "siteindices.com",
+]
+
 AMBIGUOUS_BRAND_WORDS = [
     "fashion",
     "white",

@@ -134,6 +134,23 @@ def is_excluded_domain(domain: str) -> bool:
     return any(domain == excluded or domain.endswith(f".{excluded}") for excluded in config.EXCLUDED_DOMAINS)
 
 
+def is_mirror_directory_domain(company_name: str, domain: str) -> bool:
+    """Identify company-shaped subdomains owned by known mirror services."""
+    host = normalize_domain(domain)
+    company_core = "".join(domain_identity_tokens(company_name))
+    if not host or not company_core:
+        return False
+    for mirror_domain in config.MIRROR_DIRECTORY_DOMAINS:
+        mirror = normalize_domain(mirror_domain)
+        suffix = f".{mirror}"
+        if not mirror or not host.endswith(suffix):
+            continue
+        prefix_labels = host[: -len(suffix)].split(".")
+        if any(re.sub(r"[^a-z0-9]", "", label) == company_core for label in prefix_labels):
+            return True
+    return False
+
+
 def is_public_body_domain(domain: str) -> bool:
     domain = normalize_domain(domain)
     return domain.endswith((

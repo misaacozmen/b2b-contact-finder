@@ -10,6 +10,32 @@ class GeneralizationGuardrailTests(unittest.TestCase):
         self.assertTrue(scorer.is_excluded_domain("29981-tr.all.biz"))
         self.assertTrue(scorer.is_excluded_domain("www.alibaba.com.tr"))
 
+    def test_company_shaped_mirror_subdomain_is_rejected(self):
+        self.assertTrue(scorer.is_mirror_directory_domain(
+            "BIRLESIK TEMIZLIK", "birlesiktemizlik.com.siteindices.com",
+        ))
+        self.assertFalse(scorer.is_mirror_directory_domain(
+            "BASKA FIRMA", "birlesiktemizlik.com.siteindices.com",
+        ))
+        self.assertFalse(scorer.is_mirror_directory_domain(
+            "BIRLESIK TEMIZLIK", "birlesiktemizlik.com",
+        ))
+
+    def test_search_drops_company_shaped_mirror_before_scoring(self):
+        candidates = {}
+        search._add_search_results(
+            candidates,
+            "BIRLESIK TEMIZLIK",
+            '"BIRLESIK TEMIZLIK" official website',
+            [{
+                "href": "https://birlesiktemizlik.com.siteindices.com/",
+                "title": "Birlesik Temizlik",
+                "body": "Birlesik Temizlik resmi web sitesi",
+            }],
+            {"sector": "Temizlik"},
+        )
+        self.assertEqual(candidates, {})
+
     def test_legal_name_phrase_requires_words_together(self):
         company = "ARPACK MAKİNE SANAYİ VE TİCARET AŞ"
         self.assertTrue(scorer.legal_name_phrase_match(company, "Arpack Makine iletişim bilgileri"))
