@@ -564,7 +564,7 @@ METADATA_CONTEXTS = {
             "olive", "olives", "olive oil", "pickle", "pickles", "pepper paste",
             "pulp", "puree", "tomato paste", "hazelnut", "pistachio", "kadayif",
             "frozen food", "meat", "mineral water", "carbonated", "fruit", "juice",
-            "snack", "fmcg",
+            "snack", "fmcg", "fish", "seafood", "balik", "su urunleri",
         ],
     },
     "ambalaj": {
@@ -579,6 +579,17 @@ METADATA_CONTEXTS = {
         "aliases": [
             "tekstil", "giyim", "moda", "fashion", "clothing", "apparel", "garment",
             "ready to wear", "hazir giyim", "triko",
+        ],
+    },
+    "ev_mutfak": {
+        "query_term": "ev mutfak esyalari",
+        "aliases": [
+            "ev ve mutfak esyalari", "ev mutfak", "zuccaciye", "home and kitchen",
+            "homeware", "housewares", "kitchenware", "cookware", "tableware",
+            "dinnerware", "glassware", "porcelain", "ceramic", "cutlery",
+            "flatware", "kitchen appliances", "small domestic appliances",
+            "sofra", "mutfak", "porselen", "seramik", "cam esya", "catal bicak",
+            "tencere", "tava", "pisirme gerecleri",
         ],
     },
     "makine": {

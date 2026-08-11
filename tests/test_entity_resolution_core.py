@@ -788,6 +788,5 @@ class EntityResolutionCoreTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "unresolved")
 
-
 if __name__ == "__main__":
     unittest.main()

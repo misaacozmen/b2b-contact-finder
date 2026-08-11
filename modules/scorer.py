@@ -489,14 +489,22 @@ def metadata_contexts(metadata: dict | None) -> list[str]:
 
 
 def page_matches_metadata_context(page_text: str, context: str) -> bool:
+    return metadata_context_occurrence_count(page_text, context) > 0
+
+
+def metadata_context_occurrence_count(page_text: str, context: str) -> int:
     details = config.METADATA_CONTEXTS.get(context)
     if not details:
-        return False
+        return 0
     text = " ".join(_raw_company_tokens(page_text))
     haystack = f" {text} "
-    return any(
-        alias and f" {alias} " in haystack
-        for alias in (" ".join(_raw_company_tokens(alias)) for alias in details["aliases"])
+    aliases = {
+        " ".join(_raw_company_tokens(alias))
+        for alias in details["aliases"]
+    }
+    return sum(
+        haystack.count(f" {alias} ")
+        for alias in aliases if alias
     )
 
 

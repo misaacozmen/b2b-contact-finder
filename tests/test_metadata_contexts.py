@@ -20,6 +20,36 @@ class MetadataContextTests(unittest.TestCase):
         self.assertEqual(scorer.metadata_contexts(metadata), ["ambalaj"])
         self.assertEqual(search._metadata_query_terms(metadata), ["ambalaj"])
 
+    def test_home_and_kitchen_sector_maps_to_ev_mutfak(self) -> None:
+        metadata = {"sector": "ZUCHEX - Ev ve Mutfak Eşyaları", "description": ""}
+        self.assertEqual(scorer.metadata_contexts(metadata), ["ev_mutfak"])
+        self.assertEqual(search._metadata_query_terms(metadata), ["ev mutfak esyalari"])
+        self.assertTrue(scorer.page_matches_metadata_context("Porcelain tableware and cookware", "ev_mutfak"))
+
+    def test_explicit_other_sector_is_a_hard_metadata_conflict(self) -> None:
+        score, reason = main._page_context_score(
+            "ALKAR",
+            [{"html": "Balık ürünleri ve seafood fish processing"}],
+            {"sector": "Ev ve Mutfak Eşyaları"},
+        )
+        self.assertEqual(score, -20)
+        self.assertEqual(reason, "metadata_context_conflict:ev_mutfak/gida")
+        self.assertTrue(main._is_hard_context_failure({
+            "context_failed": True,
+            "reasons": [reason],
+            "candidate": {"_identity_company": "ALKAR"},
+            "structured_identity": {},
+            "identity_assessment": {"strong_first_party_bundle": True},
+        }))
+
+    def test_unobserved_sector_remains_nonblocking(self) -> None:
+        score, reason = main._page_context_score(
+            "ABDIK", [{"html": "ABDIK kurumsal iletişim"}],
+            {"sector": "Ev ve Mutfak Eşyaları"},
+        )
+        self.assertEqual(score, 0)
+        self.assertEqual(reason, "metadata_context_not_observed:0/1")
+
     def test_personal_care_sector_maps_to_kozmetik(self) -> None:
         metadata = {"sector": "Kişisel Bakım Ürünleri", "description": ""}
         self.assertEqual(scorer.metadata_contexts(metadata), ["kozmetik"])
@@ -61,6 +91,41 @@ class MetadataContextTests(unittest.TestCase):
             "candidate": {"query": "search"},
         }
         self.assertTrue(main._is_hard_context_failure(evaluation))
+
+    def test_context_conflict_does_not_override_exact_compound_legal_identity(self) -> None:
+        evaluation = {
+            "context_failed": True,
+            "reasons": [
+                "metadata_context_conflict:ev_mutfak/ambalaj",
+                "page_identity_strong:2/2",
+                "legal_name_phrase_match:2",
+            ],
+            "candidate": {
+                "domain": "adfankastre.com.tr",
+                "url": "https://adfankastre.com.tr",
+                "_identity_company": "ADF ANKASTRE",
+            },
+        }
+        self.assertFalse(main._is_hard_context_failure(evaluation))
+
+    def test_exact_compound_legal_identity_neutralizes_context_conflict_before_assessment(self) -> None:
+        score, reasons = main._score_candidate_with_site(
+            "ADF ANKASTRE",
+            {"url": "https://adfankastre.com.tr", "score": 82, "reason": "test"},
+            {
+                "url": "https://adfankastre.com.tr",
+                "pages": [{
+                    "url": "https://adfankastre.com.tr",
+                    "html": "ADF Ankastre ambalaj ambalaj ambalaj",
+                }],
+            },
+            "",
+            [],
+            {"sector": "Ev ve Mutfak EÅŸyalarÄ±"},
+        )
+        self.assertGreaterEqual(score, 82)
+        self.assertIn("metadata_context_conflict_overridden_by_exact_compound_identity", reasons)
+        self.assertNotIn("context_gate_failed", reasons)
 
 
 if __name__ == "__main__":

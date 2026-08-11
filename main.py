@@ -344,6 +344,16 @@ def _page_context_score(company: str, pages: list[dict], metadata: dict | None =
     hits = sum(1 for context in metadata_contexts if scorer.page_matches_metadata_context(text, context))
     if hits:
         return 8, f"context_match:{hits}/{len(metadata_contexts)}"
+    conflicting_contexts = [
+        context for context in config.METADATA_CONTEXTS
+        if context not in metadata_contexts
+        and scorer.metadata_context_occurrence_count(text, context) >= 2
+    ]
+    if conflicting_contexts:
+        return -20, (
+            f"metadata_context_conflict:{'+'.join(metadata_contexts)}/"
+            f"{'+'.join(conflicting_contexts)}"
+        )
     return 0, f"metadata_context_not_observed:0/{len(metadata_contexts)}"
 
 
@@ -453,10 +463,23 @@ def _is_hard_context_failure(evaluation: dict) -> bool:
         reasons,
         evaluation.get("structured_identity", {}),
     )
+    if any(reason.startswith(("context_conflict:", "metadata_context_conflict:")) for reason in reasons):
+        company = evaluation.get("candidate", {}).get("_identity_company", "")
+        candidate = evaluation.get("candidate", {})
+        exact_compound_identity = (
+            len(scorer.domain_identity_tokens(company)) >= 2
+            and _exact_brand_domain(company, candidate)
+            and any(reason.startswith((
+                "structured_identity_medium:", "structured_identity_strong:",
+                "legal_name_phrase_match:", "legal_name_full_match:",
+                "legal_name_ownership_match:",
+            )) for reason in reasons)
+        )
+        # Sector context is a homonym guard for short/generic brands. It must
+        # not override a compound domain backed by first-party legal identity.
+        return not exact_compound_identity
     if assessment.get("strong_first_party_bundle"):
         return False
-    if any(reason.startswith(("context_conflict:", "metadata_context_conflict:")) for reason in reasons):
-        return True
     # Fair, directory and listing metadata is discovery-only. Failure to find
     # its wording on a first-party site can never be a hard conflict.
     if any(reason.startswith((
@@ -573,6 +596,21 @@ def _score_candidate_with_site(company: str, candidate: dict, crawl_result: dict
     structured_bonus, structured_reason, _ = _structured_identity_score(company, crawl_result["pages"])
     legal_name_bonus, legal_name_reason = _legal_name_identity_score(company, crawl_result["pages"])
     country_bonus, country_reason = _country_identity_score(crawl_result, normalized_phones)
+    exact_compound_identity = (
+        context_bonus < 0
+        and len(scorer.domain_identity_tokens(company)) >= 2
+        and _exact_brand_domain(company, candidate)
+        and (
+            structured_reason.startswith(("structured_identity_medium:", "structured_identity_strong:"))
+            or legal_name_reason.startswith((
+                "legal_name_phrase_match:", "legal_name_full_match:",
+                "legal_name_ownership_match:",
+            ))
+        )
+    )
+    if exact_compound_identity:
+        context_bonus = 0
+        context_reason = "metadata_context_conflict_overridden_by_exact_compound_identity"
     reasons.extend([page_reason, context_reason, email_reason, structured_reason, legal_name_reason, country_reason])
     if crawl_result.get("tls_insecure"):
         reasons.append("tls_insecure_transport")
