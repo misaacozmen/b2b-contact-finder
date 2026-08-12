@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import config
 from modules import scorer
-from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_memory, entity_registry, entity_resolution, entity_semantics, evidence, evidence_acquisition, evidence_ledger, excel, extractor, identity, linkedin_company, phone, publication_policy, quality_audit, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
+from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_memory, entity_registry, entity_resolution, entity_semantics, evidence, evidence_acquisition, evidence_ledger, excel, extractor, identity, linkedin_company, llm_arbiter, phone, publication_policy, quality_audit, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
 from modules.utils import ensure_directories, random_delay, setup_logging
 
 
@@ -456,6 +456,9 @@ def _is_hard_context_failure(evaluation: dict) -> bool:
     if not evaluation["context_failed"]:
         return False
 
+    if evaluation.get("llm_arbiter_evidence", {}).get("verdict") == "match":
+        return False
+
     reasons = evaluation["reasons"]
     assessment = evaluation.get("identity_assessment") or identity.assess(
         evaluation.get("candidate", {}).get("_identity_company", ""),
@@ -889,6 +892,8 @@ def _evaluation_evidence(evaluation: dict) -> dict:
         "linkedin_company_evidence": evaluation.get(
             "linkedin_company_evidence", {}
         ),
+        "llm_arbiter_evidence": evaluation.get("llm_arbiter_evidence", {}),
+        "llm_arbiter_decisions": evaluation.get("_llm_arbiter_decisions", []),
         "contact_publication": evaluation.get("contact_publication", {}),
         "identity_resolution": evaluation.get("_identity_resolution", ""),
         "automation": evaluation.get("_automation", {}),
@@ -1058,6 +1063,181 @@ def _try_linkedin_company_corroboration(
         if linkedin_evidence.get("verified"):
             break
     return entity_resolution.resolve_candidates(company, evaluations)
+
+
+def _llm_context_conflict_candidate(
+    company: str,
+    metadata: dict | None,
+    evaluation: dict,
+) -> bool:
+    """Select only review-bound context conflicts with meaningful identity proof."""
+    reasons = evaluation.get("reasons", [])
+    strong_independent_evidence = any(str(reason).startswith((
+        "structured_identity_medium:",
+        "structured_identity_strong:",
+        "legal_name_phrase_match:",
+        "legal_name_full_match:",
+        "legal_name_ownership_match:",
+        "email_domain_match",
+    )) for reason in reasons)
+    sector_context = str((metadata or {}).get("sector", "") or "").strip()
+    unresolved_generic_sector = bool(
+        sector_context
+        and _is_ambiguous_company_name(company)
+        and any(str(reason).startswith((
+            "metadata_context_not_observed:",
+            "metadata_context_missing:",
+            "metadata_context_conflict_overridden_by_exact_compound_identity",
+            "context_match:",
+        )) for reason in reasons)
+    )
+    return bool(
+        evaluation.get("crawl_result", {}).get("pages")
+        and strong_independent_evidence
+        and (
+            _is_hard_context_failure(evaluation)
+            or unresolved_generic_sector
+        )
+    )
+
+
+def _llm_arbiter_metadata(metadata: dict | None, company: str) -> tuple[str, str]:
+    metadata = metadata or {}
+    legal_title = next((
+        str(metadata.get(key, "") or "").strip()
+        for key in ("legal_name", "legal_title", "legal_company_name", "title")
+        if str(metadata.get(key, "") or "").strip()
+    ), company)
+    sector_context = " | ".join(dict.fromkeys(
+        str(metadata.get(key, "") or "").strip()
+        for key in ("sector", "category", "fair", "trade_show", "description")
+        if str(metadata.get(key, "") or "").strip()
+    ))
+    return legal_title, sector_context
+
+
+def _try_llm_arbitration(
+    company: str,
+    metadata: dict | None,
+    evaluations: list[dict],
+    resolution: entity_resolution.Resolution,
+) -> entity_resolution.Resolution:
+    """Arbitrate only close or context-conflicted candidates, then re-resolve."""
+    if not evaluations or not llm_arbiter.available():
+        return resolution
+    targets: dict[int, tuple[dict, set[str]]] = {}
+    plausible = [
+        item for item in evaluations
+        if item.get("crawl_result", {}).get("pages")
+        and item.get("identity_assessment", {}).get("provisionally_publishable")
+        and not item.get("_llm_arbiter_rejected")
+    ]
+    for left_index, left in enumerate(plausible[:4]):
+        for right in plausible[left_index + 1:4]:
+            if _close_identity_margin_conflict(company, left, right):
+                targets.setdefault(id(left), (left, set()))[1].add(
+                    "close_identity_margin_conflict"
+                )
+                targets.setdefault(id(right), (right, set()))[1].add(
+                    "close_identity_margin_conflict"
+                )
+    for evaluation in evaluations:
+        if evaluation.get("_llm_arbiter_rejected"):
+            continue
+        if _llm_context_conflict_candidate(company, metadata, evaluation):
+            targets.setdefault(id(evaluation), (evaluation, set()))[1].add(
+                "sector_context_conflict_with_identity_evidence"
+            )
+            break
+    if not targets:
+        return resolution
+    legal_title, sector_context = _llm_arbiter_metadata(metadata, company)
+    decisions: list[dict] = []
+    for evaluation, triggers in targets.values():
+        candidate = evaluation.get("candidate", {})
+        domain = scorer.normalize_domain(candidate.get("url", ""))
+        result = llm_arbiter.arbitrate(
+            company,
+            legal_title,
+            sector_context,
+            domain,
+            llm_arbiter.summarize_pages(
+                evaluation.get("crawl_result", {}).get("pages", [])
+            ),
+        )
+        arbiter_evidence = {
+            **result,
+            "candidate_domain": domain,
+            "triggers": sorted(triggers),
+        }
+        evaluation["llm_arbiter_evidence"] = arbiter_evidence
+        candidate["_llm_arbiter_evidence"] = arbiter_evidence
+        decisions.append(arbiter_evidence)
+        verdict = result.get("verdict")
+        if verdict == "no_match":
+            evaluation["_llm_arbiter_rejected"] = True
+            evaluation.setdefault("reasons", []).append(
+                f"llm_arbiter_no_match:{result.get('reason', '')}"
+            )
+        elif verdict == "match":
+            evaluation.setdefault("reasons", []).append(
+                f"llm_arbiter_match:{result.get('reason', '')}"
+            )
+        else:
+            evaluation.setdefault("reasons", []).append(
+                f"llm_arbiter_uncertain:{result.get('reason', '')}"
+            )
+    for evaluation in evaluations:
+        evaluation["_llm_arbiter_decisions"] = decisions
+    return entity_resolution.resolve_candidates(company, evaluations)
+
+
+def _evaluate_llm_rejection_fallbacks(
+    company: str,
+    metadata: dict | None,
+    ranked_identity: list[dict],
+    evaluations: list[dict],
+) -> list[dict]:
+    """Continue the bounded candidate waterfall after an arbiter rejection."""
+    rejected_count = sum(
+        bool(item.get("_llm_arbiter_rejected")) for item in evaluations
+    )
+    if not rejected_count:
+        return evaluations
+    evaluated_domains = {
+        scorer.normalize_domain(item.get("candidate", {}).get("url", ""))
+        for item in evaluations
+    }
+    fallbacks = [
+        item for item in ranked_identity
+        if (
+            item.get("crawl_result", {}).get("pages")
+            and scorer.normalize_domain(
+                item.get("candidate", {}).get("url", "")
+            ) not in evaluated_domains
+            and (
+                _full_crawl_worthy(company, item)
+                or item.get("identity_assessment", {}).get(
+                    "provisionally_publishable"
+                )
+            )
+        )
+    ][:rejected_count]
+    for light_evaluation in fallbacks:
+        full_evaluation = _evaluate_candidate_with_stage(
+            company, light_evaluation["candidate"], metadata,
+        )
+        if not full_evaluation.get("crawl_result", {}).get("pages"):
+            continue
+        evaluations.append(_preserve_identity_phase_evidence(
+            full_evaluation, light_evaluation,
+        ))
+        runtime.record("pipeline.llm_arbiter_fallback_candidates")
+    return sorted(
+        evaluations,
+        key=lambda item: _evaluation_rank_key(company, item),
+        reverse=True,
+    )
 
 
 def _evaluate_candidate_with_stage(
@@ -1979,6 +2159,15 @@ def _process_known_website(index: int, company: str, website: str, logger, metad
     evaluation = _evaluate_candidate(company, candidate, metadata)
     if not evaluation["crawl_result"]["pages"]:
         return None
+    resolution = entity_resolution.resolve_candidates(company, [evaluation])
+    resolution = _try_llm_arbitration(
+        company, metadata, [evaluation], resolution,
+    )
+    if evaluation.get("_llm_arbiter_rejected"):
+        return None
+    if resolution.status == "resolved" and resolution.selected is not None:
+        evaluation = resolution.selected
+        evaluation["_identity_resolution"] = resolution.reason
     row = _finalize_selected_evaluation(company, evaluation, metadata)
     return index, _attach_candidates(row, [candidate])
 
@@ -2419,6 +2608,19 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     if resolution.status == "unresolved":
         resolution = _try_linkedin_company_corroboration(
             company, ranked_evaluations, resolution,
+        )
+    resolution = _try_llm_arbitration(
+        company, metadata, ranked_evaluations, resolution,
+    )
+    if any(item.get("_llm_arbiter_rejected") for item in ranked_evaluations):
+        ranked_evaluations = _evaluate_llm_rejection_fallbacks(
+            company, metadata, ranked_identity, ranked_evaluations,
+        )
+        resolution = entity_resolution.resolve_candidates(
+            company, ranked_evaluations,
+        )
+        resolution = _try_llm_arbitration(
+            company, metadata, ranked_evaluations, resolution,
         )
     if resolution.status == "ambiguous":
         row = _empty_result(

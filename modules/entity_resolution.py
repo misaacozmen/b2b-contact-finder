@@ -57,6 +57,7 @@ class CandidateFingerprint:
     places_business_corroborated: bool
     structured_business_name_corroborated: bool
     linkedin_website_match: bool
+    llm_arbiter_match: bool
 
     @property
     def verified_identity(self) -> bool:
@@ -267,6 +268,17 @@ class CandidateFingerprint:
         )
 
     @property
+    def safe_llm_arbiter_corroborated_route(self) -> bool:
+        """Use a bounded semantic verdict to resolve a review-only conflict."""
+        return bool(
+            self.reachable
+            and self.eligible_role
+            and self.country_supported
+            and self.canonical_domain_consistent
+            and self.llm_arbiter_match
+        )
+
+    @property
     def domain_specificity(self) -> int:
         """Prefer the domain that names the requested entity, not a sibling."""
         if self.obvious_exact_domain:
@@ -316,6 +328,7 @@ class CandidateFingerprint:
             and not self.safe_places_contact_route
             and not self.safe_verified_first_party_route
             and not self.safe_linkedin_corroborated_route
+            and not self.safe_llm_arbiter_corroborated_route
         )
         if weak_country_homonym:
             return False
@@ -339,6 +352,7 @@ class CandidateFingerprint:
             or self.safe_short_brand_context_route
             or self.safe_verified_first_party_route
             or self.safe_linkedin_corroborated_route
+            or self.safe_llm_arbiter_corroborated_route
             or (
                 self.verified_identity
                 and (legal_identity or intrinsic_bundle)
@@ -609,6 +623,9 @@ def fingerprint(
         linkedin_website_match=bool(
             evaluation.get("linkedin_company_evidence", {}).get("verified")
         ),
+        llm_arbiter_match=bool(
+            evaluation.get("llm_arbiter_evidence", {}).get("verdict") == "match"
+        ),
     )
 
 
@@ -626,6 +643,7 @@ def _identity_key(item: tuple[dict, CandidateFingerprint]) -> tuple[int, ...]:
         int(value.safe_short_brand_context_route),
         int(value.safe_verified_first_party_route),
         int(value.safe_linkedin_corroborated_route),
+        int(value.safe_llm_arbiter_corroborated_route),
         value.domain_specificity,
         int(value.verified_identity),
         int(value.direct_entity_identity),
@@ -775,7 +793,10 @@ def resolve_candidates(
         for item in evaluations
         if item.get("crawl_result", {}).get("pages")
     ]
-    ready = [item for item in candidates if item[1].candidate_ready]
+    ready = [
+        item for item in candidates
+        if item[1].candidate_ready and not item[0].get("_llm_arbiter_rejected")
+    ]
     if not ready:
         return Resolution(
             "unresolved",
@@ -815,7 +836,11 @@ def resolve_candidates(
             else (
                 "candidate_resolved_by_linkedin_website_match"
                 if selected_fingerprint.safe_linkedin_corroborated_route
-                else "candidate_resolved_by_target_fingerprint"
+                else (
+                    "candidate_resolved_by_llm_arbiter_match"
+                    if selected_fingerprint.safe_llm_arbiter_corroborated_route
+                    else "candidate_resolved_by_target_fingerprint"
+                )
             )
         ),
     )

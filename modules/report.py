@@ -57,6 +57,9 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
     linkedin_company_requests = int(counters.get("api.linkedin_company.requests", 0))
     linkedin_company_blocked = int(counters.get("api.linkedin_company.budget_blocked", 0))
     linkedin_company_matches = int(counters.get("api.linkedin_company.matches", 0))
+    llm_arbiter_requests = int(counters.get("api.llm_arbiter.requests", 0))
+    llm_arbiter_blocked = int(counters.get("api.llm_arbiter.budget_blocked", 0))
+    llm_arbiter_tokens = int(counters.get("api.llm_arbiter.total_tokens", 0))
     places_requests = int(counters.get("api.google_places.requests", 0))
     crawler_requests = int(counters.get("http.crawler.requests", 0))
     candidate_count = int(counters.get("pipeline.candidates_discovered", 0))
@@ -144,6 +147,7 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
             f"Kimlik izi kanitlanamayan: {identity_unproved_count}; website erisim hatasi: {fetch_failed_count}; aday bulunamayan: {not_found_count}",
             f"P3 politika dusurmesi: {policy_downgrades}",
             f"P3 dusuk/kontrollu riskli yayin: {low_risk_publications}/{controlled_risk_publications}",
+            f"LLM hakem istek/butce engeli/token: {llm_arbiter_requests}/{llm_arbiter_blocked}/{llm_arbiter_tokens}",
             "--------------------------------",
             f"Ortalama skor: {average_score:.1f}",
             f"Kesfedilen aday/firma: {(candidate_count / total):.1f}" if total else "Kesfedilen aday/firma: 0.0",

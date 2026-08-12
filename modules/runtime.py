@@ -29,6 +29,9 @@ def reset() -> None:
             "api.linkedin_company.requests": max(
                 0, int(os.getenv("LINKEDIN_COMPANY_REQUEST_OFFSET", "0"))
             ),
+            "api.llm_arbiter.requests": max(
+                0, int(os.getenv("LLM_ARBITER_REQUEST_OFFSET", "0"))
+            ),
             "api.google_places.requests": max(
                 0, int(os.getenv("GOOGLE_PLACES_REQUEST_OFFSET", "0"))
             ),
@@ -115,6 +118,7 @@ def snapshot() -> dict:
             "search_queries": config.SEARCH_HTTP_REQUEST_BUDGET,
             "brightdata": config.BRIGHTDATA_REQUEST_BUDGET,
             "linkedin_company": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
+            "llm_arbiter": config.LLM_ARBITER_BUDGET,
             "google_places": config.GOOGLE_PLACES_REQUEST_BUDGET,
             "hunter": config.HUNTER_REQUEST_BUDGET,
             "hunter_domain_finder": config.HUNTER_REQUEST_BUDGET,
@@ -127,6 +131,7 @@ def snapshot() -> dict:
             "crawler_http_requests": round(counters.get("http.crawler.requests", 0) / companies, 3) if companies else 0,
             "brightdata_requests": round(counters.get("api.brightdata.requests", 0) / companies, 3) if companies else 0,
             "linkedin_company_requests": round(counters.get("api.linkedin_company.requests", 0) / companies, 3) if companies else 0,
+            "llm_arbiter_requests": round(counters.get("api.llm_arbiter.requests", 0) / companies, 3) if companies else 0,
         },
     }
 
