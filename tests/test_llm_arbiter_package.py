@@ -117,17 +117,32 @@ class LlmArbiterPackageTests(unittest.TestCase):
             runtime.snapshot()["counters"]["api.llm_arbiter.requests"], 0
         )
 
-    def test_match_adds_independent_candidate_ready_route(self):
+    def test_match_alone_does_not_add_candidate_ready_route(self):
         evaluation = _evaluation()
+        evaluation["reasons"] = [
+            "page_identity_medium:1/1", "country_identity_tr_text",
+            "metadata_context_conflict:ev_mutfak/gida",
+        ]
+        evaluation["structured_identity"] = {}
+        evaluation["email_source_url"] = ""
+        evaluation["has_contact"] = False
         before = entity_resolution.resolve_candidates("ALFA", [evaluation])
         self.assertEqual(before.status, "unresolved")
         evaluation["llm_arbiter_evidence"] = {
             "verdict": "match", "reason": "Faaliyet ve unvan örtüşüyor."
         }
         after = entity_resolution.resolve_candidates("ALFA", [evaluation])
+        self.assertEqual(after.status, "unresolved")
+        self.assertFalse(main._is_hard_context_failure(evaluation))
+
+    def test_match_with_same_site_contact_adds_supporting_route(self):
+        evaluation = _evaluation()
+        evaluation["llm_arbiter_evidence"] = {
+            "verdict": "match", "reason": "Marka ve faaliyet birlikte örtüşüyor."
+        }
+        after = entity_resolution.resolve_candidates("ALFA", [evaluation])
         self.assertEqual(after.status, "resolved")
         self.assertEqual(after.reason, "candidate_resolved_by_llm_arbiter_match")
-        self.assertFalse(main._is_hard_context_failure(evaluation))
 
     def test_no_match_rejects_candidate_and_reason_is_auditable(self):
         evaluation = _evaluation()
@@ -237,6 +252,14 @@ class LlmArbiterPackageTests(unittest.TestCase):
         )
         self.assertIn("e-ticaret ifadeleri sektör kanıtı değildir", prompt)
         self.assertIn("ürün/hizmet kategorisinden", prompt)
+
+    def test_prompt_requires_distinctive_company_name_overlap(self):
+        prompt = llm_arbiter._prompt(
+            "AGY MUTFAK", "AGY MUTFAK", "Ev ve Mutfak Eşyaları",
+            "ankaramutfak.com.tr", "Ankara Mutfak mutfak dolabı üretimi",
+        )
+        self.assertIn("SEKTÖR UYUMU TEK BAŞINA YETERLİ DEĞİLDİR", prompt)
+        self.assertIn("'AGY MUTFAK' ve 'Ankara Mutfak'", prompt)
 
     def test_page_summary_is_bounded_and_excludes_scripts(self):
         summary = llm_arbiter.summarize_pages([{

@@ -269,13 +269,23 @@ class CandidateFingerprint:
 
     @property
     def safe_llm_arbiter_corroborated_route(self) -> bool:
-        """Use a bounded semantic verdict to resolve a review-only conflict."""
+        """Use LLM semantics only as support for independent identity proof."""
+        independent_identity = bool(
+            self.structured_strength >= 2
+            or self.legal_strength >= 2
+            or self.same_site_contact
+            or self.places_phone_corroborated
+            or self.places_business_corroborated
+            or self.structured_business_name_corroborated
+            or self.linkedin_website_match
+        )
         return bool(
             self.reachable
             and self.eligible_role
             and self.country_supported
             and self.canonical_domain_consistent
             and self.llm_arbiter_match
+            and independent_identity
         )
 
     @property
