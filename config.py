@@ -83,12 +83,12 @@ LINKEDIN_COMPANY_REQUEST_HARD_CAP = max(
 )
 LINKEDIN_COMPANY_REQUEST_BUDGET = LINKEDIN_COMPANY_REQUEST_HARD_CAP
 ENABLE_LLM_ARBITER = os.getenv("ENABLE_LLM_ARBITER", "1") == "1"
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_API_BASE_URL = os.getenv(
-    "GROQ_API_BASE_URL", "https://api.groq.com/openai/v1"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_BASE_URL = os.getenv(
+    "OPENROUTER_API_BASE_URL", "https://openrouter.ai/api/v1"
 ).rstrip("/")
 LLM_ARBITER_MODEL = os.getenv(
-    "LLM_ARBITER_MODEL", "llama-3.3-70b-versatile"
+    "LLM_ARBITER_MODEL", "meta-llama/llama-3.3-70b-instruct"
 )
 LLM_ARBITER_BUDGET = max(0, int(os.getenv("LLM_ARBITER_BUDGET", "220")))
 LLM_ARBITER_TIMEOUT_SEC = max(

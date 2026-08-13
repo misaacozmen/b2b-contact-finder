@@ -106,7 +106,7 @@ class LlmArbiterPackageTests(unittest.TestCase):
         self.assertIn("provider_failure", result["reason"])
 
     def test_missing_key_never_reserves_or_calls_api(self):
-        with patch.object(config, "GROQ_API_KEY", ""), patch.object(
+        with patch.object(config, "OPENROUTER_API_KEY", ""), patch.object(
             config, "ENABLE_LLM_ARBITER", True,
         ):
             result = llm_arbiter.arbitrate(
@@ -135,7 +135,7 @@ class LlmArbiterPackageTests(unittest.TestCase):
         verdict = {
             "verdict": "no_match",
             "reason": "Site balıkçılık şirketini anlatıyor.",
-            "model": "llama-3.3-70b-versatile",
+            "model": "meta-llama/llama-3.3-70b-instruct",
         }
         with patch.object(llm_arbiter, "available", return_value=True), patch.object(
             llm_arbiter, "arbitrate", return_value=verdict,
@@ -244,6 +244,13 @@ class LlmArbiterPackageTests(unittest.TestCase):
         }])
         self.assertLessEqual(len(summary.split()), 320)
         self.assertNotIn("ignore me", summary)
+
+    def test_openrouter_fenced_json_is_accepted(self):
+        parsed = llm_arbiter._decode_json_object(
+            '```json\n{"verdict":"no_match","reason":"somut kanıt",'
+            '"detected_sector":"İnşaat","expected_sector":"Ev"}\n```'
+        )
+        self.assertEqual(parsed["verdict"], "no_match")
 
 
 if __name__ == "__main__":

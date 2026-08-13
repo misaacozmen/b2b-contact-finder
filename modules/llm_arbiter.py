@@ -1,4 +1,4 @@
-"""Optional Groq-based arbiter for bounded, ambiguous identity decisions."""
+"""Optional OpenRouter-based arbiter for bounded identity decisions."""
 
 from __future__ import annotations
 
@@ -34,7 +34,25 @@ class ArbiterClient(Protocol):
     def generate(self, prompt: str, response_schema: dict) -> dict: ...
 
 
-class GroqClient:
+def _decode_json_object(text: str) -> dict:
+    """Accept a JSON object even if a provider wraps it in a Markdown fence."""
+    clean = str(text or "").strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.I)
+        clean = re.sub(r"\s*```$", "", clean)
+    try:
+        payload = json.loads(clean)
+    except json.JSONDecodeError:
+        start, end = clean.find("{"), clean.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        payload = json.loads(clean[start:end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("response_is_not_json_object")
+    return payload
+
+
+class OpenRouterClient:
     """Small REST client so unit tests can inject a network-free fake."""
 
     def __init__(self, api_key: str, model: str, timeout_sec: int) -> None:
@@ -46,7 +64,7 @@ class GroqClient:
         response = None
         for attempt in range(3):
             response = requests.post(
-                f"{config.GROQ_API_BASE_URL}/chat/completions",
+                f"{config.OPENROUTER_API_BASE_URL}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
@@ -69,7 +87,7 @@ class GroqClient:
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0,
-                    "max_tokens": 180,
+                    "max_tokens": 260,
                     "response_format": {"type": "json_object"},
                 },
                 timeout=self.timeout_sec,
@@ -88,7 +106,7 @@ class GroqClient:
         response.raise_for_status()
         payload = response.json()
         text = str(payload["choices"][0]["message"]["content"])
-        result = json.loads(text)
+        result = _decode_json_object(text)
         result["usage"] = payload.get("usage", {})
         return result
 
@@ -96,7 +114,7 @@ class GroqClient:
 def available() -> bool:
     return bool(
         config.ENABLE_LLM_ARBITER
-        and config.GROQ_API_KEY
+        and config.OPENROUTER_API_KEY
         and config.SEARCH_CACHE_MODE != "replay"
     )
 
@@ -170,8 +188,8 @@ def arbitrate(
     if not runtime.reserve_api("llm_arbiter", config.LLM_ARBITER_BUDGET):
         return {"verdict": "uncertain", "reason": "llm_arbiter_budget_blocked"}
     runtime.wait_for_request_slot()
-    active_client = client or GroqClient(
-        config.GROQ_API_KEY,
+    active_client = client or OpenRouterClient(
+        config.OPENROUTER_API_KEY,
         config.LLM_ARBITER_MODEL,
         config.LLM_ARBITER_TIMEOUT_SEC,
     )
