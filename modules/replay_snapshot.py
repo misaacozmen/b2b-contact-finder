@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import json
@@ -10,12 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from modules import runtime
+from modules import redaction, runtime
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 3
 _LOCK = threading.Lock()
-_ENTRIES: dict[tuple[str, str, str, int], Any] = {}
+_ENTRIES: dict[tuple[str, str, str, int], dict[str, Any]] = {}
 _LOADED_FROM = ""
 
 
@@ -27,35 +28,47 @@ def reset() -> None:
 
 
 def _safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): _safe(item)
-            for key, item in value.items()
-            if str(key).casefold() not in {
-                "api_key", "apikey", "access_token", "authorization", "password", "_secret",
-            }
-        }
-    if isinstance(value, (list, tuple)):
-        return [_safe(item) for item in value]
-    if isinstance(value, set):
-        return sorted(_safe(item) for item in value)
-    return value
+    return copy.deepcopy(redaction.sanitize(value))
+
+
+def _key_digest(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _prefix_digests(value: str) -> list[str]:
+    """Hash structured cache-key prefixes without persisting their contents."""
+    text = str(value)
+    return sorted({
+        _key_digest(text[: index + 1])
+        for index, character in enumerate(text)
+        if character == "|"
+    })
 
 
 def record(store: str, namespace: str, key: str, schema_version: int, value: Any) -> None:
-    marker = (str(store), str(namespace), str(key), int(schema_version))
+    marker = (
+        str(store), str(namespace), _key_digest(str(key)),
+        int(schema_version),
+    )
     with _LOCK:
-        _ENTRIES[marker] = _safe(value)
+        _ENTRIES[marker] = {
+            "key_hint": "[REDACTED]",
+            "prefix_sha256": _prefix_digests(str(key)),
+            "value": _safe(value),
+        }
 
 
 def lookup(store: str, namespace: str, key: str, schema_version: int) -> tuple[bool, Any]:
-    marker = (str(store), str(namespace), str(key), int(schema_version))
+    marker = (
+        str(store), str(namespace), _key_digest(str(key)),
+        int(schema_version),
+    )
     with _LOCK:
         if marker not in _ENTRIES:
             return False, None
-        value = _ENTRIES[marker]
+        value = _ENTRIES[marker]["value"]
     runtime.record(f"snapshot.{namespace}.hit")
-    return True, value
+    return True, _safe(value)
 
 
 def lookup_prefix(
@@ -69,13 +82,14 @@ def lookup_prefix(
     This exists for replay compatibility when bounded crawl settings (for
     example contact seed lists) changed after a snapshot was recorded.
     """
+    prefix_digest = _key_digest(str(key_prefix))
     with _LOCK:
         matches = [
-            value
-            for marker, value in _ENTRIES.items()
+            entry["value"]
+            for marker, entry in _ENTRIES.items()
             if marker[0] == str(store)
             and marker[1] == str(namespace)
-            and marker[2].startswith(str(key_prefix))
+            and prefix_digest in entry.get("prefix_sha256", [])
             and marker[3] == int(schema_version)
         ]
     if not matches:
@@ -86,7 +100,7 @@ def lookup_prefix(
         if isinstance(item, dict) else 0,
     )
     runtime.record(f"snapshot.{namespace}.prefix_hit")
-    return True, value
+    return True, _safe(value)
 
 
 def _entry_rows() -> list[dict]:
@@ -96,11 +110,13 @@ def _entry_rows() -> list[dict]:
         {
             "store": marker[0],
             "namespace": marker[1],
-            "key": marker[2],
+            "key_sha256": marker[2],
+            "key_hint": "[REDACTED]",
+            "prefix_sha256": list(entry.get("prefix_sha256", [])),
             "schema_version": marker[3],
-            "value": value,
+            "value": _safe(entry["value"]),
         }
-        for marker, value in sorted(items, key=lambda item: item[0])
+        for marker, entry in sorted(items, key=lambda item: item[0])
     ]
 
 
@@ -136,22 +152,45 @@ def load(path: Path, *, max_uncompressed_bytes: int) -> dict:
     if len(raw) > int(max_uncompressed_bytes):
         raise ValueError("replay snapshot exceeds uncompressed size limit")
     payload = json.loads(raw.decode("utf-8"))
-    if payload.get("format_version") != FORMAT_VERSION:
+    format_version = payload.get("format_version")
+    if format_version not in {1, FORMAT_VERSION}:
         raise ValueError("unsupported replay snapshot format")
     entries = payload.get("entries", [])
     if not isinstance(entries, list) or payload.get("entry_count") != len(entries):
         raise ValueError("invalid replay snapshot entry manifest")
     if hashlib.sha256(_canonical(entries)).hexdigest() != payload.get("entries_sha256"):
         raise ValueError("replay snapshot integrity check failed")
-    loaded: dict[tuple[str, str, str, int], Any] = {}
+    loaded: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     for entry in entries:
+        raw_key = str(entry.get("key", ""))
+        digest = (
+            str(entry.get("key_sha256", ""))
+            if format_version == FORMAT_VERSION
+            else _key_digest(raw_key)
+        )
+        if len(digest) != 64:
+            raise ValueError("invalid replay snapshot key digest")
+        prefix_digests = (
+            list(entry.get("prefix_sha256", []))
+            if format_version == FORMAT_VERSION
+            else _prefix_digests(raw_key)
+        )
+        if not all(
+            isinstance(item, str) and len(item) == 64
+            for item in prefix_digests
+        ):
+            raise ValueError("invalid replay snapshot prefix digest")
         marker = (
             str(entry["store"]),
             str(entry["namespace"]),
-            str(entry["key"]),
+            digest,
             int(entry["schema_version"]),
         )
-        loaded[marker] = entry.get("value")
+        loaded[marker] = {
+            "key_hint": "[REDACTED]",
+            "prefix_sha256": sorted(set(prefix_digests)),
+            "value": _safe(entry.get("value")),
+        }
     with _LOCK:
         _ENTRIES.update(loaded)
         _LOADED_FROM = str(path)

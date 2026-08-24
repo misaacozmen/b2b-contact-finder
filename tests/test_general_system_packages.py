@@ -184,7 +184,7 @@ class SmartOfficialSiteMappingTests(unittest.TestCase):
 
     def test_primary_contacts_output_receives_only_publishable_rows(self):
         rows = [
-            {"company": "Verified", "status": "OK_HIGH_CONFIDENCE", "website": "https://verified.example"},
+            {"company": "Verified", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://verified.example"},
             {"company": "Review", "status": "REVIEW_NEEDED", "website": "https://review.example"},
         ]
         with patch("main.evidence.write_jsonl"), patch(

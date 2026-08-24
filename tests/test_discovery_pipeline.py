@@ -160,7 +160,9 @@ class DiscoveryPipelineTests(unittest.TestCase):
                 return None, "http_403"
             return None, "http_404"
 
-        with patch("modules.crawler._try_fetch", side_effect=fake_fetch), patch(
+        with patch.object(config, "ENABLE_JS_FALLBACK", True), patch(
+            "modules.crawler._try_fetch", side_effect=fake_fetch
+        ), patch(
             "modules.crawler._try_render",
             return_value=("<html>info@example.com</html>", None),
         ) as render:
@@ -371,6 +373,23 @@ class DiscoveryPipelineTests(unittest.TestCase):
             emails = hunter.find_domain_emails("example.com")
         self.assertEqual(emails, [{"email": "info@example.com", "confidence": 90, "sources": []}])
 
+    def test_hunter_redacts_api_key_from_request_errors(self) -> None:
+        api_key = "hunter-secret-api-key"
+        error = hunter.requests.RequestException(
+            f"request failed: https://api.hunter.io/v2/domain-search?domain=example.com&api_key={api_key}&limit=10"
+        )
+        with patch.object(hunter, "is_enabled", return_value=True), patch.object(
+            config, "HUNTER_API_KEY", api_key,
+        ), patch("modules.hunter.runtime.reserve_api", return_value=True), patch(
+            "modules.hunter.runtime.wait_for_request_slot"
+        ), patch("modules.hunter.requests.get", side_effect=error), self.assertLogs(
+            "contact_finder", level="WARNING"
+        ) as captured:
+            self.assertEqual(hunter.find_domain_emails("example.com"), [])
+        logged = "\n".join(captured.output)
+        self.assertNotIn(api_key, logged)
+        self.assertIn("api_key=[REDACTED]", logged)
+
     def test_fallback_search_runs_after_primary_miss(self) -> None:
         original_max = config.MAX_SEARCH_QUERIES_PER_COMPANY
         try:
@@ -570,7 +589,9 @@ class DiscoveryPipelineTests(unittest.TestCase):
         self.assertEqual(len(result["pages"]), 1)
 
     def test_crawler_renders_root_after_http_403(self) -> None:
-        with patch("modules.crawler._try_fetch", return_value=(None, "http_403")), patch(
+        with patch.object(config, "ENABLE_JS_FALLBACK", True), patch(
+            "modules.crawler._try_fetch", return_value=(None, "http_403")
+        ), patch(
             "modules.crawler._try_render", return_value=("<html><body>Example Brand</body></html>", None)
         ) as render:
             result = crawler.fetch_site("https://example.com")

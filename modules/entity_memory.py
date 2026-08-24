@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone
 
 import config
-from modules import scorer
+from modules import publication_policy, redaction, scorer
 
 
 _LOCK = threading.Lock()
@@ -53,7 +53,7 @@ def remember(rows: list[dict]) -> int:
     additions: list[dict] = []
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for row in rows:
-        if not str(row.get("status", "")).startswith("OK_"):
+        if not publication_policy.is_publishable_row(row):
             continue
         evaluation = row.get("__evaluation", {})
         if not isinstance(evaluation, dict):
@@ -108,5 +108,5 @@ def remember(rows: list[dict]) -> int:
             "w", encoding="utf-8"
         ) as handle:
             for item in keyed.values():
-                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+                handle.write(json.dumps(redaction.sanitize(item), ensure_ascii=False) + "\n")
     return len(additions)

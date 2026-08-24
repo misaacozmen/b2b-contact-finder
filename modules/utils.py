@@ -36,13 +36,26 @@ def ensure_directories() -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
 
 
+class RedactingFormatter(logging.Formatter):
+    """Log formatter that intercepts all formatted log strings and redacts sensitive credentials."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        from modules import redaction
+
+        formatted = super().format(record)
+        return redaction.redact_log_text(formatted)
+
+
 def setup_logging() -> logging.Logger:
     ensure_directories()
     logger = logging.getLogger("contact_finder")
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()
+    logger.propagate = False
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    formatter = RedactingFormatter("%(asctime)s | %(levelname)s | %(message)s")
 
     file_handler = logging.FileHandler(config.LOG_FILE, encoding="utf-8")
     file_handler.setFormatter(formatter)
@@ -53,6 +66,16 @@ def setup_logging() -> logging.Logger:
     logger.addHandler(console_handler)
 
     return logger
+
+
+def close_logging() -> None:
+    logger = logging.getLogger("contact_finder")
+    for handler in logger.handlers[:]:
+        try:
+            handler.flush()
+        finally:
+            handler.close()
+            logger.removeHandler(handler)
 
 
 def random_delay(min_sec: float | None = None, max_sec: float | None = None) -> None:

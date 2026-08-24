@@ -1,13 +1,19 @@
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import requests
 
 from modules.exhibitor_scraper import (
+    _absolute_url,
+    _decode_body,
     _brand_catalog_list_rows,
     _fold,
+    _get,
     _maktek_list_rows,
     _maktek_profile_details,
     _merge_brand_catalog_profile,
+    _post_json,
     scrape_maktek,
 )
 
@@ -59,6 +65,102 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class MaktekScraperTests(unittest.TestCase):
+    def test_bounded_decoder_detects_legacy_turkish_encoding(self):
+        response = Mock(headers={}, encoding=None)
+        self.assertEqual(
+            _decode_body(
+                response,
+                bytes([0xDD]) + b"leti" + bytes([0xFE]) + b"im "
+                + bytes([0xDE]) + b"irket",
+            ),
+            "\u0130leti\u015fim \u015eirket",
+        )
+
+    def test_bounded_fetch_never_reads_unbounded_apparent_encoding(self):
+        response = Mock(status_code=200, headers={}, encoding=None)
+        response.iter_content.return_value = [b"<html>ok</html>"]
+        response.close = Mock()
+        type(response).apparent_encoding = property(
+            lambda _self: (_ for _ in ()).throw(AssertionError("unbounded read"))
+        )
+        session = Mock()
+        session.get.return_value = response
+        with patch(
+            "modules.exhibitor_scraper.network_guard.validate_public_http_url",
+            return_value=(True, "public_dns"),
+        ):
+            self.assertEqual(_get(session, "https://fair.example/list"), "<html>ok</html>")
+        response.close.assert_called_once_with()
+
+    def test_beauty_post_blocks_private_redirect(self):
+        redirect = Mock(
+            status_code=302,
+            headers={"location": "http://127.0.0.1/admin"},
+        )
+        redirect.close = Mock()
+        session = Mock()
+        session.post.return_value = redirect
+        with patch(
+            "modules.exhibitor_scraper.network_guard.validate_public_http_url",
+            return_value=(True, "public_dns"),
+        ), self.assertRaises(requests.exceptions.InvalidURL):
+            _post_json(
+                session,
+                "https://beautyeurasia.com/list",
+                data={"start": "0"},
+                headers={},
+            )
+        redirect.close.assert_called_once_with()
+
+    def test_beauty_post_rejects_declared_oversized_response(self):
+        response = Mock(
+            status_code=200,
+            headers={"content-length": str(20 * 1024 * 1024)},
+            encoding="utf-8",
+        )
+        response.close = Mock()
+        session = Mock()
+        session.post.return_value = response
+        with patch(
+            "modules.exhibitor_scraper.network_guard.validate_public_http_url",
+            return_value=(True, "public_dns"),
+        ), self.assertRaisesRegex(requests.RequestException, "response_too_large"):
+            _post_json(
+                session,
+                "https://beautyeurasia.com/list",
+                data={"start": "0"},
+                headers={},
+            )
+        response.iter_content.assert_not_called()
+        response.close.assert_called_once_with()
+
+    def test_profile_url_must_stay_on_catalogue_domain(self):
+        self.assertEqual(
+            _absolute_url("https://fair.example/list", "/brand/acme"),
+            "https://fair.example/brand/acme",
+        )
+        self.assertEqual(
+            _absolute_url("https://fair.example/list", "http://127.0.0.1/admin"),
+            "",
+        )
+
+    def test_catalogue_fetch_blocks_private_redirect_before_request(self):
+        redirect = Mock(
+            status_code=302,
+            headers={"location": "https://internal.fair.example/admin"},
+        )
+        redirect.close = Mock()
+        session = Mock()
+        session.get.return_value = redirect
+        with patch(
+            "modules.exhibitor_scraper.network_guard.validate_public_http_url",
+            side_effect=[(True, "public_dns"), (False, "non_public_ip")],
+        ):
+            with self.assertRaises(requests.exceptions.InvalidURL):
+                _get(session, "https://fair.example/list")
+        session.get.assert_called_once()
+        redirect.close.assert_called_once_with()
+
     def test_fold_normalizes_turkish_dotless_i(self):
         self.assertEqual(_fold("Türkı\u0307ye"), "turkiye")
 

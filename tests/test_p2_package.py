@@ -190,7 +190,7 @@ class ContactDecisionP2Tests(unittest.TestCase):
 
 
 class RecoveryAndProvenanceP2Tests(unittest.TestCase):
-    def test_render_policy_blocks_cross_site_active_data_but_allows_passive_asset(self):
+    def test_render_policy_allows_only_the_dns_pinned_origin_host(self):
         with patch(
             "modules.crawler.network_guard.validate_public_http_url",
             return_value=(True, "public"),
@@ -199,19 +199,19 @@ class RecoveryAndProvenanceP2Tests(unittest.TestCase):
                 crawler._render_request_policy(
                     "orbita.example", "https://api.other.example/contacts", "fetch",
                 ),
-                (False, "cross_site_active_data"),
+                (False, "cross_site_request"),
             )
             self.assertEqual(
                 crawler._render_request_policy(
                     "orbita.example", "https://cdn.other.example/app.js", "script",
                 ),
-                (True, "allowed"),
+                (False, "cross_site_request"),
             )
             self.assertEqual(
                 crawler._render_request_policy(
                     "orbita.example", "https://api.orbita.example/contacts", "xhr",
                 ),
-                (True, "allowed"),
+                (False, "cross_site_request"),
             )
 
     def test_retry_after_header_controls_bounded_backoff(self):

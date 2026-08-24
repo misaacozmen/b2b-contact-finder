@@ -19,6 +19,13 @@ EXCLUDED_ROLES = {
 }
 
 
+def is_publishable_row(row: dict) -> bool:
+    return (
+        row.get("status") in OK_STATUSES
+        and row.get("publication_eligible") is True
+    )
+
+
 def _has_reason(reasons: list[str], prefixes: tuple[str, ...]) -> bool:
     return any(str(reason).startswith(prefixes) for reason in reasons)
 
@@ -81,6 +88,8 @@ def evaluate(
         "unsupported_search_text_candidate_rejected",
     )):
         blockers.append("identity_or_context_safety_gate")
+    if "tls_insecure_transport" in reasons:
+        blockers.append("tls_certificate_unverified")
 
     support_count = int(assessment.get("support_count", 0) or 0)
     bundle_components = int(assessment.get("first_party_bundle_components", 0) or 0)

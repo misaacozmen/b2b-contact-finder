@@ -1,19 +1,26 @@
+import json
 import re
 import time
 import unicodedata
 from html import unescape
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from charset_normalizer import from_bytes
 
 import config
+from modules import network_guard
 
 
 HEADERS = {
     "User-Agent": config.USER_AGENT,
     "Accept-Language": "tr,en;q=0.8",
 }
+
+
+def _session() -> requests.Session:
+    return network_guard.harden_session(requests.Session())
 
 
 def _clean(value: str) -> str:
@@ -27,8 +34,22 @@ def _fold(value: str) -> str:
     return folded.replace("ı", "i")
 
 
+def _catalog_host(url: str) -> str:
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+    return host.casefold().removeprefix("www.")
+
+
 def _absolute_url(base_url: str, href: str) -> str:
-    return urljoin(base_url, href)
+    resolved = urljoin(base_url, href)
+    parsed = urlparse(resolved)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    if not _catalog_host(base_url) or _catalog_host(base_url) != _catalog_host(resolved):
+        return ""
+    return resolved
 
 
 def _normalize_website(value: str) -> str:
@@ -42,20 +63,148 @@ def _normalize_website(value: str) -> str:
     return value
 
 
+def _bounded_body(response: requests.Response) -> bytes:
+    content_length = response.headers.get("content-length", "")
+    try:
+        declared_size = int(content_length) if content_length else 0
+    except ValueError:
+        declared_size = 0
+    if declared_size > config.MAX_HTTP_RESPONSE_BYTES:
+        raise requests.RequestException("response_too_large")
+    chunks: list[bytes] = []
+    received = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        received += len(chunk)
+        if received > config.MAX_HTTP_RESPONSE_BYTES:
+            raise requests.RequestException("response_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decode_body(response: requests.Response, body: bytes) -> str:
+    encoding = response.encoding or requests.utils.get_encoding_from_headers(
+        response.headers
+    )
+    if not isinstance(encoding, str) or not encoding:
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError:
+            matches = list(from_bytes(body))
+            turkish = next(
+                (match for match in matches if match.encoding.casefold() in {
+                    "cp1254", "windows-1254", "iso8859_9", "iso-8859-9",
+                }),
+                None,
+            )
+            detected = turkish or (matches[0] if matches else None)
+            encoding = detected.encoding if detected is not None else "windows-1254"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
+def _request_bounded(
+    session: requests.Session,
+    url: str,
+    *,
+    method: str,
+    headers: dict[str, str],
+    data: dict | None = None,
+    timeout: int,
+) -> tuple[bytes, str]:
+    current = url
+    current_method = method.upper()
+    current_data = data
+    origin_host = _catalog_host(url)
+    for redirect_count in range(config.MAX_HTTP_REDIRECTS + 1):
+        allowed, reason = network_guard.validate_public_http_url(current)
+        if not allowed:
+            raise requests.exceptions.InvalidURL(f"blocked_network_target:{reason}")
+        request = session.post if current_method == "POST" else session.get
+        kwargs = {
+            "headers": headers,
+            "timeout": timeout,
+            "allow_redirects": False,
+            "stream": True,
+        }
+        if current_method == "POST":
+            kwargs["data"] = current_data
+        response = request(current, **kwargs)
+        try:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location", "").strip()
+                if not location:
+                    raise requests.exceptions.InvalidURL("redirect_without_location")
+                target = urljoin(current, location)
+                if origin_host != _catalog_host(target):
+                    raise requests.exceptions.InvalidURL(
+                        f"cross_domain_redirect:{target}"
+                    )
+                if redirect_count >= config.MAX_HTTP_REDIRECTS:
+                    raise requests.exceptions.TooManyRedirects(
+                        f"redirect_limit:{url}"
+                    )
+                if response.status_code == 303 or (
+                    response.status_code in {301, 302} and current_method == "POST"
+                ):
+                    current_method = "GET"
+                    current_data = None
+                current = target
+                continue
+            response.raise_for_status()
+            body = _bounded_body(response)
+            return body, _decode_body(response, body)
+        finally:
+            response.close()
+    raise requests.exceptions.TooManyRedirects(f"redirect_limit:{url}")
+
+
 def _get(session: requests.Session, url: str) -> str:
     last_error: requests.RequestException | None = None
     for attempt in range(config.MAX_RETRIES + 2):
         try:
-            response = session.get(url, headers=HEADERS, timeout=max(config.REQUEST_TIMEOUT_SEC, 30))
-            response.raise_for_status()
-            response.encoding = response.encoding or response.apparent_encoding
-            return response.text
+            return _request_bounded(
+                session,
+                url,
+                method="GET",
+                headers=HEADERS,
+                timeout=max(config.REQUEST_TIMEOUT_SEC, 30),
+            )[1]
         except requests.RequestException as exc:
             last_error = exc
+            if isinstance(
+                exc,
+                (requests.exceptions.InvalidURL, requests.exceptions.TooManyRedirects),
+            ):
+                raise
             if attempt >= config.MAX_RETRIES + 1:
                 break
             time.sleep((attempt + 1) * config.RETRY_BACKOFF_BASE_SEC)
     raise last_error  # type: ignore[misc]
+
+
+def _post_json(
+    session: requests.Session,
+    url: str,
+    *,
+    data: dict,
+    headers: dict[str, str],
+) -> dict:
+    _body, text = _request_bounded(
+        session,
+        url,
+        method="POST",
+        headers=headers,
+        data=data,
+        timeout=config.REQUEST_TIMEOUT_SEC,
+    )
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid_json_object")
+    return payload
 
 
 def _first_external_website(html: str, base_domain: str) -> str:
@@ -168,7 +317,7 @@ def _metalexpo_list_rows(
 def scrape_metalexpo(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
     del fetch_details, delay_sec
     list_url = "https://www.metalexpo.com.tr/katilimci-listesi-2026"
-    session = requests.Session()
+    session = _session()
     return _metalexpo_list_rows(_get(session, list_url), list_url)
 
 
@@ -206,7 +355,7 @@ def _texhibition_list_rows(
 def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
     del fetch_details
     listing_url = "https://www.texhibitionist.com/katilimcilar?v=1"
-    session = requests.Session()
+    session = _session()
     rows: list[dict] = []
     page = 1
     while True:
@@ -227,7 +376,7 @@ def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> l
 def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
     base_url = "https://www.ifco.com.tr"
     list_url = f"{base_url}/tr/fuar/katilimcilar"
-    session = requests.Session()
+    session = _session()
     rows_by_profile: dict[str, dict] = {}
     page = 1
 
@@ -282,7 +431,7 @@ def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
 def scrape_idos(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
     base_url = "https://crm.idos.events"
     catalogue_url = f"{base_url}/portal/catalogue/75"
-    session = requests.Session()
+    session = _session()
     rows_by_profile: dict[str, dict] = {}
     page_numbers: list[int] | None = None
 
@@ -398,7 +547,7 @@ def _beauty_detail_website(html: str) -> str:
 
 def scrape_beauty_eurasia(fetch_details: bool = True, delay_sec: float = 0.4) -> list[dict]:
     endpoint = "https://beautyeurasia.com/ERAForms/companies_list.php?l=tr&exhibition=24&y=2026"
-    session = requests.Session()
+    session = _session()
     headers = {
         **HEADERS,
         "X-Requested-With": "XMLHttpRequest",
@@ -409,9 +558,12 @@ def scrape_beauty_eurasia(fetch_details: bool = True, delay_sec: float = 0.4) ->
     length = 100
 
     while True:
-        response = session.post(endpoint, data=_beauty_datatable_payload(start, length), headers=headers, timeout=config.REQUEST_TIMEOUT_SEC)
-        response.raise_for_status()
-        payload = response.json()
+        payload = _post_json(
+            session,
+            endpoint,
+            data=_beauty_datatable_payload(start, length),
+            headers=headers,
+        )
         data = payload.get("data", [])
         if not data:
             break
@@ -652,7 +804,7 @@ def _maktek_list_rows(html: str, base_url: str) -> list[dict]:
 def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[dict]:
     base_url = "https://www.maktekfuari.com"
     list_url = f"{base_url}/katilimci-listesi?country=T%C3%9CRK%C4%B0YE"
-    session = requests.Session()
+    session = _session()
     rows_by_profile: dict[str, dict] = {}
     page = 1
     max_page = 1
@@ -691,7 +843,7 @@ def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[di
 def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[dict]:
     base_url = "https://www.foodistexpo.com"
     list_url = f"{base_url}/katilimci-listesi?country=T%C3%9CRK%C4%B0YE"
-    session = requests.Session()
+    session = _session()
     rows_by_profile: dict[str, dict] = {}
     page = 1
     max_page = 1

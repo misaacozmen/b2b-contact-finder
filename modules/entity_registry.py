@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import config
-from modules import relationship_graph, scorer
+from modules import publication_policy, redaction, relationship_graph, scorer
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -91,7 +91,7 @@ def write_observations(path: Path, rows: list[dict]) -> None:
                 "structured_urls": structured.get("urls", []),
                 "structured_same_as": structured.get("same_as", []),
                 "first_party_relationships": relationship_graph.observation_payload(structured),
-                "confidence": "observed_high" if str(row.get("status", "")).startswith("OK_") else "observed_review",
+                "confidence": "observed_high" if publication_policy.is_publishable_row(row) else "observed_review",
                 "observed_at": observed_at,
             }
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(redaction.sanitize(record), ensure_ascii=False) + "\n")

@@ -12,7 +12,6 @@ DNS_ACCEPTED = {"verified", "valid"}
 DNS_REJECTED = {"invalid_domain"}
 SAFE_RETRIEVAL_METHODS = {
     "http",
-    "http_tls_unverified",
     "browser_render",
     "pdf_text",
     "pdf_ocr",

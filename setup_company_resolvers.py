@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import getpass
 import json
 
 import config
-import main
+from modules import api_configuration
 
 
 def _save_settings(values: dict[str, bool]) -> None:
@@ -22,11 +23,11 @@ def _save_settings(values: dict[str, bool]) -> None:
 
 
 def configure(input_fn=input, secret_fn=getpass.getpass) -> dict[str, bool]:
-    saved = main._load_saved_api_keys()
+    saved = api_configuration.load_saved_api_keys()
 
-    brandfetch_active = main._prompt_api_state("Brandfetch Brand Search", input_fn)
+    brandfetch_active = api_configuration.prompt_api_state("Brandfetch Brand Search", input_fn)
     if brandfetch_active:
-        config.BRANDFETCH_CLIENT_ID = main._saved_or_prompted_key(
+        config.BRANDFETCH_CLIENT_ID = api_configuration.saved_or_prompted_key(
             "Brandfetch Client ID",
             "brandfetch",
             config.BRANDFETCH_CLIENT_ID,
@@ -36,9 +37,9 @@ def configure(input_fn=input, secret_fn=getpass.getpass) -> dict[str, bool]:
         )
         saved["brandfetch"] = config.BRANDFETCH_CLIENT_ID
 
-    hunter_active = main._prompt_api_state("Hunter Domain Finder", input_fn)
+    hunter_active = api_configuration.prompt_api_state("Hunter Domain Finder", input_fn)
     if hunter_active:
-        config.HUNTER_API_KEY = main._saved_or_prompted_key(
+        config.HUNTER_API_KEY = api_configuration.saved_or_prompted_key(
             "Hunter",
             "hunter",
             config.HUNTER_API_KEY,
@@ -49,13 +50,13 @@ def configure(input_fn=input, secret_fn=getpass.getpass) -> dict[str, bool]:
         saved["hunter"] = config.HUNTER_API_KEY
 
     if saved:
-        main._save_api_keys(saved)
+        api_configuration.save_api_keys(saved)
     states = {
         "brandfetch_domain_search": brandfetch_active,
         "hunter_domain_finder": hunter_active,
     }
     _save_settings(states)
-    main._apply_saved_resolver_configuration(saved)
+    api_configuration.apply_saved_resolver_configuration(saved)
 
     print("\nResolver kurulumu tamamlandi.")
     print(f"Brandfetch: {'aktif' if brandfetch_active else 'deaktif'}")
@@ -66,5 +67,13 @@ def configure(input_fn=input, secret_fn=getpass.getpass) -> dict[str, bool]:
     return states
 
 
+def cli(argv: list[str] | None = None) -> dict[str, bool]:
+    parser = argparse.ArgumentParser(
+        description="Brandfetch ve Hunter firma-domain resolver kurulumunu yapar."
+    )
+    parser.parse_args(argv)
+    return configure()
+
+
 if __name__ == "__main__":
-    configure()
+    cli()

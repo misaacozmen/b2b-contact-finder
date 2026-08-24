@@ -1,100 +1,57 @@
 import argparse
 import getpass
-import json
 import re
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from pathlib import Path
-from urllib.parse import urlparse
 
 import config
-from modules import scorer
-from modules import candidate_reranker, checkpoint, contact_decision, contact_publication, crawler, discovery_coverage, email_verifier, entity_memory, entity_registry, entity_resolution, entity_semantics, evidence, evidence_acquisition, evidence_ledger, excel, extractor, identity, linkedin_company, llm_arbiter, phone, publication_policy, quality_audit, relationship_graph, replay_snapshot, report, runtime, search, secrets_store
-from modules.utils import ensure_directories, random_delay, setup_logging
+from modules import (
+    api_configuration,
+    candidate_reranker,
+    checkpoint,
+    contact_decision,
+    contact_publication,
+    crawler,
+    discovery_coverage,
+    email_verifier,
+    entity_memory,
+    entity_registry,
+    entity_resolution,
+    entity_semantics,
+    evidence,
+    evidence_acquisition,
+    evidence_ledger,
+    excel,
+    extractor,
+    identity,
+    linkedin_company,
+    llm_arbiter,
+    output_artifacts,
+    phone,
+    pipeline_runner,
+    publication_policy,
+    quality_audit,
+    relationship_graph,
+    replay_snapshot,
+    report,
+    resolution_orchestrator,
+    result_factory,
+    run_budget,
+    runtime,
+    runtime_paths,
+    scorer,
+    search,
+    secrets_store,
+)
+from modules.utils import close_logging, ensure_directories, random_delay, setup_logging
 
 
 def _empty_result(company: str, status: str, reason: str = "", score: int = 0) -> dict:
-    return {
-        "company": company,
-        "website": "",
-        "website_source": "",
-        "email": "",
-        "email_source": "",
-        "email_source_url": "",
-        "alternative_emails": "",
-        "alternative_email_sources": "",
-        "email_verification": "not_checked",
-        "email_verification_reason": "no_email",
-        "email_publication_status": "suppressed",
-        "email_publication_reason": reason or status,
-        "phone": "",
-        "phone_source": "",
-        "phone_source_url": "",
-        "phone_label": "",
-        "alternative_phones": "",
-        "alternative_phone_sources": "",
-        "phone_publication_status": "suppressed",
-        "phone_publication_reason": reason or status,
-        "contact_policy_version": contact_publication.POLICY_VERSION,
-        "status": status,
-        "confidence": "none",
-        "score": score,
-        "publication_policy_version": publication_policy.POLICY_VERSION,
-        "publication_policy_action": "retain_legacy_abstention",
-        "publication_eligible": False,
-        "publication_safety_score": 0,
-        "publication_risk_index": 100,
-        "publication_risk_tier": "blocked",
-        "publication_blockers": reason or status,
-        "reason": reason,
-    }
+    return result_factory.empty_result(company, status, reason=reason, score=score)
 
 
 def _attach_candidates(row: dict, candidates: list[dict]) -> dict:
-    row["selected_website"] = row.get("selected_website") or row.get("website", "")
-    selected_domain = scorer.normalize_domain(row.get("selected_website", ""))
-    status = str(row.get("status", ""))
-    candidate_evaluations = []
-    for candidate in candidates:
-        history = candidate.setdefault("_stage_history", [])
-        if not any(item.get("stage") == "discovered" for item in history):
-            history.insert(0, {
-                "stage": "discovered",
-                "source": candidate.get("query", ""),
-                "score": candidate.get("score", 0),
-            })
-        candidate_domain = scorer.normalize_domain(candidate.get("url", ""))
-        if selected_domain and candidate_domain == selected_domain:
-            final_stage = "published" if status.startswith("OK_") else "selected_for_review"
-            if not any(item.get("stage") == final_stage for item in history):
-                history.append({"stage": final_stage, "status": status})
-        elif not any(item.get("stage") in {"rejected", "not_evaluated"} for item in history):
-            evaluated = any(
-                item.get("stage") in {"identity_evaluated", "full_evaluated"}
-                for item in history
-            )
-            history.append({
-                "stage": "rejected" if evaluated else "not_evaluated",
-                "reason": "lower_identity_rank_or_failed_gate" if evaluated else "candidate_limit_or_lower_rank",
-            })
-        candidate_evaluations.append({
-            "domain": candidate.get("domain") or candidate_domain,
-            "url": candidate.get("url", ""),
-            "source": candidate.get("query", ""),
-            "stages": history,
-        })
-    row["__candidates"] = candidates
-    row["__candidate_evaluations"] = candidate_evaluations
-    row["__search_trace"] = getattr(candidates, "trace", [])
-    row["__source_health"] = getattr(candidates, "source_health", {})
-    for idx, candidate in enumerate(candidates[:3], start=1):
-        row[f"candidate_{idx}_url"] = candidate.get("url", "")
-        row[f"candidate_{idx}_score"] = candidate.get("score", "")
-        row[f"candidate_{idx}_reason"] = candidate.get("reason", "")
-        row[f"candidate_{idx}_query"] = candidate.get("query", "")
-        row[f"candidate_{idx}_role"] = candidate.get("role", "")
-    return row
-
+    return output_artifacts.attach_candidates(row, candidates)
 
 def _email_domain(email: str) -> str:
     if "@" not in email:
@@ -528,26 +485,7 @@ def _unsafe_context_identity(company: str, evaluation: dict) -> bool:
 
 
 def _clear_unpublished_contacts(row: dict) -> None:
-    row["website"] = ""
-    row["website_source"] = ""
-    row["email"] = ""
-    row["email_source"] = ""
-    row["email_source_url"] = ""
-    row["alternative_emails"] = ""
-    row["alternative_email_sources"] = ""
-    row["email_verification"] = "not_checked"
-    row["email_verification_reason"] = "website_not_found"
-    row["email_publication_status"] = "suppressed"
-    row["email_publication_reason"] = "website_not_published"
-    row["phone"] = ""
-    row["phone_source"] = ""
-    row["phone_source_url"] = ""
-    row["phone_label"] = ""
-    row["alternative_phones"] = ""
-    row["alternative_phone_sources"] = ""
-    row["phone_publication_status"] = "suppressed"
-    row["phone_publication_reason"] = "website_not_published"
-
+    output_artifacts.clear_unpublished_contacts(row)
 
 def _apply_risk_caps(
     company: str,
@@ -836,76 +774,14 @@ def _evaluate_candidate(
 
 
 def _contact_output_fields(evaluation: dict) -> dict:
-    alternative_phones = evaluation.get("alternative_phones", [])
-    return {
-        "email": evaluation.get("email", ""),
-        "email_source": evaluation.get("email_source", ""),
-        "email_source_url": evaluation.get("email_source_url", ""),
-        "alternative_emails": "; ".join(evaluation.get("alternative_emails", [])),
-        "alternative_email_sources": "; ".join(
-            f"{item.get('value', '')} | {item.get('source_url', '')}"
-            for item in evaluation.get("alternative_email_records", [])
-        ),
-        "email_verification": evaluation.get("email_verification", "not_checked"),
-        "email_verification_reason": evaluation.get("email_verification_reason", ""),
-        "email_publication_status": evaluation.get(
-            "email_publication_status", "suppressed",
-        ),
-        "email_publication_reason": evaluation.get(
-            "email_publication_reason", "",
-        ),
-        "phone": evaluation.get("phone", ""),
-        "phone_source": evaluation.get("phone_source", ""),
-        "phone_source_url": evaluation.get("phone_source_url", ""),
-        "phone_label": evaluation.get("phone_label", ""),
-        "alternative_phones": "; ".join(
-            f"{item.get('value', '')} [{item.get('label', 'general')}]"
-            for item in alternative_phones
-        ),
-        "alternative_phone_sources": "; ".join(
-            f"{item.get('value', '')} | {item.get('source_url', '')}"
-            for item in alternative_phones
-        ),
-        "phone_publication_status": evaluation.get(
-            "phone_publication_status", "suppressed",
-        ),
-        "phone_publication_reason": evaluation.get(
-            "phone_publication_reason", "",
-        ),
-        "contact_policy_version": evaluation.get(
-            "contact_publication", {},
-        ).get("policy_version", contact_publication.POLICY_VERSION),
-    }
+    return output_artifacts.contact_output_fields(evaluation)
 
 
 def _evaluation_evidence(evaluation: dict) -> dict:
-    crawl_result = evaluation.get("crawl_result", {})
-    return {
-        "candidate": evaluation.get("candidate", {}),
-        "final_score": evaluation.get("final_score", 0),
-        "reasons": evaluation.get("reasons", []),
-        "structured_identity": evaluation.get("structured_identity", {}),
-        "semantic_identity": evaluation.get("semantic_identity", {}),
-        "identity_assessment": evaluation.get("identity_assessment", {}),
-        "publication_policy": evaluation.get("publication_policy", {}),
-        "rerank_evidence": evaluation.get("rerank_evidence", {}),
-        "linkedin_company_evidence": evaluation.get(
-            "linkedin_company_evidence", {}
-        ),
-        "llm_arbiter_evidence": evaluation.get("llm_arbiter_evidence", {}),
-        "llm_arbiter_decisions": evaluation.get("_llm_arbiter_decisions", []),
-        "contact_publication": evaluation.get("contact_publication", {}),
-        "identity_resolution": evaluation.get("_identity_resolution", ""),
-        "automation": evaluation.get("_automation", {}),
-        "crawl": {
-            "url": crawl_result.get("url", ""),
-            "cache_status": crawl_result.get("cache_status", ""),
-            "error": crawl_result.get("error", ""),
-            "pages": [page.get("url", "") for page in crawl_result.get("pages", [])],
-            "recovery_trace": crawl_result.get("recovery_trace", []),
-        },
-        "contacts": _contact_output_fields(evaluation),
-    }
+    return output_artifacts.evaluation_evidence(
+        evaluation,
+        contact_output_fields_fn=_contact_output_fields,
+    )
 
 
 def _complete_resolution_evidence(
@@ -915,128 +791,15 @@ def _complete_resolution_evidence(
     evaluations: list[dict],
     resolution: entity_resolution.Resolution,
 ) -> tuple[list[dict], entity_resolution.Resolution, evidence_acquisition.EvidenceState]:
-    """Run bounded, gap-specific search/crawl rounds for an unresolved entity."""
-    current = evidence_acquisition.analyze(
+    return resolution_orchestrator.complete_resolution_evidence(
         company,
+        metadata,
+        candidates,
         evaluations,
-        resolution_status=resolution.status,
-        metadata=metadata,
-        query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+        resolution,
+        evaluate_candidate_with_stage_fn=_evaluate_candidate_with_stage,
+        evaluation_rank_key_fn=_evaluation_rank_key,
     )
-    previous: evidence_acquisition.EvidenceState | None = None
-    rounds: list[dict] = []
-    attempted_scopes_by_domain: dict[str, set[str]] = {}
-    for round_number in range(1, config.MAX_AUTONOMOUS_RESOLUTION_ROUNDS + 1):
-        if not evidence_acquisition.should_continue(
-            previous,
-            current,
-            round_number - 1,
-            config.MAX_AUTONOMOUS_RESOLUTION_ROUNDS,
-        ):
-            break
-        runtime.record("autonomy.rounds")
-        targeted = search.find_targeted_candidates(
-            company,
-            metadata,
-            current.search_queries,
-            limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
-        )
-        known_domains = {
-            scorer.normalize_domain(item.get("url", "")) for item in candidates
-        }
-        for candidate in targeted:
-            domain = scorer.normalize_domain(candidate.get("url", ""))
-            if domain and domain not in known_domains:
-                candidates.append(candidate)
-                known_domains.add(domain)
-        candidates[:] = search.rank_candidates(candidates)
-
-        evaluation_by_domain = {
-            scorer.normalize_domain(item.get("candidate", {}).get("url", "")): item
-            for item in evaluations
-        }
-        candidate_by_domain = {
-            scorer.normalize_domain(candidate.get("url", "")): candidate
-            for candidate in candidates
-            if candidate.get("role") not in identity.EXCLUDED_ROLES
-        }
-        priority_domains = [
-            scorer.normalize_domain(
-                item.get("candidate", {}).get("url", "")
-            )
-            for item in resolution.contenders
-        ]
-        priority_domains.extend(
-            domain for domain in candidate_by_domain
-            if domain not in evaluation_by_domain
-        )
-        current_scopes = set(current.crawl_scopes)
-        selected_domains = list(dict.fromkeys(
-            domain for domain in priority_domains
-            if domain and (
-                domain not in attempted_scopes_by_domain
-                or (
-                    current_scopes
-                    and not current_scopes.issubset(
-                        attempted_scopes_by_domain[domain]
-                    )
-                )
-            )
-        ))[:config.MAX_TARGETED_CRAWLS_PER_ROUND]
-        if not selected_domains:
-            break
-        for domain in selected_domains:
-            runtime.record("autonomy.targeted_crawls")
-            attempted_scopes_by_domain.setdefault(domain, set()).update(
-                current_scopes
-            )
-            candidate = candidate_by_domain.get(domain)
-            if candidate is None:
-                candidate = evaluation_by_domain[domain]["candidate"]
-            evaluation_by_domain[domain] = _evaluate_candidate_with_stage(
-                company,
-                candidate,
-                metadata,
-                evidence_scopes=current.crawl_scopes,
-            )
-        evaluations = list(evaluation_by_domain.values())
-        evaluations.sort(
-            key=lambda item: _evaluation_rank_key(company, item),
-            reverse=True,
-        )
-        previous = current
-        resolution = entity_resolution.resolve_candidates(company, evaluations)
-        current = evidence_acquisition.analyze(
-            company,
-            evaluations,
-            resolution_status=resolution.status,
-            metadata=metadata,
-            query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
-        )
-        rounds.append({
-            "round": round_number,
-            "gaps_before": sorted(previous.gaps),
-            "gaps_after": sorted(current.gaps),
-            "crawl_scopes": list(previous.crawl_scopes),
-            "queries": list(previous.search_queries),
-            "evaluated_domains": selected_domains,
-            "resolution_status": resolution.status,
-        })
-        if resolution.status == "resolved":
-            break
-    automation = {
-        "rounds": rounds,
-        "remaining_evidence_gaps": sorted(current.gaps),
-        "terminal_reason": (
-            "resolved_after_evidence_completion"
-            if resolution.status == "resolved" and rounds
-            else current.terminal_reason
-        ),
-    }
-    for evaluation in evaluations:
-        evaluation["_automation"] = automation
-    return evaluations, resolution, current
-
 
 def _try_linkedin_company_corroboration(
     company: str,
@@ -1818,21 +1581,7 @@ def _merge_official_family_contacts(primary: dict, related: list[dict], company:
 
 
 def _confidence_status(score: int, has_contact: bool, reasons: list[str], identity_verified: bool = True) -> tuple[str, str]:
-    if not identity_verified:
-        reasons.append("website_identity_not_independently_verified")
-        return "REVIEW_NEEDED", "review"
-    if score >= config.HIGH_CONFIDENCE_SCORE and has_contact:
-        return "OK_HIGH_CONFIDENCE", "high"
-    if score >= config.MEDIUM_CONFIDENCE_SCORE and has_contact:
-        return "OK_MEDIUM_CONFIDENCE", "medium"
-    if score >= config.REVIEW_SCORE:
-        reasons.append("needs_manual_review")
-        return "REVIEW_NEEDED", "review"
-    # A successfully crawled, independently verified official website must not
-    # disappear merely because a sector/context penalty pulled its numeric score
-    # below the review threshold.  Keep it quarantined for a human decision.
-    reasons.append("trusted_website_below_score_preserved_for_review")
-    return "REVIEW_NEEDED", "review"
+    return output_artifacts.confidence_status(score, has_contact, reasons, identity_verified=identity_verified)
 
 
 def _apply_publication_policy(
@@ -1842,39 +1591,11 @@ def _apply_publication_policy(
     confidence: str,
     reasons: list[str],
 ) -> tuple[str, str]:
-    decision = publication_policy.evaluate(
-        company,
-        evaluation,
-        status,
-        minimum_safety_score=config.PUBLICATION_POLICY_MIN_SAFETY_SCORE,
-    )
-    mode = str(config.PUBLICATION_POLICY_MODE or "enforce_downgrade_only").strip().casefold()
-    if mode == "shadow":
-        decision["mode"] = "shadow"
-        if decision.get("action") == "downgrade_to_review":
-            decision["action"] = "would_downgrade_to_review"
-    else:
-        status, confidence = publication_policy.enforce(
-            decision, status, confidence, reasons,
-        )
-    evaluation["publication_policy"] = decision
-    return status, confidence
+    return output_artifacts.apply_publication_policy(company, evaluation, status, confidence, reasons)
 
 
 def _policy_output_fields(evaluation: dict) -> dict:
-    decision = evaluation.get("publication_policy", {})
-    return {
-        "publication_policy_version": decision.get(
-            "policy_version", publication_policy.POLICY_VERSION,
-        ),
-        "publication_policy_action": decision.get("action", ""),
-        "publication_eligible": bool(decision.get("eligible", False)),
-        "publication_safety_score": int(decision.get("safety_score", 0) or 0),
-        "publication_risk_index": int(decision.get("risk_index", 100) or 0),
-        "publication_risk_tier": decision.get("risk_tier", "blocked"),
-        "publication_blockers": "; ".join(decision.get("hard_blockers", [])),
-    }
-
+    return output_artifacts.policy_output_fields(evaluation)
 
 def _exact_brand_domain(company: str, candidate: dict) -> bool:
     tokens = scorer.domain_identity_tokens(company)
@@ -2722,191 +2443,43 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
 
 
 def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
-    for row in rows:
-        row["website_status"] = (
-            "verified" if row.get("website") and str(row.get("status", "")).startswith("OK_")
-            else "review" if row.get("website") or row.get("status") == "WEBSITE_AMBIGUOUS"
-            else "not_found"
-        )
-        row["contact_status"] = (
-            "complete" if row.get("email") and row.get("phone")
-            else "partial" if row.get("email") or row.get("phone")
-            else "missing"
-        )
-        if row.get("status") in report.OK_STATUSES:
-            discovery_coverage.mark_published(row.get("company", ""))
-    evidence.write_jsonl(config.EVIDENCE_FILE, rows)
-    entity_registry.write_observations(config.ENTITY_RELATIONSHIPS_FILE, rows)
-    if (
-        config.SEARCH_CACHE_MODE != "replay"
-        and config.CRAWL_CACHE_MODE != "replay"
-    ):
-        entity_memory.remember(rows)
-    quality_audit.write(config.QUALITY_AUDIT_FILE, rows)
-    for row in rows:
-        row.pop("__index", None)
-        row.pop("__candidates", None)
-        row.pop("__evaluation", None)
-        row.pop("__candidate_evaluations", None)
-        row.pop("__search_trace", None)
-        row.pop("__source_health", None)
-        row.pop("__paid_escalation_complete", None)
-    published_rows = [row for row in rows if row.get("status") in report.OK_STATUSES]
-    # contacts.xlsx is the publication surface. Review/abstain rows remain in
-    # the dedicated audit artifacts and must never look like published firms.
-    excel.write_contacts(config.CONTACTS_FILE, published_rows)
-    excel.write_contacts(
-        config.VERIFIED_CONTACTS_FILE,
-        published_rows,
-    )
-    excel.write_contacts(
-        config.REVIEW_QUEUE_FILE,
-        [row for row in rows if row.get("status") not in report.OK_STATUSES],
-    )
-    excel.write_failed(config.FAILED_FILE, report.failed_rows(rows))
-    excel.write_website_candidates(config.CANDIDATES_FILE, rows)
-    report_text = report.build_report(rows, elapsed_seconds)
-    config.REPORT_FILE.write_text(report_text, encoding="utf-8")
-    discovery_coverage.write(
-        config.DISCOVERY_COVERAGE_FILE,
-        config.DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY,
-    )
-    replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
-    runtime.write(config.TELEMETRY_FILE)
-    return report_text
+    return output_artifacts.write_outputs(rows, elapsed_seconds)
 
 
 def _set_output_dir(output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config.OUTPUT_DIR = output_dir
-    config.CONTACTS_FILE = output_dir / "contacts.xlsx"
-    config.VERIFIED_CONTACTS_FILE = output_dir / "verified_contacts.xlsx"
-    config.REVIEW_QUEUE_FILE = output_dir / "review_queue.xlsx"
-    config.FAILED_FILE = output_dir / "failed.xlsx"
-    config.CANDIDATES_FILE = output_dir / "website_candidates.xlsx"
-    config.REPORT_FILE = output_dir / "report.txt"
-    config.LOG_FILE = output_dir / "logs.txt"
-    config.EVIDENCE_FILE = output_dir / "evidence.jsonl"
-    config.ENTITY_RELATIONSHIPS_FILE = output_dir / "entity_relationships.jsonl"
-    config.TELEMETRY_FILE = output_dir / "telemetry.json"
-    config.DISCOVERY_COVERAGE_FILE = output_dir / "discovery_coverage.json"
-    config.QUALITY_AUDIT_FILE = output_dir / "quality_audit.json"
-    config.REPLAY_SNAPSHOT_FILE = output_dir / "replay_snapshot.json.gz"
+    runtime_paths.set_output_dir(output_dir)
 
 
 def _set_run_state_dir(state_dir: Path) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    config.STATE_DIR = state_dir
-    config.PROGRESS_FILE = state_dir / "progress.json"
-    config.PROGRESS_DB_FILE = state_dir / "progress.sqlite3"
-    config.SEARCH_CACHE_DIR = state_dir / "search_cache"
-    config.CRAWL_CACHE_DIR = state_dir / "crawl_cache"
-    config.EMAIL_CACHE_DIR = state_dir / "email_cache"
+    runtime_paths.set_run_state_dir(state_dir)
 
 
 def _prompt_api_state(label: str, input_fn=input) -> bool:
-    active_answers = {"y", "yes", "aktif", "a", "evet", "e", "1"}
-    inactive_answers = {"n", "no", "deaktif", "pasif", "d", "hayir", "hayır", "h", "0"}
-    while True:
-        answer = input_fn(f"{label} aktif mi? [y/n]: ").strip().casefold()
-        if answer in active_answers:
-            return True
-        if answer in inactive_answers:
-            return False
-        print("Lütfen 'y' veya 'n' yazın.")
+    return api_configuration.prompt_api_state(label, input_fn=input_fn)
 
 
 def _prompt_use_saved_key(label: str, input_fn=input) -> bool:
-    while True:
-        answer = input_fn(f"{label}: kayıtlı API anahtarı kullanılsın mı? [y/n]: ").strip().casefold()
-        if answer in {"y", "yes", "evet", "e", "1"}:
-            return True
-        if answer in {"n", "no", "hayir", "hayır", "h", "0"}:
-            return False
-        print("Lütfen 'y' veya 'n' yazın.")
+    return api_configuration.prompt_use_saved_key(label, input_fn=input_fn)
 
 
 def _prompt_api_key(label: str, secret_fn=getpass.getpass) -> str:
-    while True:
-        api_key = secret_fn(f"{label} API anahtarı (gizli): ").strip()
-        if api_key:
-            return api_key
-        print("API aktifken anahtar boş bırakılamaz.")
+    return api_configuration.prompt_api_key(label, secret_fn=secret_fn)
 
 
 def _load_saved_api_keys() -> dict[str, str]:
-    try:
-        payload = json.loads(config.SAVED_API_KEYS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    try:
-        payload = secrets_store.decode(payload)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return {}
-    return {
-        key: value
-        for key, value in payload.items()
-        if isinstance(key, str) and isinstance(value, str) and value.strip()
-    }
+    return api_configuration.load_saved_api_keys()
 
 
 def _save_api_keys(api_keys: dict[str, str]) -> None:
-    clean = {key: value for key, value in api_keys.items() if value}
-    config.SAVED_API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        payload = secrets_store.encode(clean)
-    except OSError:
-        # Non-Windows development environments retain compatibility. Production
-        # on the supported Windows target always uses user-scoped DPAPI.
-        payload = clean
-    config.SAVED_API_KEYS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    api_configuration.save_api_keys(api_keys)
 
 
 def _load_resolver_settings() -> dict[str, bool]:
-    """Load non-secret persisted switches for optional company resolvers."""
-    try:
-        payload = json.loads(config.RESOLVER_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {
-        key: value
-        for key, value in payload.items()
-        if key in {"brandfetch_domain_search", "hunter_domain_finder"}
-        and isinstance(value, bool)
-    }
+    return api_configuration.load_resolver_settings()
 
 
 def _apply_saved_resolver_configuration(saved: dict[str, str] | None = None) -> dict[str, bool]:
-    """Apply persisted resolver switches and DPAPI-protected credentials.
-
-    Environment-provided credentials remain the first choice. Persisted switches
-    only enable discovery resolvers when a corresponding credential is present.
-    """
-    saved = saved if saved is not None else _load_saved_api_keys()
-    settings = _load_resolver_settings()
-    config.BRANDFETCH_CLIENT_ID = config.BRANDFETCH_CLIENT_ID or saved.get("brandfetch", "")
-    config.HUNTER_API_KEY = config.HUNTER_API_KEY or saved.get("hunter", "")
-
-    brandfetch_requested = settings.get(
-        "brandfetch_domain_search", config.ENABLE_BRANDFETCH_DOMAIN_SEARCH,
-    )
-    hunter_requested = settings.get(
-        "hunter_domain_finder", config.ENABLE_HUNTER_DOMAIN_FINDER,
-    )
-    config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = bool(
-        brandfetch_requested and config.BRANDFETCH_CLIENT_ID
-    )
-    config.ENABLE_HUNTER_DOMAIN_FINDER = bool(
-        hunter_requested and config.HUNTER_API_KEY
-    )
-    return {
-        "brandfetch_domain_search": config.ENABLE_BRANDFETCH_DOMAIN_SEARCH,
-        "hunter_domain_finder": config.ENABLE_HUNTER_DOMAIN_FINDER,
-    }
+    return api_configuration.apply_saved_resolver_configuration(saved)
 
 
 def _saved_or_prompted_key(
@@ -2914,106 +2487,64 @@ def _saved_or_prompted_key(
     key_name: str,
     current_value: str,
     saved: dict[str, str],
-    input_fn,
-    secret_fn,
+    input_fn=input,
+    secret_fn=getpass.getpass,
 ) -> str:
-    api_key = current_value or saved.get(key_name, "")
-    if api_key and _prompt_use_saved_key(label, input_fn):
-        print(f"{label}: kayıtlı API anahtarı kullanılacak.")
-        return api_key
-    if api_key:
-        print(f"{label}: yeni API anahtarı girildiğinde kayıtlı anahtar değiştirilecek.")
-    api_key = _prompt_api_key(label, secret_fn)
-    saved[key_name] = api_key
-    return api_key
+    return api_configuration.saved_or_prompted_key(
+        label,
+        key_name,
+        current_value,
+        saved,
+        input_fn=input_fn,
+        secret_fn=secret_fn,
+    )
 
 
 def configure_apis_interactively(input_fn=input, secret_fn=getpass.getpass) -> None:
-    saved = _load_saved_api_keys()
-    resolver_states = _apply_saved_resolver_configuration(saved)
-    google_active = _prompt_api_state("Google Places API", input_fn)
-    config.ENABLE_GOOGLE_PLACES = google_active
-    config.GOOGLE_PLACES_API_KEY = (
-        _saved_or_prompted_key(
-            "Google Places", "google_places", config.GOOGLE_PLACES_API_KEY, saved, input_fn, secret_fn
-        )
-        if google_active
-        else ""
-    )
-
-    brightdata_active = _prompt_api_state("Bright Data API", input_fn)
-    config.SEARCH_PROVIDER = "brightdata" if brightdata_active else "ddgs"
-    config.BRIGHTDATA_API_KEY = (
-        _saved_or_prompted_key(
-            "Bright Data", "brightdata", config.BRIGHTDATA_API_KEY, saved, input_fn, secret_fn
-        )
-        if brightdata_active
-        else ""
-    )
-    if google_active:
-        saved["google_places"] = config.GOOGLE_PLACES_API_KEY
-    if brightdata_active:
-        saved["brightdata"] = config.BRIGHTDATA_API_KEY
-    if saved:
-        _save_api_keys(saved)
-
-    print(
-        "Koşu ayarları: "
-        f"Google Places={'aktif' if google_active else 'deaktif'}, "
-        f"Bright Data={'aktif' if brightdata_active else 'deaktif'}, "
-        f"Brandfetch={'aktif' if resolver_states['brandfetch_domain_search'] else 'deaktif'}, "
-        f"Hunter Domain Finder={'aktif' if resolver_states['hunter_domain_finder'] else 'deaktif'}"
-    )
+    api_configuration.configure_apis_interactively(input_fn=input_fn, secret_fn=secret_fn)
 
 
 def _deduplicate_company_records(records: list[dict]) -> tuple[list[dict], int]:
-    """Merge duplicate fair rows without losing the richer metadata record."""
-    unique: dict[str, dict] = {}
-    duplicate_count = 0
-    for record in records:
-        key = scorer.normalize_text(record.get("company", "")).strip()
-        if not key:
-            continue
-        if key not in unique:
-            unique[key] = dict(record)
-            continue
-        duplicate_count += 1
-        current = unique[key]
-        for field, value in record.items():
-            if not current.get(field) and value:
-                current[field] = value
-        sources = list(dict.fromkeys(filter(None, [current.get("source", ""), record.get("source", "")])))
-        if sources:
-            current["source"] = ";".join(sources)
-    return list(unique.values()), duplicate_count
-
-
-_PAID_ESCALATION_STATUSES = {
-    "REVIEW_NEEDED", "WEBSITE_NOT_FOUND", "WEBSITE_AMBIGUOUS",
-    "WEBSITE_FETCH_FAILED",
-}
+    return pipeline_runner.deduplicate_company_records(records)
 
 
 def _needs_paid_escalation(row: dict) -> bool:
-    return bool(
-        not row.get("__paid_escalation_complete")
-        and (
-            row.get("status") in _PAID_ESCALATION_STATUSES
-            or row.get("reason") == "no_candidate_proved_target_fingerprint"
-        )
-    )
+    return pipeline_runner.needs_paid_escalation(row)
 
 
 def _result_quality_key(row: dict) -> tuple[int, ...]:
-    status = str(row.get("status", ""))
-    return (
-        int(status in report.OK_STATUSES),
-        int(bool(row.get("publication_eligible"))),
-        int(bool(row.get("website"))),
-        int(bool(row.get("email"))) + int(bool(row.get("phone"))),
-        int(row.get("score") or 0),
-        -int(row.get("reason") == "no_candidate_proved_target_fingerprint"),
-    )
+    return pipeline_runner.result_quality_key(row)
+
+
+_RUN_SCOPED_CONFIG_NAMES = (
+    "OUTPUT_DIR",
+    "CONTACTS_FILE",
+    "VERIFIED_CONTACTS_FILE",
+    "REVIEW_QUEUE_FILE",
+    "FAILED_FILE",
+    "CANDIDATES_FILE",
+    "REPORT_FILE",
+    "LOG_FILE",
+    "EVIDENCE_FILE",
+    "ENTITY_RELATIONSHIPS_FILE",
+    "TELEMETRY_FILE",
+    "DISCOVERY_COVERAGE_FILE",
+    "QUALITY_AUDIT_FILE",
+    "REPLAY_SNAPSHOT_FILE",
+    "SEARCH_PROVIDER",
+    "ENABLE_GOOGLE_PLACES",
+    "ENABLE_BRANDFETCH_DOMAIN_SEARCH",
+    "ENABLE_HUNTER_DOMAIN_FINDER",
+    "SEARCH_HTTP_REQUEST_BUDGET",
+    "CRAWLER_HTTP_REQUEST_BUDGET",
+    "BRIGHTDATA_REQUEST_BUDGET",
+    "GOOGLE_PLACES_REQUEST_BUDGET",
+    "HUNTER_REQUEST_BUDGET",
+    "BRANDFETCH_REQUEST_BUDGET",
+    "LINKEDIN_COMPANY_REQUEST_BUDGET",
+    "LLM_ARBITER_BUDGET",
+)
+_RUN_LOCK = threading.RLock()
 
 
 def run(
@@ -3022,186 +2553,37 @@ def run(
     companies: set[str] | None = None,
     only_statuses: set[str] | None = None,
 ) -> str:
-    if output_dir:
-        _set_output_dir(output_dir)
-    ensure_directories()
-    runtime.reset()
-    discovery_coverage.reset()
-    replay_snapshot.reset()
-    if config.REPLAY_SNAPSHOT_INPUT:
-        replay_snapshot.load(
-            Path(config.REPLAY_SNAPSHOT_INPUT),
-            max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES,
-        )
-    search.reset_source_health()
-    search.reset_candidate_host_observations()
-    linkedin_company.reset()
-    logger = setup_logging()
-    start_time = time.monotonic()
-    company_records = excel.read_company_records(input_file)
-    company_records, duplicate_count = _deduplicate_company_records(company_records)
-    if duplicate_count:
-        runtime.record("input.duplicates_removed", duplicate_count)
-        logger.info("Removed %s duplicate company rows before processing", duplicate_count)
-    if companies:
-        wanted = {value.casefold() for value in companies}
-        company_records = [record for record in company_records if record["company"].casefold() in wanted]
-    if only_statuses:
-        previous_statuses = excel.read_result_statuses(config.CONTACTS_FILE)
-        allowed = {value.casefold() for value in only_statuses}
-        company_records = [
-            record for record in company_records
-            if previous_statuses.get(record["company"].casefold(), "").casefold() in allowed
-        ]
-    if not company_records:
-        raise RuntimeError(f"No companies matched the requested selection in {input_file}")
-    scorer.configure_company_token_frequencies([
-        record["company"] for record in company_records
-    ])
-    paid_query_limit = search.configure_run_budget(len(company_records))
-    paid_settings = {
-        "search_provider": config.SEARCH_PROVIDER,
-        "google_places": config.ENABLE_GOOGLE_PLACES,
-        "brandfetch": config.ENABLE_BRANDFETCH_DOMAIN_SEARCH,
-        "hunter_domain": config.ENABLE_HUNTER_DOMAIN_FINDER,
-    }
-    paid_escalation_enabled = bool(
-        config.SEARCH_CACHE_MODE != "replay"
-        and (
-            paid_settings["search_provider"] == "brightdata"
-            or (paid_settings["google_places"] and config.GOOGLE_PLACES_API_KEY)
-            or paid_settings["brandfetch"]
-            or paid_settings["hunter_domain"]
-        )
+    """Run the pipeline without leaking per-run config into later calls."""
+    with _RUN_LOCK:
+        previous_config = {
+            name: getattr(config, name) for name in _RUN_SCOPED_CONFIG_NAMES
+        }
+        try:
+            return _run(input_file, output_dir, companies, only_statuses)
+        finally:
+            try:
+                close_logging()
+            finally:
+                for name, value in previous_config.items():
+                    setattr(config, name, value)
+
+
+def _run(
+    input_file: Path,
+    output_dir: Path | None = None,
+    companies: set[str] | None = None,
+    only_statuses: set[str] | None = None,
+) -> str:
+    return pipeline_runner.run_pipeline(
+        input_file,
+        output_dir=output_dir,
+        companies=companies,
+        only_statuses=only_statuses,
+        process_company_fn=process_company,
+        write_outputs_fn=_write_outputs,
+        set_output_dir_fn=_set_output_dir,
+        empty_result_fn=_empty_result,
     )
-
-    source_preflight = search.preflight_source_profiles(company_records)
-    for health in source_preflight:
-        logger.info(
-            "Source profile preflight: host=%s status=%s server_errors=%s circuit_open=%s",
-            health.get("host", ""), health.get("status", "unknown"),
-            health.get("server_errors", 0), health.get("circuit_open", False),
-        )
-
-    run_signature = json.dumps(
-        {
-            "companies": sorted(record["company"] for record in company_records),
-            "search_cache": config.SEARCH_CACHE_MODE,
-            "crawl_cache": config.CRAWL_CACHE_MODE,
-            "brightdata_budget": config.BRIGHTDATA_REQUEST_BUDGET,
-            "linkedin_company_budget": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
-            "linkedin_company_enabled": config.ENABLE_LINKEDIN_COMPANY_LOOKUP,
-            "paid_query_limit_per_company": paid_query_limit,
-            "google_places_budget": config.GOOGLE_PLACES_REQUEST_BUDGET,
-            "brandfetch_budget": config.BRANDFETCH_REQUEST_BUDGET,
-            "hunter_budget": config.HUNTER_REQUEST_BUDGET,
-            "replay_snapshot": str(config.REPLAY_SNAPSHOT_INPUT or ""),
-            "two_pass_paid_escalation": paid_escalation_enabled,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    progress = checkpoint.load_progress(input_file, run_signature)
-    results_by_index: dict[int, dict] = {}
-    start_index = 0
-    if progress:
-        # Keep interrupted runs portable as well: the snapshot is checkpointed
-        # beside the output and merged only after the matching progress
-        # signature has been accepted.
-        if not config.REPLAY_SNAPSHOT_INPUT and config.REPLAY_SNAPSHOT_FILE.exists():
-            replay_snapshot.load(
-                config.REPLAY_SNAPSHOT_FILE,
-                max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES,
-            )
-        results_so_far = progress.get("results_so_far", [])
-        for offset, row in enumerate(results_so_far):
-            idx = int(row.get("__index", offset))
-            results_by_index[idx] = row
-        start_index = int(progress.get("last_completed_index", -1)) + 1
-        logger.info("Resuming from index %s", start_index)
-
-    pending = [
-        (idx, record)
-        for idx, record in enumerate(company_records)
-        if idx not in results_by_index and idx >= start_index
-    ]
-    def execute_phase(items: list[tuple[int, dict]], *, paid_phase: bool) -> None:
-        if not items:
-            return
-        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(process_company, idx, record["company"], logger, record.get("website", ""), record): idx
-                for idx, record in items
-            }
-            for future in as_completed(futures):
-                try:
-                    idx, row = future.result()
-                except Exception as exc:
-                    idx = futures[future]
-                    company = company_records[idx]["company"]
-                    logger.exception("Unhandled processing failure for %s", company)
-                    row = _empty_result(
-                        company,
-                        "PROCESSING_FAILED",
-                        f"{exc.__class__.__name__}: {exc}",
-                    )
-                row["__index"] = idx
-                row["__paid_escalation_complete"] = bool(
-                    paid_phase or not paid_escalation_enabled
-                    or row.get("status") in report.OK_STATUSES
-                )
-                if paid_phase and idx in results_by_index:
-                    previous = results_by_index[idx]
-                    if _result_quality_key(previous) > _result_quality_key(row):
-                        previous["__paid_escalation_complete"] = True
-                        row = previous
-                results_by_index[idx] = row
-                checkpoint.save_result(input_file, idx, row, run_signature)
-                if (
-                    len(results_by_index)
-                    % config.REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL
-                    == 0
-                ):
-                    replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
-                logger.info("Completed %s/%s: %s", len(results_by_index), len(company_records), row["company"])
-
-    try:
-        if paid_escalation_enabled:
-            config.SEARCH_PROVIDER = "ddgs"
-            config.ENABLE_GOOGLE_PLACES = False
-            config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = False
-            config.ENABLE_HUNTER_DOMAIN_FINDER = False
-            runtime.record("pipeline.free_pass_companies", len(pending))
-        execute_phase(pending, paid_phase=False)
-
-        config.SEARCH_PROVIDER = paid_settings["search_provider"]
-        config.ENABLE_GOOGLE_PLACES = paid_settings["google_places"]
-        config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = paid_settings["brandfetch"]
-        config.ENABLE_HUNTER_DOMAIN_FINDER = paid_settings["hunter_domain"]
-        escalation = [
-            (idx, company_records[idx])
-            for idx, row in sorted(results_by_index.items())
-            if _needs_paid_escalation(row)
-        ]
-        if paid_escalation_enabled and escalation:
-            runtime.record("pipeline.paid_escalation_companies", len(escalation))
-            search.scale_paid_api_budgets(len(escalation))
-            search.configure_run_budget(len(escalation))
-            execute_phase(escalation, paid_phase=True)
-    except KeyboardInterrupt:
-        replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
-        logger.warning("Interrupted. Progress checkpoint was saved.")
-        raise
-    finally:
-        config.SEARCH_PROVIDER = paid_settings["search_provider"]
-        config.ENABLE_GOOGLE_PLACES = paid_settings["google_places"]
-        config.ENABLE_BRANDFETCH_DOMAIN_SEARCH = paid_settings["brandfetch"]
-        config.ENABLE_HUNTER_DOMAIN_FINDER = paid_settings["hunter_domain"]
-
-    rows = [results_by_index[i] for i in range(len(company_records))]
-    report_text = _write_outputs(rows, time.monotonic() - start_time)
-    checkpoint.clear_progress()
-    return report_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -3234,6 +2616,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--brightdata-budget", type=int, default=config.BRIGHTDATA_REQUEST_BUDGET, help="Maximum paid Bright Data HTTP requests for this run")
     parser.add_argument("--linkedin-company-budget", type=int, default=config.LINKEDIN_COMPANY_REQUEST_BUDGET, help="Maximum Bright Data LinkedIn Company requests for this run")
     parser.add_argument("--google-places-budget", type=int, default=config.GOOGLE_PLACES_REQUEST_BUDGET, help="Maximum paid Google Places requests for this run")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Use environment/saved resolver settings without prompting",
+    )
     return parser.parse_args()
 
 
@@ -3253,7 +2640,10 @@ if __name__ == "__main__":
     if args.rerank_cache:
         config.MIN_DELAY_SEC = 0
         config.MAX_DELAY_SEC = 0
-    configure_apis_interactively()
+    if args.non_interactive:
+        _apply_saved_resolver_configuration()
+    else:
+        configure_apis_interactively()
     selected_companies = {value.strip() for value in args.companies.split(",") if value.strip()}
     selected_statuses = {value.strip() for value in args.only_status.split(",") if value.strip()}
     print(run(args.input, args.output_dir, selected_companies or None, selected_statuses or None))

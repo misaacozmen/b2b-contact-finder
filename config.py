@@ -44,6 +44,16 @@ REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES = int(
 REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL = max(
     1, int(os.getenv("REPLAY_SNAPSHOT_CHECKPOINT_INTERVAL", "50"))
 )
+MAX_WORKBOOK_FILE_BYTES = max(
+    1, int(os.getenv("MAX_WORKBOOK_FILE_BYTES", str(50 * 1024 * 1024)))
+)
+MAX_WORKBOOK_UNCOMPRESSED_BYTES = max(
+    1, int(os.getenv("MAX_WORKBOOK_UNCOMPRESSED_BYTES", str(256 * 1024 * 1024)))
+)
+MAX_WORKBOOK_ROWS = max(1, int(os.getenv("MAX_WORKBOOK_ROWS", "100000")))
+MAX_WORKBOOK_CELL_CHARS = max(
+    1, int(os.getenv("MAX_WORKBOOK_CELL_CHARS", "100000"))
+)
 
 # CLI overrides these values for normal runs.  "off" as the import-time
 # default keeps library/unit-test calls isolated from persistent state.
@@ -270,24 +280,24 @@ MAX_HOST_VARIANT_ATTEMPTS = max(
     0, int(os.getenv("MAX_HOST_VARIANT_ATTEMPTS", "1"))
 )
 REQUEST_TIMEOUT_SEC = max(1, int(os.getenv("REQUEST_TIMEOUT_SEC", "10")))
+MAX_HTTP_RESPONSE_BYTES = max(
+    1024, int(os.getenv("MAX_HTTP_RESPONSE_BYTES", str(10 * 1024 * 1024)))
+)
+MAX_PDF_RESPONSE_BYTES = max(
+    1024, int(os.getenv("MAX_PDF_RESPONSE_BYTES", str(8 * 1024 * 1024)))
+)
 MAX_HTTP_REDIRECTS = 5
 MAX_RETRIES = 2
 RETRY_BACKOFF_BASE_SEC = 2.0
 MAX_RETRY_AFTER_SEC = int(os.getenv("MAX_RETRY_AFTER_SEC", "30"))
 
-# A host reused by several companies is not automatically a directory (parent
-# groups can legitimately host multiple brands).  Reuse becomes a discovery-
-# only signal only when the result also has catalogue/profile structure.
-SHARED_CANDIDATE_HOST_MIN_COMPANIES = int(
-    os.getenv("SHARED_CANDIDATE_HOST_MIN_COMPANIES", "2")
-)
-ENABLE_JS_FALLBACK = os.getenv("ENABLE_JS_FALLBACK", "1") == "1"
-ENABLE_JS_PROFILE_FALLBACK = os.getenv("ENABLE_JS_PROFILE_FALLBACK", "1") == "1"
+ENABLE_JS_FALLBACK = os.getenv("ENABLE_JS_FALLBACK", "0") == "1"
+ENABLE_JS_PROFILE_FALLBACK = os.getenv("ENABLE_JS_PROFILE_FALLBACK", "0") == "1"
 MAX_BROWSER_RENDER_WORKERS = max(
     1, int(os.getenv("MAX_BROWSER_RENDER_WORKERS", "6"))
 )
 JS_RENDER_TIMEOUT_SEC = int(os.getenv("JS_RENDER_TIMEOUT_SEC", "20"))
-ENABLE_PDF_OCR = os.getenv("ENABLE_PDF_OCR", "1") == "1"
+ENABLE_PDF_OCR = os.getenv("ENABLE_PDF_OCR", "0") == "1"
 PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "3"))
 PDF_OCR_DPI = int(os.getenv("PDF_OCR_DPI", "150"))
 PDF_MIN_TEXT_CHARS = int(os.getenv("PDF_MIN_TEXT_CHARS", "40"))

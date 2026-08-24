@@ -1,28 +1,81 @@
 from pathlib import Path
 from typing import Iterable
+from zipfile import BadZipFile, ZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
+import config
+from modules import redaction
 
-def read_companies(path: Path) -> list[str]:
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _safe_cell_value(value: object) -> object:
+    """Prevent credentials from persisting and user strings from being formulas."""
+    if isinstance(value, str):
+        value = redaction.redact_text(value)
+        if value.lstrip().startswith(_FORMULA_PREFIXES):
+            return f"'{value}"
+    return value
+
+
+def _unescape_cell_value(value: object) -> object:
+    """Restore text escaped by this module when reading its own workbooks."""
+    if (
+        isinstance(value, str)
+        and value.startswith("'")
+        and value[1:].lstrip().startswith(_FORMULA_PREFIXES)
+    ):
+        return value[1:]
+    return value
+
+
+def _read_rows(path: Path) -> list[tuple]:
     if not path.exists():
         raise FileNotFoundError(f"Input file not found: {path}")
+    if path.stat().st_size > config.MAX_WORKBOOK_FILE_BYTES:
+        raise ValueError(f"Workbook exceeds file size limit: {path}")
+    try:
+        with ZipFile(path) as archive:
+            expanded_size = sum(item.file_size for item in archive.infolist())
+    except BadZipFile as exc:
+        raise ValueError(f"Invalid XLSX archive: {path}") from exc
+    if expanded_size > config.MAX_WORKBOOK_UNCOMPRESSED_BYTES:
+        raise ValueError(f"Workbook exceeds expanded size limit: {path}")
 
     workbook = load_workbook(path, read_only=True, data_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    workbook.close()
+    try:
+        rows: list[tuple] = []
+        for index, row in enumerate(workbook.active.iter_rows(values_only=True)):
+            if index >= config.MAX_WORKBOOK_ROWS + 1:
+                raise ValueError(f"Workbook exceeds row limit: {path}")
+            if any(
+                isinstance(value, str)
+                and len(value) > config.MAX_WORKBOOK_CELL_CHARS
+                for value in row
+            ):
+                raise ValueError(f"Workbook contains an oversized cell: {path}")
+            rows.append(row)
+        return rows
+    finally:
+        workbook.close()
+
+
+def read_companies(path: Path) -> list[str]:
+    rows = _read_rows(path)
     if not rows:
         return []
 
-    first_cell = str(rows[0][0] or "").strip().lower()
+    first_cell = str(_unescape_cell_value(rows[0][0] or "")).strip().lower()
     start_index = 1 if first_cell == "company" else 0
     companies: list[str] = []
     for row in rows[start_index:]:
         value = row[0] if row else None
         if value is None:
             continue
+        value = _unescape_cell_value(value)
         company = str(value).strip()
         if company:
             companies.append(company)
@@ -30,17 +83,14 @@ def read_companies(path: Path) -> list[str]:
 
 
 def read_company_records(path: Path) -> list[dict]:
-    if not path.exists():
-        raise FileNotFoundError(f"Input file not found: {path}")
-
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    workbook.close()
+    rows = _read_rows(path)
     if not rows:
         return []
 
-    first_row = [str(value or "").strip().lower() for value in rows[0]]
+    first_row = [
+        str(_unescape_cell_value(value or "")).strip().lower()
+        for value in rows[0]
+    ]
     has_header = "company" in first_row
     headers = first_row if has_header else []
     start_index = 1 if has_header else 0
@@ -50,14 +100,14 @@ def read_company_records(path: Path) -> list[dict]:
             if name in headers:
                 idx = headers.index(name)
                 if idx < len(row) and row[idx] is not None:
-                    return str(row[idx]).strip()
+                    return str(_unescape_cell_value(row[idx])).strip()
         if (
             not has_header
             and fallback_index is not None
             and fallback_index < len(row)
             and row[fallback_index] is not None
         ):
-            return str(row[fallback_index]).strip()
+            return str(_unescape_cell_value(row[fallback_index])).strip()
         return ""
 
     records: list[dict] = []
@@ -93,19 +143,20 @@ def read_company_records(path: Path) -> list[dict]:
 def read_result_statuses(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    workbook.close()
+    rows = _read_rows(path)
     if not rows:
         return {}
-    headers = [str(value or "").strip().casefold() for value in rows[0]]
+    headers = [
+        str(_unescape_cell_value(value or "")).strip().casefold()
+        for value in rows[0]
+    ]
     if "company" not in headers or "status" not in headers:
         return {}
     company_idx = headers.index("company")
     status_idx = headers.index("status")
     return {
-        str(row[company_idx]).strip().casefold(): str(row[status_idx] or "").strip()
+        str(_unescape_cell_value(row[company_idx])).strip().casefold():
+        str(_unescape_cell_value(row[status_idx] or "")).strip()
         for row in rows[1:]
         if len(row) > max(company_idx, status_idx) and row[company_idx]
     }
@@ -115,12 +166,12 @@ def _write_rows(path: Path, headers: list[str], rows: Iterable[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(headers)
+    sheet.append([_safe_cell_value(header) for header in headers])
     for cell in sheet[1]:
         cell.font = Font(bold=True)
 
     for row in rows:
-        sheet.append([row.get(header, "") for header in headers])
+        sheet.append([_safe_cell_value(row.get(header, "")) for header in headers])
 
     for column in sheet.columns:
         max_length = max(len(str(cell.value or "")) for cell in column)

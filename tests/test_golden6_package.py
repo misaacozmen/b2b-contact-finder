@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,7 +22,7 @@ def _names(path: Path, sheet: str | None = None, column: str = "Company") -> set
 
 
 class Golden6PackageTests(unittest.TestCase):
-    def test_golden6_has_twenty_unique_companies_with_no_seen_overlap(self):
+    def test_golden6_has_twenty_unique_companies_with_no_prior_overlap_and_private_gate(self):
         manual = GOLDEN6_DIR / "golden_6_manual_validation_20_ready.xlsx"
         current = _names(manual, "Manual Report")
         prior = set()
@@ -33,9 +34,12 @@ class Golden6PackageTests(unittest.TestCase):
             ROOT / "outputs/golden_5_20260716/golden_5_manual_validation_20_ready.xlsx",
         ):
             prior.update(_names(path, "Manual Report"))
-        prior.update(_names(ROOT / "input/firms.xlsx", column="company"))
         self.assertEqual(len(current), 20)
         self.assertFalse(current & prior)
+
+        splits = json.loads((ROOT / "data/benchmark_splits.json").read_text(encoding="utf-8"))
+        g6_set = next(s for s in splits["sets"] if s.get("name") == "golden_6")
+        self.assertIs(g6_set.get("private_seen_check"), True)
 
     def test_source_assisted_input_keeps_official_fair_profiles_for_diagnostics(self):
         rows = _sheet_rows(GOLDEN6_DIR / "golden_6_pipeline_input_20.xlsx")

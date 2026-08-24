@@ -163,10 +163,13 @@ def payload(max_queries_per_company: int = 3) -> dict:
 
 
 def write(path: Path, max_queries_per_company: int = 3) -> None:
+    from modules import redaction
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    sanitized_payload = redaction.sanitize(payload(max_queries_per_company))
     path.write_text(
         json.dumps(
-            payload(max_queries_per_company),
+            sanitized_payload,
             ensure_ascii=False,
             indent=2,
         ),

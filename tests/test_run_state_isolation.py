@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 import config
 import main
@@ -13,6 +13,93 @@ from modules.exhibitor_scraper import _metalexpo_list_rows, _texhibition_list_ro
 
 
 class RunStateIsolationTests(unittest.TestCase):
+    def test_cli_supports_non_interactive_mode(self):
+        with patch("sys.argv", ["main.py", "--non-interactive"]):
+            self.assertTrue(main.parse_args().non_interactive)
+
+    def test_workbook_reader_rejects_oversized_expanded_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.xlsx"
+            workbook = Workbook()
+            workbook.active.append(["company"])
+            workbook.active.append(["A" * 1000])
+            workbook.save(path)
+            with patch.object(config, "MAX_WORKBOOK_UNCOMPRESSED_BYTES", 100):
+                with self.assertRaisesRegex(ValueError, "expanded size limit"):
+                    excel.read_company_records(path)
+
+    def test_excel_writer_escapes_formula_prefixes_without_changing_other_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "safe.xlsx"
+            excel.write_company_records(path, [{
+                "company": "=SUM(1,1)",
+                "website": "  +cmd|' /C calc'!A0",
+                "listed_website": "\t-2+3",
+                "source": " \n@SUM(A1:A2)",
+                "country": "normal value",
+                "hall": 42,
+                "stand": True,
+                "brands": "'=already-safe",
+                "description": None,
+            }])
+
+            workbook = load_workbook(path, data_only=False)
+            try:
+                values = [cell.value for cell in workbook.active[2]]
+                data_types = [cell.data_type for cell in workbook.active[2]]
+            finally:
+                workbook.close()
+
+        self.assertEqual(values[0], "'=SUM(1,1)")
+        self.assertEqual(values[1], "'  +cmd|' /C calc'!A0")
+        self.assertEqual(values[2], "'\t-2+3")
+        self.assertEqual(values[3], "' \n@SUM(A1:A2)")
+        self.assertEqual(values[4], "normal value")
+        self.assertEqual(values[10], 42)
+        self.assertIs(values[11], True)
+        self.assertEqual(values[12], "'=already-safe")
+        self.assertIsNone(values[15])
+        self.assertTrue(all(data_types[index] == "s" for index in range(5)))
+
+    def test_run_restores_run_scoped_config_after_success(self):
+        original = {
+            name: getattr(config, name)
+            for name in main._RUN_SCOPED_CONFIG_NAMES
+        }
+
+        def mutate_config(*_args, **_kwargs):
+            for name in main._RUN_SCOPED_CONFIG_NAMES:
+                setattr(config, name, object())
+            return "done"
+
+        with patch.object(main, "_run", side_effect=mutate_config):
+            self.assertEqual(main.run(Path("input.xlsx")), "done")
+
+        self.assertEqual(
+            {name: getattr(config, name) for name in main._RUN_SCOPED_CONFIG_NAMES},
+            original,
+        )
+
+    def test_run_restores_run_scoped_config_after_failure(self):
+        original = {
+            name: getattr(config, name)
+            for name in main._RUN_SCOPED_CONFIG_NAMES
+        }
+
+        def mutate_then_fail(*_args, **_kwargs):
+            for name in main._RUN_SCOPED_CONFIG_NAMES:
+                setattr(config, name, object())
+            raise RuntimeError("pipeline failed")
+
+        with patch.object(main, "_run", side_effect=mutate_then_fail):
+            with self.assertRaisesRegex(RuntimeError, "pipeline failed"):
+                main.run(Path("input.xlsx"))
+
+        self.assertEqual(
+            {name: getattr(config, name) for name in main._RUN_SCOPED_CONFIG_NAMES},
+            original,
+        )
+
     def test_run_state_dir_rebinds_only_run_specific_state(self):
         with tempfile.TemporaryDirectory() as directory:
             state_dir = Path(directory) / "state"
@@ -274,13 +361,84 @@ class RunStateIsolationTests(unittest.TestCase):
             ),
             "news",
         )
-
     def test_language_subdomain_is_not_a_homonym(self):
         first = {"candidate": {"url": "https://www.example.com"}}
         second = {"candidate": {"url": "https://en.example.com"}}
         result = main._homonym_conflict("Example", first, second)
         self.assertFalse(result["ambiguous"])
         self.assertEqual(result["reason"], "same_registrable_domain")
+
+    def test_pipeline_runner_restores_paid_query_limit_on_success(self):
+        from modules import pipeline_runner
+        search._RUN_PAID_QUERY_LIMIT = 42
+        try:
+            with patch.object(pipeline_runner, "_run_pipeline_impl", return_value="success"):
+                res = pipeline_runner.run_pipeline(
+                    Path("firms.xlsx"),
+                    process_company_fn=lambda *a: None,
+                    write_outputs_fn=lambda *a: "ok",
+                    set_output_dir_fn=lambda *a: None,
+                    empty_result_fn=lambda *a: {},
+                )
+                self.assertEqual(res, "success")
+                self.assertEqual(search._RUN_PAID_QUERY_LIMIT, 42)
+        finally:
+            search._RUN_PAID_QUERY_LIMIT = None
+
+    def test_pipeline_runner_restores_paid_query_limit_on_exception(self):
+        from modules import pipeline_runner
+        search._RUN_PAID_QUERY_LIMIT = 42
+        try:
+            with patch.object(pipeline_runner, "_run_pipeline_impl", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    pipeline_runner.run_pipeline(
+                        Path("firms.xlsx"),
+                        process_company_fn=lambda *a: None,
+                        write_outputs_fn=lambda *a: "ok",
+                        set_output_dir_fn=lambda *a: None,
+                        empty_result_fn=lambda *a: {},
+                    )
+                self.assertEqual(search._RUN_PAID_QUERY_LIMIT, 42)
+        finally:
+            search._RUN_PAID_QUERY_LIMIT = None
+
+    def test_pipeline_runner_restores_paid_query_limit_on_keyboard_interrupt(self):
+        from modules import pipeline_runner
+        search._RUN_PAID_QUERY_LIMIT = 42
+        try:
+            with patch.object(pipeline_runner, "_run_pipeline_impl", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    pipeline_runner.run_pipeline(
+                        Path("firms.xlsx"),
+                        process_company_fn=lambda *a: None,
+                        write_outputs_fn=lambda *a: "ok",
+                        set_output_dir_fn=lambda *a: None,
+                        empty_result_fn=lambda *a: {},
+                    )
+                self.assertEqual(search._RUN_PAID_QUERY_LIMIT, 42)
+        finally:
+            search._RUN_PAID_QUERY_LIMIT = None
+
+    def test_pipeline_runner_passes_callbacks_by_identity(self):
+        from modules import pipeline_runner
+        proc = lambda *a: None
+        write = lambda *a: "ok"
+        set_dir = lambda *a: None
+        empty = lambda *a: {}
+        with patch.object(pipeline_runner, "_run_pipeline_impl", return_value="ok") as mock_impl:
+            pipeline_runner.run_pipeline(
+                Path("firms.xlsx"),
+                process_company_fn=proc,
+                write_outputs_fn=write,
+                set_output_dir_fn=set_dir,
+                empty_result_fn=empty,
+            )
+            mock_impl.assert_called_once()
+            kwargs = mock_impl.call_args.kwargs
+            self.assertIs(kwargs["process_company_fn"], proc)
+            self.assertIs(kwargs["write_outputs_fn"], write)
+            self.assertIs(kwargs["set_output_dir_fn"], set_dir)
+            self.assertIs(kwargs["empty_result_fn"], empty)
 
 
 if __name__ == "__main__":

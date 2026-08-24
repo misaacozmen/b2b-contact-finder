@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from modules import runtime, scorer
+from modules import publication_policy, runtime, scorer
 
 
 POLICY_VERSION = "autonomous-quality-v1"
@@ -36,7 +36,7 @@ def payload(rows: list[dict]) -> dict:
             if isinstance(evaluation, dict) else []
         ):
             gap_counts[str(gap)] += 1
-        if not str(row.get("status", "")).startswith("OK_"):
+        if not publication_policy.is_publishable_row(row):
             continue
         website_domain = scorer.normalize_domain(row.get("website", ""))
         if scorer.is_excluded_domain(website_domain):
@@ -67,8 +67,7 @@ def payload(rows: list[dict]) -> dict:
                 "reason": "published_with_identity_conflict",
             })
     published = sum(
-        count for status, count in statuses.items()
-        if status.startswith("OK_")
+        1 for row in rows if publication_policy.is_publishable_row(row)
     )
     return {
         "policy_version": POLICY_VERSION,
@@ -93,8 +92,11 @@ def payload(rows: list[dict]) -> dict:
 
 
 def write(path: Path, rows: list[dict]) -> None:
+    from modules import redaction
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    sanitized_payload = redaction.sanitize(payload(rows))
     path.write_text(
-        json.dumps(payload(rows), ensure_ascii=False, indent=2),
+        json.dumps(sanitized_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

@@ -8,7 +8,14 @@ from openpyxl import load_workbook
 
 import main
 import calibrate_publication
-from modules import evidence, excel, publication_policy, report, risk_calibration
+from modules import (
+    contact_publication,
+    evidence,
+    excel,
+    publication_policy,
+    report,
+    risk_calibration,
+)
 
 
 def _safe_evaluation(**overrides):
@@ -151,6 +158,34 @@ class PublicationPolicyTests(unittest.TestCase):
         self.assertFalse(decision["eligible"])
         self.assertIn("identity_not_publishable", decision["hard_blockers"])
 
+    def test_unverified_tls_forces_review_and_suppresses_contacts(self):
+        evaluation = _safe_evaluation()
+        evaluation["reasons"].append("tls_insecure_transport")
+        decision = publication_policy.evaluate(
+            "ACME MAKINA",
+            evaluation,
+            "OK_HIGH_CONFIDENCE",
+            minimum_safety_score=75,
+        )
+        reasons: list[str] = []
+        status, _ = publication_policy.enforce(
+            decision, "OK_HIGH_CONFIDENCE", "high", reasons,
+        )
+        self.assertEqual(status, "REVIEW_NEEDED")
+        self.assertIn("tls_certificate_unverified", decision["hard_blockers"])
+
+        contact = contact_publication.evaluate_email(
+            "https://acme.com.tr",
+            {
+                "value": "info@acme.com.tr",
+                "source_url": "https://acme.com.tr/contact",
+                "retrieval_method": "http_tls_unverified",
+                "verification_status": "verified",
+            },
+        )
+        self.assertFalse(contact["eligible"])
+        self.assertIn("unsupported_retrieval_method", contact["reason"])
+
     def test_resolved_first_party_cross_domain_email_is_not_double_blocked(self):
         evaluation = _safe_evaluation(
             email="sales@verified-mail.net",
@@ -192,6 +227,19 @@ class PublicationPolicyTests(unittest.TestCase):
             evaluation["publication_policy"]["action"],
             "would_downgrade_to_review",
         )
+
+    def test_shadow_mode_cannot_bypass_tls_security_blocker(self):
+        evaluation = _safe_evaluation()
+        evaluation["reasons"].append("tls_insecure_transport")
+        with patch("main.config.PUBLICATION_POLICY_MODE", "shadow"):
+            status, confidence = main._apply_publication_policy(
+                "ACME MAKINA",
+                evaluation,
+                "OK_HIGH_CONFIDENCE",
+                "high",
+                evaluation["reasons"],
+            )
+        self.assertEqual((status, confidence), ("REVIEW_NEEDED", "review"))
 
 
 class RiskCoverageCalibrationTests(unittest.TestCase):
@@ -317,6 +365,9 @@ class PublicationAuditOutputTests(unittest.TestCase):
             "publication_risk_index": 3,
             "publication_risk_tier": "low",
             "publication_blockers": "",
+            "__search_trace": [{
+                "url": "https://search.example/?token=evidence-secret",
+            }],
         }
         with tempfile.TemporaryDirectory() as directory:
             workbook_path = Path(directory) / "contacts.xlsx"
@@ -335,6 +386,10 @@ class PublicationAuditOutputTests(unittest.TestCase):
             self.assertEqual(output["publication_risk_tier"], "low")
 
             record = json.loads(evidence_path.read_text(encoding="utf-8").strip())
+            self.assertNotIn(
+                "evidence-secret",
+                evidence_path.read_text(encoding="utf-8"),
+            )
             self.assertEqual(
                 record["selected"]["publication_policy"]["version"],
                 publication_policy.POLICY_VERSION,

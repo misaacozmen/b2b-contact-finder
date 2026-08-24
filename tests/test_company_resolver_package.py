@@ -149,7 +149,7 @@ class CompanyResolverPackageTests(unittest.TestCase):
             {"domain": "other.com", "url": "https://other.com", "query": "resolver", "score": 70},
         ]
         row = main._attach_candidates({
-            "website": "https://chosen.com", "status": "OK_FULL", "confidence": "high",
+            "website": "https://chosen.com", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "confidence": "high",
         }, candidates)
         stages = row["__candidate_evaluations"]
         self.assertEqual(stages[0]["stages"][-1]["stage"], "published")

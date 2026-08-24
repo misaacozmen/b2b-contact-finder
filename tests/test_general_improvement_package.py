@@ -188,6 +188,19 @@ class GeneralImprovementPackageTests(unittest.TestCase):
         second = search._candidate_role("Beta", "https://holding.example", "Beta", "Official brand")
         self.assertNotEqual(second, "shared_listing")
 
+    def test_candidate_role_is_independent_of_company_processing_order(self) -> None:
+        url = "https://neutral-host.example/company/gamma"
+        search.reset_candidate_host_observations()
+        before = search._candidate_role("Gamma", url, "Gamma", "")
+        search._candidate_role(
+            "Alpha", "https://neutral-host.example/company/alpha", "Alpha", "",
+        )
+        search._candidate_role(
+            "Beta", "https://neutral-host.example/company/beta", "Beta", "",
+        )
+        after = search._candidate_role("Gamma", url, "Gamma", "")
+        self.assertEqual((before, after), ("unknown", "unknown"))
+
     def test_structural_company_listing_is_directory_on_first_company(self) -> None:
         search.reset_candidate_host_observations()
         role = search._candidate_role(

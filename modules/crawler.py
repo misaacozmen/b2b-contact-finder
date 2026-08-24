@@ -17,7 +17,7 @@ from modules import scorer
 from modules.utils import retry_with_backoff
 
 
-SESSION = requests.Session()
+SESSION = network_guard.harden_session(requests.Session())
 SESSION.headers.update({"User-Agent": config.USER_AGENT, "Accept-Language": "tr,en;q=0.8"})
 _FETCH_STATE = threading.local()
 _RENDER_STATE = threading.local()
@@ -28,6 +28,10 @@ _BROWSER_RENDER_SEMAPHORE = threading.BoundedSemaphore(
 )
 
 
+class ResponseTooLarge(requests.RequestException):
+    pass
+
+
 def _http_session() -> requests.Session:
     # Keep the module session on the main thread for compatibility with
     # diagnostics/tests, but never share a mutable requests.Session between
@@ -36,7 +40,7 @@ def _http_session() -> requests.Session:
         return SESSION
     session = getattr(_SESSION_STATE, "session", None)
     if session is None:
-        session = requests.Session()
+        session = network_guard.harden_session(requests.Session())
         session.headers.update(SESSION.headers)
         _SESSION_STATE.session = session
     return session
@@ -62,9 +66,37 @@ def _fetch(url: str) -> requests.Response:
     return _request_with_safe_redirects(url, verify=True)
 
 
-def _request_with_safe_redirects(url: str, verify: bool) -> requests.Response:
+def _read_bounded_response(
+    response: requests.Response, max_bytes: int,
+) -> None:
+    content_length = response.headers.get("content-length", "").strip()
+    try:
+        declared_size = int(content_length) if content_length else 0
+    except ValueError:
+        declared_size = 0
+    if declared_size > max_bytes:
+        raise ResponseTooLarge(f"response_too_large:{declared_size}")
+    chunks: list[bytes] = []
+    received = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        received += len(chunk)
+        if received > max_bytes:
+            raise ResponseTooLarge(f"response_too_large:{received}")
+        chunks.append(chunk)
+    response._content = b"".join(chunks)
+    response._content_consumed = True
+
+
+def _request_with_safe_redirects(
+    url: str,
+    verify: bool,
+    max_bytes: int | None = None,
+) -> requests.Response:
     current = url
     original_host = urlparse(url).netloc.casefold()
+    response_limit = max_bytes or config.MAX_HTTP_RESPONSE_BYTES
     for redirect_count in range(config.MAX_HTTP_REDIRECTS + 1):
         allowed, reason = network_guard.validate_public_http_url(current)
         if not allowed:
@@ -77,16 +109,23 @@ def _request_with_safe_redirects(url: str, verify: bool) -> requests.Response:
             timeout=config.REQUEST_TIMEOUT_SEC,
             allow_redirects=False,
             verify=verify,
+            stream=True,
         )
         if response.status_code not in {301, 302, 303, 307, 308}:
-            response.raise_for_status()
-            setattr(response, "_b2b_final_url", current)
-            setattr(response, "_b2b_tls_insecure", not verify)
-            return response
+            try:
+                response.raise_for_status()
+                _read_bounded_response(response, response_limit)
+                setattr(response, "_b2b_final_url", current)
+                setattr(response, "_b2b_tls_insecure", not verify)
+                return response
+            finally:
+                response.close()
         location = response.headers.get("location", "").strip()
+        response.close()
         if not location:
-            response.raise_for_status()
-            return response
+            raise requests.exceptions.TooManyRedirects(
+                f"redirect_without_location:{current}"
+            )
         target = urljoin(current, location)
         target_host = urlparse(target).netloc.casefold()
         if not scorer.same_registrable_domain(original_host, target_host):
@@ -140,6 +179,8 @@ def _try_fetch(url: str) -> tuple[str | None, str | None]:
         return None, str(exc)
     except requests.exceptions.TooManyRedirects:
         return None, "redirect_limit"
+    except ResponseTooLarge:
+        return None, "response_too_large"
     except requests.exceptions.RequestException as exc:
         return None, exc.__class__.__name__.lower()
 
@@ -209,16 +250,16 @@ def _looks_like_security_interstitial(html: str) -> bool:
 def _render_request_policy(
     original_host: str, request_url: str, resource_type: str,
 ) -> tuple[bool, str]:
-    """Allow passive assets, but keep rendered active data on the official site."""
+    """Keep every rendered request on the DNS-pinned origin host."""
     allowed, reason = network_guard.validate_public_http_url(request_url)
     if not allowed:
         return False, f"unsafe_target:{reason}"
-    request_host = urlparse(request_url).netloc.casefold()
-    if resource_type in {"document", "xhr", "fetch", "eventsource"} and not (
-        request_host
-        and scorer.same_registrable_domain(original_host.casefold(), request_host)
-    ):
-        return False, "cross_site_active_data"
+    try:
+        request_host = (urlparse(request_url).hostname or "").casefold()
+    except ValueError:
+        return False, "unsafe_target:invalid_url"
+    if request_host != original_host.casefold():
+        return False, "cross_site_request"
     return True, "allowed"
 
 
@@ -235,17 +276,27 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
     except ImportError:
         return None, "playwright_not_installed"
 
+    target, reason = network_guard.resolve_public_http_url(url)
+    if target is None:
+        return None, f"unsafe_target:{reason}"
+
     try:
         with _BROWSER_RENDER_SEMAPHORE, sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--host-resolver-rules="
+                    f"MAP {target.hostname} {target.address}, EXCLUDE localhost"
+                ],
+            )
             try:
                 context = browser.new_context(
                     user_agent=config.USER_AGENT,
                     locale="tr-TR",
-                    ignore_https_errors=True,
+                    ignore_https_errors=False,
                     service_workers="block",
                 )
-                original_host = urlparse(url).netloc.casefold()
+                original_host = target.hostname
 
                 def guard_route(route) -> None:
                     request_url = route.request.url
@@ -273,6 +324,8 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
                     pass
                 page.wait_for_timeout(750)
                 rendered = page.content()
+                if len(rendered.encode("utf-8")) > config.MAX_HTTP_RESPONSE_BYTES:
+                    return None, "js_render_response_too_large"
                 _RENDER_STATE.last["final_url"] = page.url
                 return rendered, None
             finally:
@@ -434,9 +487,9 @@ def _try_extract_pdf(url: str) -> tuple[str | None, str | None]:
     _DOCUMENT_STATE.last = {"retrieval_method": "pdf_text", "source_url": url}
     runtime.record("recovery.pdf_attempts")
     try:
-        response = _request_with_safe_redirects(url, verify=True)
-        if len(response.content) > 8 * 1024 * 1024:
-            return None, "pdf_too_large"
+        response = _request_with_safe_redirects(
+            url, verify=True, max_bytes=config.MAX_PDF_RESPONSE_BYTES,
+        )
         from pypdf import PdfReader
         reader = PdfReader(BytesIO(response.content))
         text = "\n".join((page.extract_text() or "") for page in reader.pages[:20]).strip()

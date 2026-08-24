@@ -1,6 +1,7 @@
 """Optional Hunter domain search used only after first-party site extraction fails."""
 
 import logging
+import re
 
 import requests
 
@@ -10,6 +11,19 @@ from modules import runtime
 
 LOGGER = logging.getLogger("contact_finder")
 DOMAIN_SEARCH_URL = "https://api.hunter.io/v2/domain-search"
+
+
+def _safe_request_error(exc: Exception) -> str:
+    """Keep credentials embedded in provider URLs out of run logs."""
+    message = re.sub(
+        r"([?&](?:api_key|access_token|token)=)[^&\s]+",
+        r"\1[REDACTED]",
+        str(exc),
+        flags=re.IGNORECASE,
+    )
+    if config.HUNTER_API_KEY:
+        message = message.replace(config.HUNTER_API_KEY, "[REDACTED]")
+    return message
 
 
 def is_enabled() -> bool:
@@ -31,7 +45,11 @@ def find_domain_emails(domain: str) -> list[dict]:
         )
         response.raise_for_status()
     except requests.RequestException as exc:
-        LOGGER.warning("Hunter domain search failed for %s: %s", domain, exc)
+        LOGGER.warning(
+            "Hunter domain search failed for %s: %s",
+            domain,
+            _safe_request_error(exc),
+        )
         return []
 
     emails = []

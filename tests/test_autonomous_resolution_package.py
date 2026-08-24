@@ -268,6 +268,7 @@ class DiscoveryAndMemoryTests(unittest.TestCase):
             row = {
                 "company": "ORNEK METAL",
                 "status": "OK_MEDIUM_CONFIDENCE",
+                "publication_eligible": True,
                 "website": "https://ornek.example",
                 "email_source_url": "https://ornek.example/contact",
                 "phone_source_url": "",
@@ -545,6 +546,7 @@ class AutonomousOrchestrationTests(unittest.TestCase):
         rows = [{
             "company": "ORNEK",
             "status": "OK_MEDIUM_CONFIDENCE",
+            "publication_eligible": True,
             "website": "https://ornek.example",
             "email_source_url": "https://directory.example/profile",
             "phone_source_url": "",
@@ -558,6 +560,7 @@ class AutonomousOrchestrationTests(unittest.TestCase):
         rows = [{
             "company": "ORNEK",
             "status": "OK_MEDIUM_CONFIDENCE",
+            "publication_eligible": True,
             "website": "https://tradeatlas.com",
             "email_source_url": "https://tradeatlas.com/company/ornek",
             "phone_source_url": "https://tradeatlas.com/company/ornek",

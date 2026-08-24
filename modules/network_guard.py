@@ -4,7 +4,85 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlparse
+
+import requests
+from requests.adapters import HTTPAdapter
+
+
+@dataclass(frozen=True)
+class ResolvedTarget:
+    scheme: str
+    hostname: str
+    port: int
+    address: str
+
+
+class _PinnedHTTPAdapter(HTTPAdapter):
+    """Connect to one validated IP while preserving HTTP Host and TLS SNI."""
+
+    def __init__(self, target: ResolvedTarget):
+        self.target = target
+        super().__init__(max_retries=0)
+
+    def get_connection_with_tls_context(
+        self, request, verify, proxies=None, cert=None,
+    ):
+        host_params, pool_kwargs = self.build_connection_pool_key_attributes(
+            request, verify, cert,
+        )
+        host_params["host"] = self.target.address
+        if self.target.scheme == "https":
+            pool_kwargs["assert_hostname"] = self.target.hostname
+            pool_kwargs["server_hostname"] = self.target.hostname
+        return self.poolmanager.connection_from_host(
+            **host_params, pool_kwargs=pool_kwargs,
+        )
+
+    def send(self, request, **kwargs):
+        default_port = 443 if self.target.scheme == "https" else 80
+        host = self.target.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        request.headers["Host"] = (
+            host if self.target.port == default_port
+            else f"{host}:{self.target.port}"
+        )
+        # A proxy could resolve the hostname again and defeat address pinning.
+        kwargs["proxies"] = {}
+        return super().send(request, **kwargs)
+
+
+class PublicOnlyHTTPAdapter(HTTPAdapter):
+    """Resolve, validate and pin every request independently."""
+
+    def send(self, request, **kwargs):
+        target, reason = resolve_public_http_url(request.url)
+        if target is None:
+            raise requests.exceptions.InvalidURL(
+                f"blocked_network_target:{reason}", request=request,
+            )
+        adapter = _PinnedHTTPAdapter(target)
+        try:
+            response = adapter.send(request, **kwargs)
+        except Exception:
+            adapter.close()
+            raise
+        original_close = response.close
+        closed = False
+
+        def close() -> None:
+            nonlocal closed
+            try:
+                original_close()
+            finally:
+                if not closed:
+                    closed = True
+                    adapter.close()
+
+        response.close = close
+        return response
 
 
 def _is_public_address(value: str) -> bool:
@@ -15,35 +93,68 @@ def _is_public_address(value: str) -> bool:
     return bool(address.is_global)
 
 
-def validate_public_http_url(url: str, resolver=socket.getaddrinfo) -> tuple[bool, str]:
-    """Reject local/private/reserved destinations before every HTTP request."""
+def resolve_public_http_url(
+    url: str, resolver=socket.getaddrinfo,
+) -> tuple[ResolvedTarget | None, str]:
+    """Resolve a URL once and return a public address suitable for pinning."""
     try:
         parsed = urlparse(url)
         port = parsed.port
     except ValueError:
-        return False, "invalid_url"
+        return None, "invalid_url"
     if parsed.scheme not in {"http", "https"}:
-        return False, "unsupported_scheme"
+        return None, "unsupported_scheme"
     if parsed.username or parsed.password:
-        return False, "userinfo_not_allowed"
+        return None, "userinfo_not_allowed"
     host = (parsed.hostname or "").rstrip(".").casefold()
     if not host:
-        return False, "missing_host"
+        return None, "missing_host"
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-        return False, "local_host"
+        return None, "local_host"
     try:
         literal = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         literal = None
     if literal is not None:
-        return (True, "public_ip") if literal.is_global else (False, "non_public_ip")
+        if not literal.is_global:
+            return None, "non_public_ip"
+        return ResolvedTarget(
+            parsed.scheme, host, port or (443 if parsed.scheme == "https" else 80), host,
+        ), "public_ip"
     try:
         answers = resolver(host, port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
     except (socket.gaierror, OSError, UnicodeError):
-        return False, "dns_unresolved"
+        return None, "dns_unresolved"
     addresses = {answer[4][0] for answer in answers if answer and len(answer) >= 5 and answer[4]}
     if not addresses:
-        return False, "dns_no_address"
+        return None, "dns_no_address"
     if not all(_is_public_address(address) for address in addresses):
-        return False, "dns_non_public_address"
-    return True, "public_dns"
+        return None, "dns_non_public_address"
+    selected = min(
+        addresses,
+        key=lambda address: (
+            ipaddress.ip_address(address.split("%", 1)[0]).version != 4,
+            address,
+        ),
+    )
+    return ResolvedTarget(
+        parsed.scheme,
+        host,
+        port or (443 if parsed.scheme == "https" else 80),
+        selected,
+    ), "public_dns"
+
+
+def validate_public_http_url(url: str, resolver=socket.getaddrinfo) -> tuple[bool, str]:
+    """Reject local/private/reserved destinations before an HTTP request."""
+    target, reason = resolve_public_http_url(url, resolver)
+    return target is not None, reason
+
+
+def harden_session(session: requests.Session) -> requests.Session:
+    """Disable proxies and pin every HTTP(S) connection to a validated IP."""
+    session.trust_env = False
+    session.proxies.clear()
+    session.mount("http://", PublicOnlyHTTPAdapter())
+    session.mount("https://", PublicOnlyHTTPAdapter())
+    return session

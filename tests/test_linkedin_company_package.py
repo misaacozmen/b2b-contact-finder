@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 import config
 import main
 from modules import entity_resolution, linkedin_company, runtime
@@ -39,6 +41,17 @@ class FakeResponse:
         return None
 
 
+class RedirectResponse:
+    def __init__(self, status_code=200, location=""):
+        self.status_code = status_code
+        self.headers = {"location": location} if location else {}
+        self.close = Mock()
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"http {self.status_code}")
+
+
 class LinkedinCompanyPackageTests(unittest.TestCase):
     def setUp(self):
         runtime.reset()
@@ -57,6 +70,87 @@ class LinkedinCompanyPackageTests(unittest.TestCase):
         self.assertEqual(
             after.reason, "candidate_resolved_by_linkedin_website_match"
         )
+
+    def test_website_redirect_validates_every_hop_and_blocks_private_target(self):
+        first = RedirectResponse(302, "http://169.254.169.254/latest/meta-data")
+        with patch(
+            "modules.linkedin_company.network_guard.validate_public_http_url",
+            side_effect=[(True, "public_dns"), (False, "non_public_ip")],
+        ) as validate, patch(
+            "modules.linkedin_company._WEBSITE_SESSION.get", return_value=first,
+        ) as get:
+            resolved = linkedin_company._resolved_website(
+                "https://lnkd.in/example"
+            )
+
+        self.assertEqual(resolved, "https://lnkd.in/example")
+        self.assertEqual(validate.call_count, 2)
+        get.assert_called_once_with(
+            "https://lnkd.in/example",
+            allow_redirects=False,
+            stream=True,
+            timeout=20,
+        )
+        first.close.assert_called_once_with()
+
+    def test_website_redirect_follows_only_bounded_manually_validated_hops(self):
+        first = RedirectResponse(302, "/next")
+        second = RedirectResponse(301, "https://ornek.com.tr/about")
+        final = RedirectResponse(200)
+        with patch(
+            "modules.linkedin_company.network_guard.validate_public_http_url",
+            return_value=(True, "public_dns"),
+        ) as validate, patch(
+            "modules.linkedin_company._WEBSITE_SESSION.get",
+            side_effect=[first, second, final],
+        ) as get:
+            resolved = linkedin_company._resolved_website(
+                "https://lnkd.in/example"
+            )
+
+        self.assertEqual(resolved, "https://ornek.com.tr/about")
+        self.assertEqual(validate.call_count, 3)
+        self.assertEqual(get.call_count, 3)
+        self.assertTrue(all(
+            call.kwargs["allow_redirects"] is False
+            for call in get.call_args_list
+        ))
+        first.close.assert_called_once_with()
+        second.close.assert_called_once_with()
+        final.close.assert_called_once_with()
+
+    def test_website_redirect_stops_at_configured_limit(self):
+        responses = [
+            RedirectResponse(302, f"https://redirect-{index}.example/next")
+            for index in range(3)
+        ]
+        with patch.object(config, "MAX_HTTP_REDIRECTS", 2), patch(
+            "modules.linkedin_company.network_guard.validate_public_http_url",
+            return_value=(True, "public_dns"),
+        ), patch(
+            "modules.linkedin_company._WEBSITE_SESSION.get", side_effect=responses,
+        ) as get:
+            resolved = linkedin_company._resolved_website(
+                "https://lnkd.in/example"
+            )
+
+        self.assertEqual(resolved, "https://lnkd.in/example")
+        self.assertEqual(get.call_count, 3)
+        for response in responses:
+            response.close.assert_called_once_with()
+
+    def test_website_redirect_rejects_http_error_as_resolution(self):
+        response = RedirectResponse(404)
+        with patch(
+            "modules.linkedin_company.network_guard.validate_public_http_url",
+            return_value=(True, "public_dns"),
+        ), patch(
+            "modules.linkedin_company._WEBSITE_SESSION.get", return_value=response,
+        ):
+            resolved = linkedin_company._resolved_website(
+                "https://lnkd.in/missing"
+            )
+        self.assertEqual(resolved, "https://lnkd.in/missing")
 
     def test_declared_linkedin_url_needs_only_one_separate_budget_request(self):
         evaluation = _evaluation()

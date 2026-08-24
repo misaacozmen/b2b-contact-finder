@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,7 +21,7 @@ def _names(path: Path, sheet: str | None = None, column: str = "Company") -> set
 
 
 class Golden4PackageTests(unittest.TestCase):
-    def test_golden4_has_fifteen_unique_companies_with_no_seen_overlap(self):
+    def test_golden4_has_fifteen_unique_companies_with_no_prior_overlap_and_private_gate(self):
         manual = GOLDEN4_DIR / "golden_4_manual_validation_15.xlsx"
         current = _names(manual, "Manual Report")
         prior = set()
@@ -30,9 +31,12 @@ class Golden4PackageTests(unittest.TestCase):
             ROOT / "outputs/golden_3_20260715/golden_3_manual_validation_15.xlsx",
         ):
             prior.update(_names(path, "Manual Report"))
-        prior.update(_names(ROOT / "input/firms.xlsx", column="company"))
         self.assertEqual(len(current), 15)
         self.assertFalse(current & prior)
+
+        splits = json.loads((ROOT / "data/benchmark_splits.json").read_text(encoding="utf-8"))
+        g4_set = next(s for s in splits["sets"] if s.get("name") == "golden_4")
+        self.assertIs(g4_set.get("private_seen_check"), True)
 
     def test_golden4_uses_only_turkey_rows_from_the_unseen_fair(self):
         rows = _sheet_rows(GOLDEN4_DIR / "golden_4_pipeline_input_15.xlsx")

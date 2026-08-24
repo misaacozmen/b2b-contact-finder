@@ -1,15 +1,13 @@
 from datetime import timedelta
 from statistics import mean
 from modules import discovery_coverage, runtime
-
-
-OK_STATUSES = {"OK_HIGH_CONFIDENCE", "OK_MEDIUM_CONFIDENCE"}
+from modules.publication_policy import OK_STATUSES, is_publishable_row
 
 
 def failed_rows(rows: list[dict]) -> list[dict]:
     failed: list[dict] = []
     for row in rows:
-        if row.get("status") in OK_STATUSES:
+        if is_publishable_row(row):
             continue
         failed.append(
             {
@@ -32,14 +30,14 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
     verified_email_count = sum(1 for row in rows if row.get("email_verification") == "verified")
     phone_count = sum(1 for row in rows if row.get("phone"))
     complete_count = sum(1 for row in rows if row.get("website") and row.get("email") and row.get("phone"))
-    verified_rows = [row for row in rows if row.get("status") in OK_STATUSES]
+    verified_rows = [row for row in rows if is_publishable_row(row)]
     publication_eligible_count = sum(
-        1 for row in rows if row.get("publication_eligible") is True
+        1 for row in rows if is_publishable_row(row)
     )
     complete_held_count = sum(
         1 for row in rows
         if row.get("website") and row.get("email") and row.get("phone")
-        and row.get("status") not in OK_STATUSES
+        and not is_publishable_row(row)
     )
     verified_website_count = sum(1 for row in verified_rows if row.get("website"))
     verified_complete_count = sum(

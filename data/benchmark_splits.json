@@ -3,7 +3,8 @@
   "policy": {
     "target_country": "TR",
     "no_company_overlap": true,
-    "blind_must_use_unseen_fair": true
+    "blind_must_use_unseen_fair": true,
+    "private_seen_expected_unique_companies": 71
   },
   "sets": [
     {
@@ -30,7 +31,8 @@
       "expected": "outputs/golden_4_20260715/golden_4_manual_validation_15.xlsx",
       "source": "WIN EURASIA 2026",
       "source_url": "https://platform.win-eurasia.com/participants/all",
-      "status": "development_after_blind_run"
+      "status": "development_after_blind_run",
+      "private_seen_check": true
     },
     {
       "name": "golden_5",
@@ -41,7 +43,8 @@
       "discovery_protocol": "profile_url_removed_before_paid_run",
       "source": "Expomed Eurasia 2026",
       "source_url": "https://expomedistanbul.com/en/exhibitor-list",
-      "status": "ready_for_blind_run"
+      "status": "ready_for_blind_run",
+      "private_seen_check": true
     },
     {
       "name": "golden_6",
@@ -52,7 +55,8 @@
       "discovery_protocol": "profile_url_removed_before_paid_run",
       "source": "Automechanika Istanbul 2026",
       "source_url": "https://www.automechanikaistanbulplus.com/participants?lang=en",
-      "status": "ready_for_blind_run"
+      "status": "ready_for_blind_run",
+      "private_seen_check": true
     }
   ]
 }

@@ -374,7 +374,9 @@ class DiscoveryV2HoldoutTests(unittest.TestCase):
         error_response = Mock(status_code=403)
         error = requests.HTTPError("forbidden", response=error_response)
         rendered = '<div>Website <a href="https://delta.com.tr">Web Sitesi</a></div>'
-        with patch.object(config, "SEARCH_CACHE_MODE", "off"), patch(
+        with patch.object(config, "SEARCH_CACHE_MODE", "off"), patch.object(
+            config, "ENABLE_JS_PROFILE_FALLBACK", True
+        ), patch(
             "modules.search.crawler._request_with_safe_redirects", side_effect=error
         ), patch(
             "modules.search.crawler._try_render", return_value=(rendered, None)

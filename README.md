@@ -12,6 +12,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+Test/geliştirme ortamı için:
+
+```powershell
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
 ### Brandfetch ve Hunter resolver kurulumu
 
 Firma adindan domain kesfi icin Brandfetch Brand Search ve Hunter Domain Finder
@@ -32,12 +39,41 @@ Etkin/pasif secimleri gizli bilgi icermeyen `state/company_resolvers.json`
 dosyasinda tutulur. Kurulumu yeniden calistirarak anahtari degistirebilir veya
 bir resolver'i kapatabilirsiniz.
 
+## Mimari
+
+Proje, bağımlılıkları sadeleştiren, döngüsel bağımlılıkları engelleyen ve fail-closed güvenlik ilkelerine dayanan modüler bir mimari üzerine kuruludur:
+
+- `main.py`: CLI argüman ayrıştırma, genel orkestrasyon ve tekil firma işleme (`process_company`).
+- `modules/runtime_paths.py`: Çalışma zamanı dinamik çıktı (`output/`) ve durum (`state/`) dizini yönetimi.
+- `modules/api_configuration.py`: API anahtarlarının DPAPI ile güvenli saklanması, interaktif ayar yönetimi ve resolver yapılandırması.
+- `modules/run_budget.py`: Çalışma bütçesi hesaplamaları ve sağlayıcı istek tavanı ölçeklendirmesi.
+- `modules/result_factory.py`: Boş/başarısız firma sonuç satırlarının tek ve kanonik üretim noktası (`empty_result`).
+- `modules/pipeline_runner.py`: Toplu iş akışı yürütümü, tekrarlı firma kayıtlarını tekilleştirme, SQLite checkpoint yönetimi ve iki aşamalı (ücretsiz/ücretli) yürütme.
+- `modules/resolution_orchestrator.py`: Çok aşamalı hedefli arama/tarama ve aday çözümleme orkestrasyonu (`complete_resolution_evidence`).
+- `modules/output_artifacts.py`: Çıktı finalizasyonu, Excel (`contacts.xlsx`, `review_queue.xlsx`, vb.), JSONL kanıtları, kalite denetimi ve özet rapor üretimi.
+- `modules/discovery_rules.py`: `search.py` ve ağdan bağımsız saf arama kuralları, sorgu önceliklendirme, aday rolü sınıflandırma ve erken durma kuralları.
+- `modules/publication_policy.py`: Tüm yayın yüzeylerinin tek ve fail-closed karar kaynağı olan merkezi yayın kapısı (`is_publishable_row`).
+- `modules/redaction.py`: Kalıcı artifact'ler (Excel, JSONL, SQLite checkpoint, rapor) ve log yüzeylerinde credential/token sızıntılarını engelleyen özyinelemeli maskeleme (`sanitize`, `redact_text`).
+
+### CI ve Profil Yapısı
+
+- **Base CI**: Python 3.12 üzerinde `compileall`, çevrimdışı (`B2B_TEST_OFFLINE=1`) test paketi, benchmark doğrulama, `pip check` ve CLI yardım kontrolleri.
+- **Browser Smoke**: `requirements-browser.txt` ve Chromium ile dinamik sayfa kurtarma testi.
+- **OCR Smoke**: `requirements-ocr.txt` ve Tesseract OCR motoru (İngilizce/Türkçe dil paketleri) ile PDF/görsel metin kurtarma testi.
+
 ## Kullanım
 
 `input/firms.xlsx` dosyasına tek sütun halinde firma adlarını koyun. İlk satır `company` olabilir.
 
 ```powershell
 python main.py
+```
+
+Otomasyon/CI ortamlarında soru sormadan çalıştırmak için API seçimlerini ortam
+değişkenleriyle verip `--non-interactive` kullanın:
+
+```powershell
+python main.py --non-interactive
 ```
 
 Golden 30 firma testini başlatmak için her zaman şu komutu kullanın:
@@ -291,10 +327,18 @@ For JavaScript-only websites, optional rendering can be enabled after installing
 Playwright and its Chromium runtime:
 
 ```powershell
-pip install playwright
+pip install -r requirements-browser.txt
 playwright install chromium
 $env:ENABLE_JS_FALLBACK="1"
 ```
 
 Rendering is used only when a page appears to be an empty JavaScript application
 shell or a normal HTTP fetch fails.
+
+Taranmış PDF'lerde OCR isteğe bağlıdır. Sistem Tesseract uygulamasını ve
+`tur`/`eng` dil paketlerini kurup `PATH` üzerinden erişilebilir yaptıktan sonra:
+
+```powershell
+pip install -r requirements-ocr.txt
+$env:ENABLE_PDF_OCR="1"
+```

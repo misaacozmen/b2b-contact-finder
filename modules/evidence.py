@@ -5,17 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from modules import evidence_ledger
+from modules import evidence_ledger, redaction
 
 
 def _json_safe(value):
-    if isinstance(value, set):
-        return sorted(value)
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items() if not str(key).startswith("_secret")}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value
+    return redaction.sanitize(value)
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:

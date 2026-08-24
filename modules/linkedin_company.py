@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import json
 from threading import Lock
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import requests
 
 import config
-from modules import runtime, scorer
+from modules import network_guard, runtime, scorer
 
 
 _CACHE: dict[tuple[str, str], dict | None] = {}
 _PROFILE_CACHE: dict[str, dict | None] = {}
 _LOCK = Lock()
+_WEBSITE_SESSION = network_guard.harden_session(requests.Session())
 
 
 def reset() -> None:
@@ -144,15 +145,36 @@ def _resolved_website(website: str) -> str:
     """Resolve LinkedIn campaign short-links before comparing domains."""
     if not scorer.is_valid_hostname(website):
         return website
-    try:
+    current = website if "://" in website else f"https://{website}"
+    redirect_statuses = {301, 302, 303, 307, 308}
+    for redirect_count in range(config.MAX_HTTP_REDIRECTS + 1):
+        allowed, reason = network_guard.validate_public_http_url(current)
+        if not allowed:
+            runtime.record("api.linkedin_company.website_redirect_blocked")
+            return website
         runtime.record("api.linkedin_company.website_redirect_requests")
-        response = requests.get(
-            website, allow_redirects=True, stream=True, timeout=20
-        )
-        response.close()
-        return str(response.url or website)
-    except requests.RequestException:
-        return website
+        try:
+            response = _WEBSITE_SESSION.get(
+                current, allow_redirects=False, stream=True, timeout=20
+            )
+        except requests.RequestException:
+            return website
+        try:
+            if response.status_code not in redirect_statuses:
+                response.raise_for_status()
+                return current
+            location = response.headers.get("location", "").strip()
+            if not location:
+                return current
+            if redirect_count >= config.MAX_HTTP_REDIRECTS:
+                runtime.record("api.linkedin_company.website_redirect_limit")
+                return website
+            current = urljoin(current, location)
+        except requests.RequestException:
+            return website
+        finally:
+            response.close()
+    return website
 
 
 def corroborate(company: str, evaluation: dict) -> dict | None:

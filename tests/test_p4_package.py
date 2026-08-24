@@ -83,6 +83,25 @@ class ReplaySnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "integrity"):
                 replay_snapshot.load(snapshot, max_uncompressed_bytes=1024 * 1024)
 
+    def test_unsupported_intermediate_snapshot_format_is_rejected(self):
+        entries = []
+        payload = {
+            "format_version": 2,
+            "entry_count": 0,
+            "entries_sha256": __import__("hashlib").sha256(
+                replay_snapshot._canonical(entries)
+            ).hexdigest(),
+            "entries": entries,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "snapshot.json.gz"
+            with gzip.open(snapshot, "wt", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                replay_snapshot.load(
+                    snapshot, max_uncompressed_bytes=1024 * 1024,
+                )
+
     def test_secret_like_fields_are_removed_recursively(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "snapshot.json.gz"
@@ -102,6 +121,127 @@ class ReplaySnapshotTests(unittest.TestCase):
             value = serialized["entries"][0]["value"]
             self.assertNotIn("api_key", value)
             self.assertEqual(value["nested"], {"result": "safe"})
+
+    def test_signed_urls_and_snapshot_keys_are_redacted_but_replayable(self):
+        secret_url = (
+            "https://files.example/report?X-Amz-Signature=top-secret&token=abc"
+        )
+        replay_snapshot.record(
+            "crawl_cache", "document", secret_url, 1,
+            {"source_url": secret_url},
+        )
+        found, value = replay_snapshot.lookup(
+            "crawl_cache", "document", secret_url, 1,
+        )
+        self.assertTrue(found)
+        self.assertNotIn("top-secret", value["source_url"])
+        self.assertNotIn("token=abc", value["source_url"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "snapshot.json.gz"
+            replay_snapshot.write(snapshot)
+            with gzip.open(snapshot, "rt", encoding="utf-8") as handle:
+                serialized = handle.read()
+        self.assertNotIn("top-secret", serialized)
+        self.assertNotIn("token=abc", serialized)
+
+    def test_secret_bearing_keys_do_not_collide_after_redaction(self):
+        first = "https://files.example/report?token=first-secret"
+        second = "https://files.example/report?token=second-secret"
+        replay_snapshot.record("crawl_cache", "document", first, 1, {"id": 1})
+        replay_snapshot.record("crawl_cache", "document", second, 1, {"id": 2})
+        self.assertEqual(
+            replay_snapshot.lookup("crawl_cache", "document", first, 1)[1],
+            {"id": 1},
+        )
+        self.assertEqual(
+            replay_snapshot.lookup("crawl_cache", "document", second, 1)[1],
+            {"id": 2},
+        )
+
+    def test_legacy_snapshot_is_sanitized_when_rewritten(self):
+        secret_key = "https://files.example/report?token=legacy-secret"
+        entries = [{
+            "store": "crawl_cache",
+            "namespace": "document",
+            "key": secret_key,
+            "schema_version": 1,
+            "value": {"source_url": secret_key},
+        }]
+        payload = {
+            "format_version": 1,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "entry_count": 1,
+            "entries_sha256": __import__("hashlib").sha256(
+                replay_snapshot._canonical(entries)
+            ).hexdigest(),
+            "entries": entries,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = Path(directory) / "legacy.json.gz"
+            rewritten = Path(directory) / "rewritten.json.gz"
+            with gzip.open(legacy, "wt", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            replay_snapshot.load(legacy, max_uncompressed_bytes=1024 * 1024)
+            self.assertEqual(
+                replay_snapshot.lookup(
+                    "crawl_cache", "document", secret_key, 1,
+                )[1]["source_url"],
+                "https://files.example/report?token=[REDACTED]",
+            )
+            replay_snapshot.write(rewritten)
+            with gzip.open(rewritten, "rt", encoding="utf-8") as handle:
+                serialized = handle.read()
+        self.assertNotIn("legacy-secret", serialized)
+        self.assertIn('"format_version":3', serialized)
+
+    def test_redaction_preserves_surrounding_html_and_camel_case_secrets(self):
+        replay_snapshot.record(
+            "crawl_cache", "site", "key", 1,
+            {
+                "html": '<a href="https://x.example/?token=abc">Contact</a>',
+                "accessToken": "secret",
+                "clientSecret": "secret",
+                "refreshToken": "secret",
+            },
+        )
+        value = replay_snapshot.lookup("crawl_cache", "site", "key", 1)[1]
+        self.assertEqual(
+            value["html"],
+            '<a href="https://x.example/?token=[REDACTED]">Contact</a>',
+        )
+        self.assertNotIn("accessToken", value)
+        self.assertNotIn("clientSecret", value)
+        self.assertNotIn("refreshToken", value)
+
+    def test_azure_and_aws_session_url_secrets_are_redacted(self):
+        secret_url = (
+            "https://files.example/blob?sig=azure-secret&"
+            "X-Amz-Security-Token=aws-session-secret"
+        )
+        replay_snapshot.record(
+            "crawl_cache", "document", "key", 1, {"url": secret_url},
+        )
+        value = replay_snapshot.lookup("crawl_cache", "document", "key", 1)[1]
+        self.assertNotIn("azure-secret", value["url"])
+        self.assertNotIn("aws-session-secret", value["url"])
+
+    def test_secret_bearing_prefixes_do_not_cross_match(self):
+        first = "https://x.example/?token=first|pages=6|"
+        second = "https://x.example/?token=second|pages=6|"
+        replay_snapshot.record(
+            "crawl_cache", "site", first + "seeds=/contact", 1,
+            {"pages": [{"id": "first"}]},
+        )
+        replay_snapshot.record(
+            "crawl_cache", "site", second + "seeds=/contact", 1,
+            {"pages": [{"id": "second"}, {"id": "extra"}]},
+        )
+        found, value = replay_snapshot.lookup_prefix(
+            "crawl_cache", "site", first, 1,
+        )
+        self.assertTrue(found)
+        self.assertEqual(value["pages"], [{"id": "first"}])
 
 
 class RecoveryCoverageTests(unittest.TestCase):

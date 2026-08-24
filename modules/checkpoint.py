@@ -12,6 +12,7 @@ from functools import lru_cache
 from contextlib import closing
 
 import config
+from modules import redaction
 
 
 def _json_safe(value: Any) -> Any:
@@ -106,7 +107,7 @@ def save_result(input_path: Path, item_index: int, row: dict[str, Any], run_sign
     input_hash = file_hash(input_path)
     run_id = _run_id(input_hash, run_signature)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    payload = json.dumps(_json_safe(row), ensure_ascii=False, separators=(",", ":"))
+    payload = json.dumps(_json_safe(redaction.sanitize(row)), ensure_ascii=False, separators=(",", ":"))
     with closing(_connect()) as connection:
         connection.execute(
             "INSERT INTO runs(run_id,input_hash,run_signature,updated_at) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at",
@@ -129,7 +130,31 @@ def save_progress(input_path: Path, last_completed_index: int, results_so_far: l
         save_result(input_path, int(row.get("__index", offset)), row, run_signature)
 
 
+def clear_run_progress(input_path: Path, run_signature: str = "") -> None:
+    """Remove only one completed run, preserving other checkpoints."""
+    input_hash = file_hash(input_path)
+    run_id = _run_id(input_hash, run_signature)
+    if config.PROGRESS_DB_FILE.exists():
+        with closing(_connect()) as connection:
+            connection.execute("DELETE FROM results WHERE run_id=?", (run_id,))
+            connection.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+            connection.commit()
+    # The marker points only to the most recently written run. Remove it when
+    # stale or completed; other SQLite runs remain discoverable via has_progress.
+    if config.PROGRESS_FILE.exists():
+        try:
+            marker = json.loads(config.PROGRESS_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            marker = {}
+        if (
+            marker.get("input_file_hash") == input_hash
+            and marker.get("run_signature", "") == run_signature
+        ):
+            config.PROGRESS_FILE.unlink(missing_ok=True)
+
+
 def clear_progress() -> None:
+    """Destructively clear every checkpoint (explicit reset compatibility)."""
     if config.PROGRESS_FILE.exists():
         config.PROGRESS_FILE.unlink()
     for suffix in ("", "-wal", "-shm"):

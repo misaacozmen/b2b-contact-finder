@@ -14,7 +14,7 @@ from urllib.parse import quote
 import requests
 
 import config
-from modules import cache_store, runtime, scorer
+from modules import cache_store, redaction, runtime, scorer
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -24,12 +24,7 @@ HUNTER_DOMAIN_FINDER_URL = "https://api.hunter.io/v2/domain-finder"
 
 def _safe_request_error(exc: Exception) -> str:
     """Prevent credentials embedded in provider URLs from reaching run logs."""
-    return re.sub(
-        r"([?&](?:api_key|access_token|token)=)[^&\s]+",
-        r"\1[REDACTED]",
-        str(exc),
-        flags=re.IGNORECASE,
-    )
+    return redaction.redact_known_values(str(exc))
 
 
 def _cached(namespace: str, key: str):
@@ -124,7 +119,11 @@ def brandfetch_domains(company: str) -> list[dict]:
         return _clean_results(items, "brandfetch")
     except (requests.RequestException, ValueError, TypeError) as exc:
         runtime.record("resolver.brandfetch.error")
-        LOGGER.warning("Brandfetch domain search failed for %s: %s", company, exc)
+        LOGGER.warning(
+            "Brandfetch domain search failed for %s: %s",
+            company,
+            _safe_request_error(exc),
+        )
         return []
 
 

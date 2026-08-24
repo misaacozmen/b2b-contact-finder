@@ -1,0 +1,72 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      B2B_TEST_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-browser.txt
+            requirements-ocr.txt
+      - run: python -m pip install --requirement requirements-dev.txt
+      - run: python -c "from pathlib import Path; assert not Path('input/firms.xlsx').exists(), 'input/firms.xlsx must not exist'; assert not Path('data/benchmark_seen_company_hashes.json').exists(), 'public seen hashes fixture must not exist'; assert not Path('build_benchmark_seen_hashes.py').exists(), 'hash build tool must not exist'"
+      - run: python -m compileall -q main.py config.py setup_company_resolvers.py modules tests
+      - run: python -m pytest -q -p no:cacheprovider
+      - run: python validate_benchmark_suite.py
+      - run: python -m pip check
+      - run: python main.py --help
+      - run: python setup_company_resolvers.py --help
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-browser.txt
+            requirements-ocr.txt
+      - run: python -m pip install --requirement requirements-browser.txt
+      - run: python -m pip check
+      - run: playwright install --with-deps chromium
+      - run: python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); page = b.new_page(); page.set_content('<h1>Test</h1>'); assert 'Test' in page.content(); b.close(); p.stop()"
+
+  ocr-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-tur
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-browser.txt
+            requirements-ocr.txt
+      - run: python -m pip install --requirement requirements-ocr.txt
+      - run: python -m pip check
+      - run: python -c "import fitz, pytesseract, PIL; langs = pytesseract.get_languages(config=''); assert 'eng' in langs and 'tur' in langs, f'langs={langs}'"

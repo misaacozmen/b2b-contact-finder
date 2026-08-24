@@ -1,9 +1,11 @@
+import ipaddress
 import re
 import threading
 from collections import Counter
 from urllib.parse import urlparse
 
 from rapidfuzz import fuzz
+import tldextract
 
 import config
 
@@ -92,23 +94,27 @@ def rare_identity_token_bonus(company_name: str, evidence_text: str) -> tuple[in
     return min(len(matched) * 4, 8), matched
 
 
-MULTI_PART_PUBLIC_SUFFIXES = {
-    "com.tr", "net.tr", "org.tr", "biz.tr", "info.tr", "web.tr", "gen.tr",
-    "av.tr", "bel.tr", "gov.tr", "edu.tr", "k12.tr", "pol.tr", "tsk.tr",
-    "co.uk", "org.uk", "gov.uk", "ac.uk",
-}
+_PSL_EXTRACTOR = tldextract.TLDExtract(
+    suffix_list_urls=(),
+    include_psl_private_domains=True,
+)
 
 
 def registrable_domain(url_or_domain: str) -> str:
-    """Return a conservative registrable-domain approximation without network I/O."""
+    """Return the PSL registrable domain without making network requests."""
     domain = normalize_domain(url_or_domain)
-    parts = domain.split(".")
-    if len(parts) < 2:
+    if not domain:
+        return ""
+    try:
+        ipaddress.ip_address(domain)
         return domain
-    suffix = ".".join(parts[-2:])
-    if suffix in MULTI_PART_PUBLIC_SUFFIXES and len(parts) >= 3:
-        return ".".join(parts[-3:])
-    return suffix
+    except ValueError:
+        pass
+    extracted = _PSL_EXTRACTOR(domain)
+    if extracted.suffix:
+        return extracted.top_domain_under_public_suffix or domain
+    parts = domain.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
 
 def same_registrable_domain(first: str, second: str) -> bool:
@@ -119,9 +125,9 @@ def same_registrable_domain(first: str, second: str) -> bool:
 
 def domain_core(domain: str) -> str:
     domain = normalize_domain(domain)
-    for suffix in (".com.tr", ".net.tr", ".org.tr", ".co.uk"):
-        if domain.endswith(suffix):
-            return domain[: -len(suffix)]
+    extracted = _PSL_EXTRACTOR(domain)
+    if extracted.suffix:
+        return extracted.domain or domain
     return re.sub(r"\.[a-z]{2,}$", "", domain)
 
 
