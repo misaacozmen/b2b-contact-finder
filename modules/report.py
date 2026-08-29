@@ -23,7 +23,7 @@ def _pct(count: int, total: int) -> str:
     return f"{(count / total * 100):.1f}%" if total else "0.0%"
 
 
-def build_report(rows: list[dict], elapsed_seconds: float) -> str:
+def build_report(rows: list[dict], elapsed_seconds: float, *, runtime_snapshot: dict | None = None) -> str:
     total = len(rows)
     website_count = sum(1 for row in rows if row.get("website"))
     email_count = sum(1 for row in rows if row.get("email"))
@@ -50,7 +50,7 @@ def build_report(rows: list[dict], elapsed_seconds: float) -> str:
     scores = [int(row.get("score") or 0) for row in rows]
     average_score = mean(scores) if scores else 0
     elapsed = str(timedelta(seconds=int(elapsed_seconds)))
-    counters = runtime.snapshot().get("counters", {})
+    counters = (runtime_snapshot or {}).get("counters", {})
     brightdata_requests = int(counters.get("api.brightdata.requests", 0))
     linkedin_company_requests = int(counters.get("api.linkedin_company.requests", 0))
     linkedin_company_blocked = int(counters.get("api.linkedin_company.budget_blocked", 0))

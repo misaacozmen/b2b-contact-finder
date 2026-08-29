@@ -250,20 +250,9 @@ class PipelineImprovementTests(unittest.TestCase):
     def test_output_smoke_writes_new_audit_columns_and_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            patches = (
-                patch.object(config, "CONTACTS_FILE", root / "contacts.xlsx"),
-                patch.object(config, "VERIFIED_CONTACTS_FILE", root / "verified_contacts.xlsx"),
-                patch.object(config, "REVIEW_QUEUE_FILE", root / "review_queue.xlsx"),
-                patch.object(config, "FAILED_FILE", root / "failed.xlsx"),
-                patch.object(config, "CANDIDATES_FILE", root / "candidates.xlsx"),
-                patch.object(config, "REPORT_FILE", root / "report.txt"),
-                patch.object(config, "EVIDENCE_FILE", root / "evidence.jsonl"),
-                patch.object(config, "ENTITY_RELATIONSHIPS_FILE", root / "entity_relationships.jsonl"),
-                patch.object(config, "TELEMETRY_FILE", root / "telemetry.json"),
-            )
-            for context in patches:
-                context.start()
+            original_output_dir = config.OUTPUT_DIR
             try:
+                main._set_output_dir(root)
                 main._write_outputs([{
                     "company": "Example", "website": "https://example.com", "website_source": "official",
                     "email": "info@example.com", "email_source_url": "https://example.com/contact",
@@ -272,8 +261,7 @@ class PipelineImprovementTests(unittest.TestCase):
                     "score": 95, "reason": "test", "__candidates": [{"_evidence_queries": {"q1"}}],
                 }], 0)
             finally:
-                for context in reversed(patches):
-                    context.stop()
+                main._set_output_dir(original_output_dir)
             workbook = load_workbook(root / "contacts.xlsx", read_only=True)
             try:
                 headers = [cell.value for cell in workbook.active[1]]

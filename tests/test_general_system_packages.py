@@ -1,8 +1,11 @@
 import unittest
 from unittest.mock import patch
 
+from openpyxl import load_workbook
+
 import main
-from modules import crawler, extractor, identity, query_planner, relationship_graph, site_mapper
+import config
+from modules import crawler, extractor, identity, output_artifacts, query_planner, relationship_graph, site_mapper
 
 
 class AdaptiveQueryPlannerTests(unittest.TestCase):
@@ -187,16 +190,17 @@ class SmartOfficialSiteMappingTests(unittest.TestCase):
             {"company": "Verified", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://verified.example"},
             {"company": "Review", "status": "REVIEW_NEEDED", "website": "https://review.example"},
         ]
-        with patch("main.evidence.write_jsonl"), patch(
-            "main.entity_registry.write_observations"
-        ), patch("main.excel.write_contacts") as write_contacts, patch(
-            "main.excel.write_failed"
-        ), patch("main.excel.write_website_candidates"), patch(
-            "main.report.build_report", return_value="report"
-        ), patch("pathlib.Path.write_text"), patch("main.runtime.write"):
-            main._write_outputs(rows, 0)
-        published = list(write_contacts.call_args_list[0].args[1])
+        published, review = output_artifacts.partition_output_rows(rows)
         self.assertEqual([row["company"] for row in published], ["Verified"])
+        self.assertEqual([row["company"] for row in review], ["Review"])
+        with patch("main.report.build_report", return_value="report"):
+            main._write_outputs(rows, 0)
+        workbook = load_workbook(config.CONTACTS_FILE, read_only=True, data_only=True)
+        values = list(workbook.active.values)
+        workbook.close()
+        headers, *data = values
+        company_index = list(headers).index("company")
+        self.assertEqual([row[company_index] for row in data], ["Verified"])
 
 
 class ControlledRecoveryPipelineTests(unittest.TestCase):

@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
-from modules import runtime, scorer
+from modules import cache_store, runtime, scorer
 
 
 _VERDICTS = {"match", "no_match", "uncertain"}
@@ -30,8 +30,18 @@ _RESPONSE_SCHEMA = {
 }
 
 
+def reset() -> None:
+    _DECISION_CACHE.clear()
+
+
 class ArbiterClient(Protocol):
     def generate(self, prompt: str, response_schema: dict) -> dict: ...
+
+
+class ProviderRejected(RuntimeError):
+    def __init__(self, provider_result):
+        self.provider_result = provider_result
+        super().__init__(provider_result.result_reason or provider_result.result_state)
 
 
 def _decode_json_object(text: str) -> dict:
@@ -62,8 +72,19 @@ class OpenRouterClient:
 
     def generate(self, prompt: str, response_schema: dict) -> dict:
         response = None
+        call_ids = []
         for attempt in range(3):
-            response = requests.post(
+            fingerprint = runtime.request_fingerprint(
+                "llm", "arbiter", {"prompt": prompt, "schema": response_schema, "ordinal": attempt + 1},
+            )
+            reservation = runtime.reserve_api(
+                "llm", operation=f"arbiter.retry_{attempt + 1}", request_fingerprint=fingerprint,
+            )
+            if not reservation:
+                raise ProviderRejected(runtime.rejected_provider_result(reservation))
+            call_ids.append(reservation.call_id)
+            try:
+                response = requests.post(
                 f"{config.OPENROUTER_API_BASE_URL}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
@@ -90,10 +111,22 @@ class OpenRouterClient:
                     "max_tokens": 260,
                     "response_format": {"type": "json_object"},
                 },
-                timeout=self.timeout_sec,
-            )
+                    timeout=self.timeout_sec,
+                )
+            except (TimeoutError, requests.Timeout, requests.ConnectionError):
+                runtime.complete_api(reservation, "UNKNOWN")
+                raise
+            except Exception:
+                runtime.complete_api(reservation, "FAILED")
+                raise
+            if 400 <= response.status_code < 500 and response.status_code != 429:
+                # A deterministic provider rejection is FAILED, never DONE.
+                runtime.complete_api(reservation, "FAILED", result_ref=f"http_{response.status_code}")
+                response.raise_for_status()
             if response.status_code != 429 and response.status_code < 500:
+                runtime.complete_api(reservation, "DONE")
                 break
+            runtime.complete_api(reservation, "FAILED")
             if attempt < 2:
                 retry_after = response.headers.get("Retry-After", "")
                 try:
@@ -108,6 +141,7 @@ class OpenRouterClient:
         text = str(payload["choices"][0]["message"]["content"])
         result = _decode_json_object(text)
         result["usage"] = payload.get("usage", {})
+        result["provider_call_ids"] = call_ids
         return result
 
 
@@ -180,24 +214,39 @@ def arbitrate(
     client: ArbiterClient | None = None,
 ) -> dict:
     """Return a fail-open semantic verdict for one already plausible candidate."""
-    if client is None and not available():
-        return {"verdict": "uncertain", "reason": "llm_arbiter_unavailable"}
     clean_summary = " ".join(str(page_summary or "").split()[:320])
     cache_key = tuple(str(value or "").strip() for value in (
         company_name, legal_title, sector_context,
         scorer.normalize_domain(candidate_domain), clean_summary,
     ))
+    persistent_key = "|".join(cache_key)
+    if client is None and config.SEARCH_CACHE_MODE in {"use", "replay"}:
+        cached = cache_store.load(
+            config.SEARCH_CACHE_DIR, "llm_arbiter", persistent_key,
+            config.SEARCH_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION,
+        )
+        if isinstance(cached, dict):
+            runtime.record("api.llm_arbiter.persistent_cache_hits")
+            return dict(cached)
+        if config.SEARCH_CACHE_MODE == "replay":
+            return {"verdict": "uncertain", "reason": "llm_arbiter_replay_cache_miss", "provider_result": "REPLAY_MISS"}
+    if client is None and not available():
+        return {"verdict": "uncertain", "reason": "llm_arbiter_unavailable", "provider_result": "NOT_ENABLED"}
     if client is None and cache_key in _DECISION_CACHE:
         runtime.record("api.llm_arbiter.cache_hits")
         return dict(_DECISION_CACHE[cache_key])
-    if not runtime.reserve_api("llm_arbiter", config.LLM_ARBITER_BUDGET):
-        return {"verdict": "uncertain", "reason": "llm_arbiter_budget_blocked"}
-    runtime.wait_for_request_slot()
     active_client = client or OpenRouterClient(
         config.OPENROUTER_API_KEY,
         config.LLM_ARBITER_MODEL,
         config.LLM_ARBITER_TIMEOUT_SEC,
     )
+    reservation = None
+    if not isinstance(active_client, OpenRouterClient):
+        reservation = runtime.reserve_api("llm", operation="arbiter", request_fingerprint=runtime.request_fingerprint("llm", "arbiter", {"key": persistent_key}))
+        if not reservation:
+            rejected = runtime.rejected_provider_result(reservation)
+            return {"verdict": "uncertain", "reason": rejected.result_reason, "provider_result": rejected.result_state, "provider_call_ids": list(rejected.call_ids)}
+    runtime.wait_for_request_slot()
     try:
         result = active_client.generate(
             _prompt(
@@ -243,11 +292,32 @@ def arbitrate(
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
             },
+            "provider_result": "COMPLETED",
+            "provider_call_ids": result.get("provider_call_ids", [getattr(reservation, "call_id", "")]),
         }
         if client is None:
             _DECISION_CACHE[cache_key] = dict(decision)
+            if config.SEARCH_CACHE_MODE in {"use", "refresh"}:
+                cache_store.save(
+                    config.SEARCH_CACHE_DIR, "llm_arbiter", persistent_key,
+                    decision, config.CACHE_SCHEMA_VERSION,
+                )
+        if reservation is not None:
+            runtime.complete_api(reservation, "DONE")
         return decision
-    except (requests.RequestException, KeyError, IndexError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except Exception as exc:
+        rejected = getattr(exc, "provider_result", None)
+        if rejected is not None:
+            return {
+                "verdict": "uncertain",
+                "reason": f"llm_arbiter_provider_rejected:{rejected.result_reason}",
+                "model": config.LLM_ARBITER_MODEL,
+                "provider_result": rejected.result_state,
+                "provider_call_ids": list(rejected.call_ids),
+            }
+        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        if reservation is not None:
+            runtime.complete_api(reservation, state)
         runtime.record("api.llm_arbiter.provider_failures")
         status = getattr(getattr(exc, "response", None), "status_code", None)
         suffix = f":{status}" if status else ""
@@ -255,4 +325,6 @@ def arbitrate(
             "verdict": "uncertain",
             "reason": f"llm_arbiter_provider_failure:{type(exc).__name__}{suffix}",
             "model": config.LLM_ARBITER_MODEL,
+            "provider_result": state,
+            "provider_call_ids": result.get("provider_call_ids", [getattr(reservation, "call_id", "")]) if isinstance(locals().get("result"), dict) else [getattr(reservation, "call_id", "")],
         }

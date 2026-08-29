@@ -9,6 +9,8 @@ def set_output_dir(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     config.OUTPUT_DIR = output_dir
     config.CONTACTS_FILE = output_dir / "contacts.xlsx"
+    config.ALL_RESULTS_FILE = output_dir / "all_results.xlsx"
+    config.MANIFEST_FILE = output_dir / "manifest.json"
     config.VERIFIED_CONTACTS_FILE = output_dir / "verified_contacts.xlsx"
     config.REVIEW_QUEUE_FILE = output_dir / "review_queue.xlsx"
     config.FAILED_FILE = output_dir / "failed.xlsx"

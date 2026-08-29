@@ -7,10 +7,11 @@ from modules import scorer
 import run_golden_6
 from validate_benchmark_suite import validate_manifest
 from validate_golden_xlsx import _sheet_rows, assertion_coverage, readiness_issues
+from fixture_factory import benchmark_manifest, golden, path as fixture_path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-GOLDEN6_DIR = ROOT / "outputs" / "golden_6_20260718"
+ROOT = fixture_path()
+GOLDEN6_DIR = golden(6).parent
 
 
 def _names(path: Path, sheet: str | None = None, column: str = "Company") -> set[str]:
@@ -27,17 +28,15 @@ class Golden6PackageTests(unittest.TestCase):
         current = _names(manual, "Manual Report")
         prior = set()
         for path in (
-            ROOT / "outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx",
-            ROOT / "outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx",
-            ROOT / "outputs/golden_3_20260715/golden_3_manual_validation_15.xlsx",
-            ROOT / "outputs/golden_4_20260715/golden_4_manual_validation_15.xlsx",
-            ROOT / "outputs/golden_5_20260716/golden_5_manual_validation_20_ready.xlsx",
+            fixture_path("outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx"),
+            fixture_path("outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx"),
+            golden(3), golden(4), golden(5),
         ):
             prior.update(_names(path, "Manual Report"))
         self.assertEqual(len(current), 20)
         self.assertFalse(current & prior)
 
-        splits = json.loads((ROOT / "data/benchmark_splits.json").read_text(encoding="utf-8"))
+        splits = json.loads(benchmark_manifest().read_text(encoding="utf-8"))
         g6_set = next(s for s in splits["sets"] if s.get("name") == "golden_6")
         self.assertIs(g6_set.get("private_seen_check"), True)
 
@@ -93,7 +92,7 @@ class Golden6PackageTests(unittest.TestCase):
         self.assertEqual(coverage["phone"], {"asserted": 20, "unknown": 0, "missing": 0})
 
     def test_pending_blind_set_keeps_benchmark_manifest_valid(self):
-        _, issues = validate_manifest(ROOT / "data/benchmark_splits.json")
+        _, issues = validate_manifest(benchmark_manifest())
         self.assertEqual(issues, [])
 
 

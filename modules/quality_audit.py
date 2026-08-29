@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from modules import publication_policy, runtime, scorer
 POLICY_VERSION = "autonomous-quality-v1"
 
 
-def payload(rows: list[dict]) -> dict:
+def payload(rows: list[dict], *, runtime_snapshot: dict | None = None) -> dict:
     statuses = Counter(str(row.get("status", "")) for row in rows)
     terminal_reasons: Counter = Counter()
     gap_counts: Counter = Counter()
@@ -87,16 +88,19 @@ def payload(rows: list[dict]) -> dict:
                 "they are not ground truth for threshold tuning."
             ),
         },
-        "runtime": runtime.snapshot(),
+        "runtime": dict(runtime_snapshot) if runtime_snapshot is not None else {},
     }
 
 
-def write(path: Path, rows: list[dict]) -> None:
+def write(path: Path, rows: list[dict], *, runtime_snapshot: dict | None = None) -> None:
     from modules import redaction
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    sanitized_payload = redaction.sanitize(payload(rows))
-    path.write_text(
-        json.dumps(sanitized_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    sanitized_payload = redaction.sanitize(payload(rows, runtime_snapshot=runtime_snapshot))
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(sanitized_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if temporary.exists():
+            temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

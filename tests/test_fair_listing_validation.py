@@ -4,11 +4,12 @@ from pathlib import Path
 
 from modules.excel import read_company_records
 from validate_fair_listed_websites import meaningful_domain_token, validate_records
+from fixture_factory import fair_metadata, fair_subset
 
 
 ROOT = Path(__file__).parents[1]
-SUBSET = ROOT / "outputs" / "task2_validation_20260808" / "validation_subset_seed_314365_60.xlsx"
-LISTING_METADATA = ROOT / "tests" / "fixtures" / "task2_foodist_listing_20260808.json"
+SUBSET = fair_subset()
+LISTING_METADATA = fair_metadata()
 
 
 class FairListingValidationTests(unittest.TestCase):

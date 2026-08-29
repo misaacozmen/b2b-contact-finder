@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import config
@@ -53,7 +56,12 @@ def remember(rows: list[dict]) -> int:
     additions: list[dict] = []
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for row in rows:
-        if not publication_policy.is_publishable_row(row):
+        if (
+            not publication_policy.is_publishable_row(row)
+            or row.get("quarantine_state")
+            or row.get("quarantine_status")
+            or "legacy_recovery_provisional" in str(row.get("publication_blockers", ""))
+        ):
             continue
         evaluation = row.get("__evaluation", {})
         if not isinstance(evaluation, dict):
@@ -75,6 +83,7 @@ def remember(rows: list[dict]) -> int:
             continue
         additions.append({
             "schema_version": SCHEMA_VERSION,
+            "receipt_key": str(row.get("__memory_receipt_key", "")),
             "company": row.get("company", ""),
             "domain": domain,
             "resolution": resolution,
@@ -88,13 +97,24 @@ def remember(rows: list[dict]) -> int:
         })
     if not additions:
         return 0
-    with _LOCK:
+    with _LOCK, _file_lock(config.VERIFIED_ENTITY_MEMORY_FILE):
+        existing = _load()
+        existing_receipts = {
+            str(item.get("receipt_key", ""))
+            for item in existing
+            if item.get("receipt_key")
+        }
+        additions = [
+            item for item in additions
+            if not item.get("receipt_key") or item["receipt_key"] not in existing_receipts
+        ]
+        if not additions:
+            return 0
         keyed = {
             (
                 scorer.normalize_text(item.get("company", "")).strip(),
                 scorer.normalize_domain(item.get("domain", "")),
-            ): item
-            for item in _load()
+            ): item for item in existing
         }
         for item in additions:
             keyed[(
@@ -104,9 +124,43 @@ def remember(rows: list[dict]) -> int:
         config.VERIFIED_ENTITY_MEMORY_FILE.parent.mkdir(
             parents=True, exist_ok=True,
         )
-        with config.VERIFIED_ENTITY_MEMORY_FILE.open(
-            "w", encoding="utf-8"
-        ) as handle:
+        target = config.VERIFIED_ENTITY_MEMORY_FILE
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
             for item in keyed.values():
                 handle.write(json.dumps(redaction.sanitize(item), ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(target)
     return len(additions)
+
+
+@contextmanager
+def _file_lock(target):
+    """Serialize read/merge/replace across processes without losing entries."""
+    lock_path = target.with_name(f".{target.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0)
+        handle.write(b"0")
+        handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -167,11 +168,10 @@ def write(path: Path, max_queries_per_company: int = 3) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     sanitized_payload = redaction.sanitize(payload(max_queries_per_company))
-    path.write_text(
-        json.dumps(
-            sanitized_payload,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(sanitized_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if temporary.exists():
+            temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

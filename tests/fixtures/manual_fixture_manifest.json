@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "files": {
+    "manual_verified_tex_zuchex_fixture.json": {
+      "bytes": 734,
+      "sha256": "b6379e6b0ea9a78ede2fc0be667af2944443ab32b52c57c034370ffca634e374"
+    }
+  }
+}

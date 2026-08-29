@@ -12,6 +12,12 @@ from modules import cache_store, runtime, scorer
 LOGGER = logging.getLogger("contact_finder")
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 FIELD_MASK = "places.id,places.displayName,places.websiteUri,places.internationalPhoneNumber,places.businessStatus"
+_BUDGET_LATCHED = False
+
+
+def reset() -> None:
+    global _BUDGET_LATCHED
+    _BUDGET_LATCHED = False
 
 
 def is_enabled() -> bool:
@@ -20,8 +26,9 @@ def is_enabled() -> bool:
 
 def search_company(company: str) -> list[dict]:
     """Return Google-maintained business records without making them trusted candidates yet."""
+    global _BUDGET_LATCHED
     if not is_enabled():
-        return []
+        return runtime.provider_result([], state="NOT_ENABLED", reason="provider_disabled")
     variants = scorer.search_name_variants(company)
     query_name = (variants[0] if variants else company).strip()[:100]
     cache_key = json.dumps({"query": query_name, "region": "TR", "fields": FIELD_MASK}, sort_keys=True)
@@ -31,14 +38,23 @@ def search_company(company: str) -> list[dict]:
             config.SEARCH_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION,
         )
         if cached is not None:
-            return cached
+            return runtime.provider_result(cached, state="CACHE_HIT", reason="cached")
         if config.SEARCH_CACHE_MODE == "replay":
             LOGGER.warning("Google Places replay cache miss: %s", company)
-            return []
+            return runtime.provider_result([], state="REPLAY_MISS", reason="replay_cache_miss")
+    if _BUDGET_LATCHED:
+        runtime.record("api.google_places.budget_latched")
+        return runtime.provider_result([], state="BLOCKED_BUDGET", reason="budget_latched")
     try:
-        if not runtime.reserve_api("google_places", config.GOOGLE_PLACES_REQUEST_BUDGET):
-            LOGGER.warning("Google Places run budget exhausted")
-            return []
+        reservation = runtime.reserve_api("google_places", operation="text_search", request_fingerprint=runtime.request_fingerprint("google_places", "text_search", {"query": query_name, "region": "TR"}))
+        if not reservation:
+            if reservation.reason in {"budget_exhausted", "budget_disabled"} and not _BUDGET_LATCHED:
+                LOGGER.warning("Google Places run budget exhausted; disabling remaining calls")
+                _BUDGET_LATCHED = True
+                runtime.record("api.google_places.budget_exhausted_logged")
+            elif reservation.reason in {"budget_exhausted", "budget_disabled"}:
+                runtime.record("api.google_places.budget_exhausted_latched")
+            return runtime.rejected_provider_result(reservation)
         runtime.wait_for_request_slot()
         response = requests.post(
             TEXT_SEARCH_URL,
@@ -51,12 +67,20 @@ def search_company(company: str) -> list[dict]:
             timeout=config.GOOGLE_PLACES_TIMEOUT_SEC,
         )
         response.raise_for_status()
-    except requests.RequestException as exc:
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Google Places response is not a JSON object")
+        runtime.complete_api(reservation, "DONE")
+    except Exception as exc:
+        if "reservation" in locals():
+            state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+            runtime.complete_api(reservation, state)
+            return runtime.provider_result([], state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
         LOGGER.warning("Google Places lookup failed for %s: %s", company, exc)
-        return []
+        return runtime.provider_result([], state="FAILED", reason=f"{type(exc).__name__}:{exc}")
 
     places = []
-    for place in response.json().get("places", []):
+    for place in payload.get("places", []):
         if place.get("businessStatus") == "CLOSED_PERMANENTLY":
             continue
         website = place.get("websiteUri", "")
@@ -75,7 +99,7 @@ def search_company(company: str) -> list[dict]:
             config.SEARCH_CACHE_DIR, "google_places", cache_key, places,
             config.CACHE_SCHEMA_VERSION,
         )
-    return places
+    return runtime.provider_result(places, state="COMPLETED" if places else "EMPTY", reason="results" if places else "empty_response", call_ids=(getattr(reservation, "call_id", ""),))
 
 
 def find_phone_for_website(company: str, website: str) -> str:

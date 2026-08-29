@@ -13,6 +13,8 @@ outputs/
 state/
 artifact_work/
 .codex_work/
+.codex-tmp/
+.codex_tmp*/
 
 # Existing tracked benchmark fixtures remain versioned. New generated runs
 # under outputs/ must be added explicitly only when they are intentional,

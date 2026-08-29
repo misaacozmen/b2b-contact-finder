@@ -1,12 +1,12 @@
 import html
 import json
 import re
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup
 
 import config
-from modules import evidence_ledger, scorer
+from modules import evidence_ledger, network_guard, redaction, scorer
 
 
 EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
@@ -97,6 +97,7 @@ def extract_organization_evidence(
     html_text: str, source_url: str = "", retrieval_method: str = "http",
 ) -> dict:
     """Extract auditable first-party identity fields from structured and legal HTML."""
+    html_text = redaction.normalize_unicode_scalars(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
     result = {
         "names": [], "urls": [], "same_as": [], "addresses": [],
@@ -392,6 +393,7 @@ def _is_placeholder_email(value: str) -> bool:
 def extract_emails(html_text: str) -> list[str]:
     # Search visible page text plus explicit contact fields.  Scanning raw
     # scripts publishes telemetry/Sentry and site-template placeholder emails.
+    html_text = redaction.normalize_unicode_scalars(html_text)
     text = _normalize_obfuscated_email_text(_visible_text(html_text))
     soup = BeautifulSoup(html_text, "html.parser")
     mailto_values = [
@@ -452,6 +454,7 @@ def extract_emails(html_text: str) -> list[str]:
 
 
 def extract_phones(html_text: str) -> list[str]:
+    html_text = redaction.normalize_unicode_scalars(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
     tel_values = [
         unquote(link.get("href", "")[4:]).split("?", 1)[0]
@@ -459,7 +462,11 @@ def extract_phones(html_text: str) -> list[str]:
     ]
     whatsapp_values = []
     for link in soup.find_all("a", href=True):
-        parsed = urlparse(unquote(link.get("href", "")))
+        parsed = network_guard.safe_urlparse(
+            unquote(link.get("href", "")), metric="extractor.url",
+        )
+        if parsed is None:
+            continue
         host = parsed.netloc.casefold().removeprefix("www.")
         if host not in {"wa.me", "api.whatsapp.com", "web.whatsapp.com"}:
             continue
@@ -513,6 +520,7 @@ def extract_contact_records(
     html_text: str, source_url: str, retrieval_method: str = "http",
 ) -> dict:
     """Return all contacts with their page and best available role label."""
+    html_text = redaction.normalize_unicode_scalars(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
     email_labels: dict[str, str] = {}
     phone_labels: list[tuple[str, str]] = []
@@ -525,7 +533,9 @@ def extract_contact_records(
         elif href.casefold().startswith("tel:"):
             phone_labels.append((href[4:].split("?", 1)[0], _contact_label(context)))
         else:
-            parsed = urlparse(href)
+            parsed = network_guard.safe_urlparse(href, metric="extractor.url")
+            if parsed is None:
+                continue
             host = parsed.netloc.casefold().removeprefix("www.")
             if host in {"wa.me", "api.whatsapp.com", "web.whatsapp.com"}:
                 digits = re.sub(r"\D", "", f"{parsed.path} {parsed.query}")
@@ -585,8 +595,12 @@ def extract_contact_records(
 def extract_contact_page_links(
     html_text: str, base_url: str, limit: int, allow_official_subdomains: bool = False
 ) -> list[str]:
+    html_text = redaction.normalize_unicode_scalars(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
-    base_domain = urlparse(base_url).netloc.lower()
+    base = network_guard.safe_urlparse(base_url, metric="extractor.base_url")
+    if base is None:
+        return []
+    base_domain = base.netloc.lower()
     contact_keywords = ("contact", "iletisim", "iletişim", "kontakt", "bize ulaş", "bize ulas")
     company_keywords = ("hakkımızda", "hakkimizda", "kurumsal", "about", "company", "corporate")
     candidates: list[tuple[int, str]] = []
@@ -606,7 +620,10 @@ def extract_contact_page_links(
         if not href or href.startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
         url = urljoin(base_url, href)
-        target_domain = urlparse(url).netloc.lower()
+        parsed = network_guard.safe_urlparse(url, metric="extractor.url")
+        if parsed is None:
+            continue
+        target_domain = parsed.netloc.lower()
         same_site = target_domain == base_domain or (
             allow_official_subdomains and scorer.same_registrable_domain(target_domain, base_domain)
         )

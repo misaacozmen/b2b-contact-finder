@@ -9,11 +9,32 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import requests
 
 import config
-from modules import network_guard, runtime, scorer
+from modules import cache_store, network_guard, runtime, scorer
 
 
 _CACHE: dict[tuple[str, str], dict | None] = {}
 _PROFILE_CACHE: dict[str, dict | None] = {}
+
+
+class ProviderText(str):
+    """String-compatible LinkedIn provider result with ledger metadata."""
+
+    def __new__(cls, value: str = "", *, state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = ()):
+        result = str.__new__(cls, value)
+        result.result_state = str(state)
+        result.result_reason = str(reason)
+        result.call_ids = tuple(str(value) for value in call_ids if value)
+        return result
+
+
+class ProviderRecord(dict):
+    """Dict-compatible LinkedIn provider result with ledger metadata."""
+
+    def __init__(self, *args, state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = (), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.result_state = str(state)
+        self.result_reason = str(reason)
+        self.call_ids = tuple(str(value) for value in call_ids if value)
 _LOCK = Lock()
 _WEBSITE_SESSION = network_guard.harden_session(requests.Session())
 
@@ -53,13 +74,12 @@ def _declared_linkedin_url(evaluation: dict) -> str:
     return ""
 
 
-def _reserve(kind: str) -> bool:
-    if not runtime.reserve_api(
-        "linkedin_company", config.LINKEDIN_COMPANY_REQUEST_BUDGET
-    ):
-        return False
+def _reserve(kind: str, request: object = None):
+    reservation = runtime.reserve_api("linkedin", operation=kind, request_fingerprint=runtime.request_fingerprint("linkedin", kind, request or {}))
+    if not reservation:
+        return reservation
     runtime.record(f"api.linkedin_company.{kind}_requests")
-    return True
+    return reservation
 
 
 def _response_json(response: requests.Response):
@@ -73,34 +93,42 @@ def _response_json(response: requests.Response):
 
 
 def _find_company_url(company: str) -> str:
-    if not _reserve("serp"):
-        return ""
+    query = f'site:linkedin.com/company "{company}"'
+    reservation = _reserve("serp", {"query": query})
+    if not reservation:
+        rejected = runtime.rejected_provider_result(reservation)
+        return ProviderText("", state=rejected.result_state, reason=rejected.result_reason, call_ids=rejected.call_ids)
     # LinkedIn often hides the company website from indexed snippets. Adding
     # the candidate domain to the query therefore suppresses otherwise exact
     # company-page results; identity is checked against the returned profile
     # name and its scraper-provided website below instead.
-    query = f'site:linkedin.com/company "{company}"'
     search_url = (
         f"https://{config.BRIGHTDATA_GOOGLE_DOMAIN}/search"
         f"?q={quote_plus(query)}&hl={config.BRIGHTDATA_GOOGLE_HL}"
         f"&gl={config.BRIGHTDATA_GOOGLE_GL}"
     )
-    response = requests.post(
-        config.BRIGHTDATA_ENDPOINT,
-        json={
-            "zone": config.BRIGHTDATA_ZONE,
-            "url": search_url,
-            "format": "json",
-            "country": config.BRIGHTDATA_COUNTRY,
-        },
-        headers={
-            "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        timeout=config.BRIGHTDATA_TIMEOUT_SEC,
-    )
-    response.raise_for_status()
-    data = _response_json(response)
+    try:
+        response = requests.post(
+            config.BRIGHTDATA_ENDPOINT,
+            json={
+                "zone": config.BRIGHTDATA_ZONE,
+                "url": search_url,
+                "format": "json",
+                "country": config.BRIGHTDATA_COUNTRY,
+            },
+            headers={
+                "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=config.BRIGHTDATA_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        data = _response_json(response)
+        runtime.complete_api(reservation, "DONE")
+    except BaseException as exc:
+        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        runtime.complete_api(reservation, state)
+        return ProviderText("", state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
     if not isinstance(data, dict):
         return ""
     organic = data.get("organic") or data.get("organic_results") or data.get("results") or []
@@ -108,37 +136,45 @@ def _find_company_url(company: str) -> str:
         url = _company_url(item.get("link") or item.get("url") or "")
         observed = " ".join((str(item.get("title", "")), str(item.get("description", "")), str(item.get("snippet", ""))))
         if url and scorer.business_name_identity_match(company, observed):
-            return url
-    return ""
+            return ProviderText(url, state="COMPLETED", reason="profile_match", call_ids=(getattr(reservation, "call_id", ""),))
+    return ProviderText("", state="EMPTY", reason="no_profile_match", call_ids=(getattr(reservation, "call_id", ""),))
 
 
 def _scrape(linkedin_url: str):
-    if not _reserve("scrape"):
-        return None
-    response = requests.post(
-        config.LINKEDIN_COMPANY_ENDPOINT,
-        params={
-            "dataset_id": config.LINKEDIN_COMPANY_DATASET_ID,
-            "format": "json",
-            "include_errors": "true",
-        },
-        json={"input": [{"url": linkedin_url}]},
-        headers={
-            "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        timeout=config.LINKEDIN_COMPANY_TIMEOUT_SEC,
-    )
-    response.raise_for_status()
-    data = _response_json(response)
+    reservation = _reserve("scrape", {"url": linkedin_url})
+    if not reservation:
+        rejected = runtime.rejected_provider_result(reservation)
+        return ProviderRecord(state=rejected.result_state, reason=rejected.result_reason, call_ids=rejected.call_ids)
+    try:
+        response = requests.post(
+            config.LINKEDIN_COMPANY_ENDPOINT,
+            params={
+                "dataset_id": config.LINKEDIN_COMPANY_DATASET_ID,
+                "format": "json",
+                "include_errors": "true",
+            },
+            json={"input": [{"url": linkedin_url}]},
+            headers={
+                "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=config.LINKEDIN_COMPANY_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        data = _response_json(response)
+        runtime.complete_api(reservation, "DONE")
+    except BaseException as exc:
+        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        runtime.complete_api(reservation, state)
+        return ProviderRecord(state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
     if isinstance(data, list):
-        return data[0] if data else None
+        return ProviderRecord(data[0], state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),)) if data else ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),))
     if isinstance(data, dict):
         rows = data.get("data") or data.get("results")
         if isinstance(rows, list):
-            return rows[0] if rows else None
-        return data
-    return None
+            return ProviderRecord(rows[0], state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),)) if rows else ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),))
+        return ProviderRecord(data, state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),))
+    return ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),))
 
 
 def _resolved_website(website: str) -> str:
@@ -183,7 +219,6 @@ def corroborate(company: str, evaluation: dict) -> dict | None:
         config.ENABLE_LINKEDIN_COMPANY_LOOKUP
         and config.BRIGHTDATA_API_KEY
         and config.LINKEDIN_COMPANY_DATASET_ID
-        and config.SEARCH_CACHE_MODE != "replay"
     ):
         return None
     candidate_url = evaluation.get("candidate", {}).get("url", "")
@@ -192,6 +227,19 @@ def corroborate(company: str, evaluation: dict) -> dict | None:
         return None
     company_key = scorer.normalize_text(company)
     key = (company_key, scorer.registrable_domain(domain))
+    persistent_key = "|".join(key)
+    if config.SEARCH_CACHE_MODE in {"use", "replay"}:
+        cached = cache_store.load(
+            config.SEARCH_CACHE_DIR, "linkedin_company", persistent_key,
+            config.SEARCH_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION,
+        )
+        if isinstance(cached, dict):
+            with _LOCK:
+                _CACHE[key] = cached
+            runtime.record("api.linkedin_company.persistent_cache_hits")
+            return dict(cached)
+        if config.SEARCH_CACHE_MODE == "replay":
+            return None
     with _LOCK:
         if key in _CACHE:
             runtime.record("api.linkedin_company.cache_hits")
@@ -225,6 +273,9 @@ def corroborate(company: str, evaluation: dict) -> dict | None:
                     ),
                     "company_size": (record or {}).get("company_size") or "",
                     "country_code": (record or {}).get("country_code") or "",
+                    "provider_result": getattr(record, "result_state", "COMPLETED"),
+                    "provider_result_reason": getattr(record, "result_reason", "record"),
+                    "provider_call_ids": list(getattr(record, "call_ids", ())),
                 }
         except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError):
             runtime.record("api.linkedin_company.provider_failures")
@@ -266,4 +317,9 @@ def corroborate(company: str, evaluation: dict) -> dict | None:
         )
     with _LOCK:
         _CACHE[key] = result
+    if result is not None and config.SEARCH_CACHE_MODE in {"use", "refresh"}:
+        cache_store.save(
+            config.SEARCH_CACHE_DIR, "linkedin_company", persistent_key,
+            result, config.CACHE_SCHEMA_VERSION,
+        )
     return result

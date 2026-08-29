@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "records": [
+    {"company": "RED ROSE", "status": "OK_HIGH_CONFIDENCE", "score": 95, "publication_eligible": true, "identity_publishable": false, "contact": true, "expected": false},
+    {"company": "TELCI", "status": "OK_MEDIUM_CONFIDENCE", "score": 80, "publication_eligible": true, "identity_publishable": false, "contact": true, "expected": false},
+    {"company": "SAFE ONE", "status": "OK_HIGH_CONFIDENCE", "score": 90, "publication_eligible": true, "identity_publishable": true, "contact": true, "expected": true},
+    {"company": "LOW SCORE", "status": "OK_HIGH_CONFIDENCE", "score": 64, "publication_eligible": true, "identity_publishable": true, "contact": true, "expected": false},
+    {"company": "SECTOR CONFLICT", "status": "OK_HIGH_CONFIDENCE", "score": 90, "publication_eligible": true, "identity_publishable": true, "contact": true, "reason": "sector_conflict", "expected": false},
+    {"company": "NO CONTACT", "status": "OK_MEDIUM_CONFIDENCE", "score": 80, "publication_eligible": true, "identity_publishable": true, "contact": false, "expected": false},
+    {"company": "QUARANTINED", "status": "OK_HIGH_CONFIDENCE", "score": 90, "publication_eligible": true, "identity_publishable": true, "contact": true, "quarantine_state": "HANDOFF_PENDING", "expected": false}
+  ]
+}

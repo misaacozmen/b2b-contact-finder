@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Iterable
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED, ZipInfo
+from datetime import datetime
+import re
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
@@ -123,6 +125,7 @@ def read_company_records(path: Path) -> list[dict]:
                     row, ("listed_website", "fair_website", "fuar web sitesi"), None
                 ),
                 "source": value_for(row, ("source", "kaynak"), None),
+                "source_record_id": value_for(row, ("source_record_id", "source id", "record_id"), None),
                 "country": value_for(row, ("country", "ulke", "ülke"), None),
                 "profile_url": value_for(row, ("profile_url", "profil", "profile"), None),
                 "listing_url": value_for(row, ("listing_url", "liste_url", "liste url"), None),
@@ -135,6 +138,8 @@ def read_company_records(path: Path) -> list[dict]:
                 "representations": value_for(row, ("representations", "temsilcilikler"), None),
                 "sector": value_for(row, ("sector", "sektor", "sektör", "urun grubu", "ürün grubu"), None),
                 "description": value_for(row, ("description", "aciklama", "açıklama"), None),
+                "source_record_id": value_for(row, ("source_record_id", "source_id", "kaynak_kayit_id"), None),
+                "_id": value_for(row, ("_id", "id"), None),
             }
         )
     return records
@@ -162,9 +167,56 @@ def read_result_statuses(path: Path) -> dict[str, str]:
     }
 
 
-def _write_rows(path: Path, headers: list[str], rows: Iterable[dict]) -> None:
+def read_result_statuses_by_source_id(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    rows = _read_rows(path)
+    if not rows:
+        return {}
+    headers = [str(_unescape_cell_value(value or "")).strip().casefold() for value in rows[0]]
+    if "source_record_id" not in headers or "status" not in headers:
+        return {}
+    source_idx, status_idx = headers.index("source_record_id"), headers.index("status")
+    return {
+        str(_unescape_cell_value(row[source_idx])).strip(): str(_unescape_cell_value(row[status_idx] or "")).strip()
+        for row in rows[1:]
+        if len(row) > max(source_idx, status_idx) and row[source_idx]
+    }
+
+
+_FROZEN_XLSX_TIMESTAMP = "2000-01-01T00:00:00+00:00"
+
+
+def _normalize_xlsx_zip(path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.normalized")
+    with ZipFile(path, "r") as source, ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=9) as target:
+        for name in sorted(source.namelist()):
+            info = ZipInfo(name, date_time=(2000, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            info.create_system = 0
+            info.external_attr = 0
+            info.comment = b""
+            info.extra = b""
+            data = source.read(name)
+            if name == "docProps/core.xml":
+                data = re.sub(
+                    rb"(<dcterms:modified[^>]*>).*?(</dcterms:modified>)",
+                    rb"\g<1>2000-01-01T00:00:00Z\g<2>", data,
+                )
+            target.writestr(info, data)
+    temporary.replace(path)
+
+
+def _write_rows(path: Path, headers: list[str], rows: Iterable[dict], *, frozen_timestamp: str = _FROZEN_XLSX_TIMESTAMP) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
+    try:
+        frozen_datetime = datetime.fromisoformat(str(frozen_timestamp).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        frozen_datetime = datetime(2000, 1, 1)
+    workbook.properties.created = frozen_datetime
+    workbook.properties.modified = frozen_datetime
+    workbook.properties.lastModifiedBy = "B2B Contact Finder"
     sheet = workbook.active
     sheet.append([_safe_cell_value(header) for header in headers])
     for cell in sheet[1]:
@@ -178,13 +230,21 @@ def _write_rows(path: Path, headers: list[str], rows: Iterable[dict]) -> None:
         sheet.column_dimensions[column[0].column_letter].width = min(max(max_length + 2, 12), 60)
 
     workbook.save(path)
+    _normalize_xlsx_zip(path)
 
 
-def write_contacts(path: Path, rows: Iterable[dict]) -> None:
+def write_contacts(path: Path, rows: Iterable[dict], *, frozen_timestamp: str = _FROZEN_XLSX_TIMESTAMP) -> None:
     _write_rows(
         path,
         [
             "company",
+            "entity_id",
+            "legacy_index",
+            "source_record_id",
+            "source_record_id_quality",
+            "free_state",
+            "paid_required",
+            "paid_state",
             "website",
             "website_source",
             "website_status",
@@ -217,17 +277,21 @@ def write_contacts(path: Path, rows: Iterable[dict]) -> None:
             "publication_risk_index",
             "publication_risk_tier",
             "publication_blockers",
+            "collision_reason",
             "reason",
+            "quarantine_state",
+            "quarantine_status",
         ],
         rows,
+        frozen_timestamp=frozen_timestamp,
     )
 
 
-def write_failed(path: Path, rows: Iterable[dict]) -> None:
-    _write_rows(path, ["company", "status", "reason"], rows)
+def write_failed(path: Path, rows: Iterable[dict], *, frozen_timestamp: str = _FROZEN_XLSX_TIMESTAMP) -> None:
+    _write_rows(path, ["company", "status", "reason"], rows, frozen_timestamp=frozen_timestamp)
 
 
-def write_website_candidates(path: Path, rows: Iterable[dict]) -> None:
+def write_website_candidates(path: Path, rows: Iterable[dict], *, frozen_timestamp: str = _FROZEN_XLSX_TIMESTAMP) -> None:
     headers = [
         "company",
         "selected_website",
@@ -256,7 +320,7 @@ def write_website_candidates(path: Path, rows: Iterable[dict]) -> None:
         "candidate_3_query",
         "candidate_3_role",
     ]
-    _write_rows(path, headers, rows)
+    _write_rows(path, headers, rows, frozen_timestamp=frozen_timestamp)
 
 
 def write_company_records(path: Path, rows: Iterable[dict]) -> None:
@@ -267,6 +331,7 @@ def write_company_records(path: Path, rows: Iterable[dict]) -> None:
             "profile_url", "listing_url", "listed_phone", "listed_email",
             "listed_address", "hall", "stand", "brands", "representations",
             "sector", "description",
+            "source_record_id", "_id",
         ],
         rows,
     )

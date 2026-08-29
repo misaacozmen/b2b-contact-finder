@@ -20,6 +20,7 @@ import config
 from modules import (
     aliases,
     cache_store,
+    checkpoint,
     company_resolvers,
     crawler,
     discovery_coverage,
@@ -60,8 +61,15 @@ class BrightDataSearchError(RuntimeError):
     pass
 
 
+class BrightDataProviderRejected(BrightDataSearchError):
+    def __init__(self, provider_result):
+        self.provider_result = provider_result
+        super().__init__(provider_result.result_reason or provider_result.result_state)
+
+
 class SearchBudgetExhausted(BrightDataSearchError):
-    pass
+    result_state = "BLOCKED_BUDGET"
+    reason = "budget_exhausted"
 
 
 class CandidateList(list):
@@ -72,10 +80,17 @@ class CandidateList(list):
 
 
 class SearchResults(list):
-    def __init__(self, values=(), cache_status: str = "unknown", provider: str = ""):
+    def __init__(self, values=(), cache_status: str = "unknown", provider: str = "", *, result_state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = ()):
         super().__init__(values)
         self.cache_status = cache_status
         self.provider = provider
+        self.result_state = str(result_state)
+        self.result_reason = str(reason)
+        self.call_ids = tuple(str(value) for value in call_ids if value)
+        runtime.record_provider_outcome(
+            state=self.result_state, reason=self.result_reason,
+            call_ids=self.call_ids, provider=self.provider,
+        )
 
 
 def reset_source_health() -> None:
@@ -147,23 +162,29 @@ def _source_health_key(url: str) -> str:
     return scorer.normalize_domain(url)
 
 
+def _source_health_storage_key(url: str) -> tuple[str, str]:
+    return (runtime.durable_run_id() or "volatile", _source_health_key(url))
+
+
 def _source_health_snapshot(url: str) -> dict:
     key = _source_health_key(url)
     if not key:
         return {"status": "not_configured", "host": ""}
     with _SOURCE_HEALTH_LOCK:
-        state = dict(_SOURCE_HEALTH.get(key, {}))
+        state = dict(_SOURCE_HEALTH.get(_source_health_storage_key(url), {}))
     return {"host": key, "status": state.get("status", "unknown"), **state}
 
 
-def _record_source_health(url: str, status: str, http_status: int | None = None) -> dict:
+def _record_source_health(url: str, status: str, http_status: int | None = None, cooldown_seconds: float | None = None) -> dict:
     key = _source_health_key(url)
     if not key:
         return {"status": "not_configured", "host": ""}
     with _SOURCE_HEALTH_LOCK:
-        state = _SOURCE_HEALTH.setdefault(key, {
+        state = _SOURCE_HEALTH.setdefault(_source_health_storage_key(url), {
             "host": key, "status": "unknown", "attempts": 0,
             "successes": 0, "server_errors": 0, "circuit_open": False,
+            "direct_probe_attempted": False, "renderer_probe_attempted": False, "terminal_blocked": False,
+            "cooldown_until": 0.0,
         })
         if status != "circuit_open":
             state["attempts"] += 1
@@ -171,18 +192,78 @@ def _record_source_health(url: str, status: str, http_status: int | None = None)
             state["successes"] += 1
             state["server_errors"] = 0
             state["circuit_open"] = False
+            state["terminal_blocked"] = False
         elif status == "server_error":
             state["server_errors"] += 1
             if state["server_errors"] >= config.SOURCE_PROFILE_MAX_SERVER_ERRORS:
                 state["circuit_open"] = True
                 status = "degraded"
         state["status"] = status
+        if status == "direct_probe_attempted":
+            state["direct_probe_attempted"] = True
+        if status == "renderer_probe_attempted":
+            state["renderer_probe_attempted"] = True
+        if status == "blocked":
+            state["terminal_blocked"] = True
+        if http_status == 429:
+            state["cooldown_until"] = time.time() + max(0.0, float(cooldown_seconds if cooldown_seconds is not None else 60.0))
         if http_status is not None:
             state["last_http_status"] = http_status
         return dict(state)
 
 
-def preflight_source_profiles(records: list[dict]) -> list[dict]:
+def _hydrate_source_health(url: str, snapshot: dict | None) -> dict:
+    key = _source_health_key(url)
+    if not key or not isinstance(snapshot, dict):
+        return _source_health_snapshot(url)
+    with _SOURCE_HEALTH_LOCK:
+        state = dict(snapshot)
+        state.setdefault("host", key)
+        state.setdefault("cooldown_until", 0.0)
+        _SOURCE_HEALTH[_source_health_storage_key(url)] = state
+    return _source_health_snapshot(url)
+
+
+def _probe_with_heartbeat(profile_url: str, *, run_id: str, host: str, owner_token: str) -> None:
+    """Keep the durable owner lease alive across a slow physical probe."""
+    stop = threading.Event()
+    heartbeat_error: list[BaseException] = []
+    lease_seconds = max(1.0, float(getattr(config, "SOURCE_PROBE_LEASE_SEC", 30)))
+    interval = max(0.05, min(5.0, lease_seconds / 3.0))
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            try:
+                checkpoint.heartbeat_source_probe(
+                    run_id=run_id, host=host, owner_token=owner_token,
+                )
+            except BaseException as exc:
+                heartbeat_error.append(exc)
+                stop.set()
+                return
+
+    worker = threading.Thread(target=beat, name=f"source-probe-heartbeat-{host}", daemon=True)
+    worker.start()
+    try:
+        _profile_external_websites(profile_url)
+    finally:
+        stop.set()
+        worker.join(timeout=max(1.0, interval * 2.0))
+    if heartbeat_error:
+        raise RuntimeError(f"source probe heartbeat failed: {heartbeat_error[0]}") from heartbeat_error[0]
+
+
+def _is_transient_probe_error(exc: BaseException) -> bool:
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code is not None and int(status_code) >= 500:
+        return True
+    message = str(exc).casefold()
+    return runtime.is_unknown_transport_error(exc) or any(
+        token in message for token in ("transient", "temporar", "server error", "5xx")
+    )
+
+
+def preflight_source_profiles(records: list[dict], *, run_id: str | None = None) -> list[dict]:
     """Probe each distinct fair host once before parallel company processing."""
     first_profile_by_host: dict[str, str] = {}
     for record in records:
@@ -190,9 +271,69 @@ def preflight_source_profiles(records: list[dict]) -> list[dict]:
         host = _source_health_key(profile_url)
         if host and host not in first_profile_by_host:
             first_profile_by_host[host] = profile_url
+    max_attempts = max(1, int(getattr(config, "SOURCE_PROFILE_MAX_TRANSIENT_RETRIES", 2)))
     for profile_url in first_profile_by_host.values():
+        host = _source_health_key(profile_url)
         runtime.record("source_profile.preflight_hosts")
-        _profile_external_websites(profile_url)
+        if not run_id or not host:
+            _profile_external_websites(profile_url)
+            continue
+        for attempt in range(max_attempts):
+            claim = checkpoint.claim_source_probe(run_id=run_id, host=host)
+            if claim.get("state") == "DONE":
+                _hydrate_source_health(profile_url, claim.get("snapshot"))
+                break
+            if not claim.get("owner"):
+                snapshot = checkpoint.wait_source_probe(run_id=run_id, host=host)
+                if snapshot is not None:
+                    _hydrate_source_health(profile_url, snapshot)
+                    break
+                continue
+            finished = False
+
+            def finish_once(snapshot: dict, error: str = "") -> None:
+                nonlocal finished
+                if finished:
+                    return
+                finished = True
+                checkpoint.finish_source_probe(
+                    run_id=run_id, host=host, owner_token=str(claim["owner_token"]),
+                    snapshot=snapshot, error=error,
+                )
+
+            try:
+                _probe_with_heartbeat(
+                    profile_url, run_id=run_id, host=host,
+                    owner_token=str(claim["owner_token"]),
+                )
+                probe_snapshot = _source_health_snapshot(profile_url)
+                transient_failure = probe_snapshot.get("status") in {"server_error", "degraded", "unavailable", "cooldown"}
+                transient_error = RuntimeError(
+                    f"source probe transient status={probe_snapshot.get('status')} "
+                    f"http_status={probe_snapshot.get('last_http_status', '')}"
+                ) if transient_failure else None
+                finish_once(probe_snapshot, error=str(transient_error or ""))
+                if transient_failure:
+                    if attempt + 1 >= max_attempts:
+                        raise RuntimeError(
+                            f"source preflight exhausted bounded retries: {host}: {transient_error}"
+                        ) from transient_error
+                    continue
+            except BaseException as exc:
+                try:
+                    finish_once(_source_health_snapshot(profile_url), error=str(exc))
+                except BaseException as finish_error:
+                    raise finish_error from exc
+                if _is_transient_probe_error(exc) and attempt + 1 < max_attempts:
+                    continue
+                if _is_transient_probe_error(exc):
+                    raise RuntimeError(
+                        f"source preflight exhausted bounded retries: {host}: {exc}"
+                    ) from exc
+                raise
+            break
+        else:
+            raise RuntimeError(f"source preflight did not reach a terminal state: {host}")
     return [_source_health_snapshot(url) for url in first_profile_by_host.values()]
 
 
@@ -274,9 +415,16 @@ def _decode_brightdata_response(response: requests.Response) -> dict:
     return data
 
 
-def _brightdata_post(url: str, **kwargs) -> requests.Response:
-    if not runtime.reserve_api("brightdata", config.BRIGHTDATA_REQUEST_BUDGET):
-        raise SearchBudgetExhausted("Bright Data run budget exhausted")
+def _brightdata_post(url: str, *, _attempt_ordinal: int = 1, **kwargs) -> requests.Response:
+    request_body = {"url": url, "json": kwargs.get("json", {}), "ordinal": int(_attempt_ordinal)}
+    reservation = runtime.reserve_api("brightdata", operation=f"search.attempt_{_attempt_ordinal}", request_fingerprint=runtime.request_fingerprint("brightdata", "search", request_body))
+    if not reservation:
+        rejected = runtime.rejected_provider_result(reservation)
+        if "duplicate" in str(reservation.reason or ""):
+            raise BrightDataProviderRejected(rejected)
+        error = SearchBudgetExhausted(f"Bright Data request rejected: {reservation.reason or 'budget_exhausted'}")
+        error.result_reason = reservation.reason or "budget_exhausted"
+        raise error
     global _BRIGHTDATA_NEXT_REQUEST_AT
     requests_per_minute = max(config.BRIGHTDATA_REQUESTS_PER_MINUTE, 0.0)
     if requests_per_minute:
@@ -290,7 +438,18 @@ def _brightdata_post(url: str, **kwargs) -> requests.Response:
         if wait:
             time.sleep(wait)
     runtime.wait_for_request_slot()
-    return requests.post(url, timeout=config.BRIGHTDATA_TIMEOUT_SEC, **kwargs)
+    try:
+        response = requests.post(url, timeout=config.BRIGHTDATA_TIMEOUT_SEC, **kwargs)
+    except Exception as exc:
+        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        runtime.complete_api(reservation, state)
+        exc.provider_call_id = getattr(reservation, "call_id", "")
+        exc.request_fingerprint = runtime.request_fingerprint("brightdata", "search", request_body)
+        raise
+    runtime.complete_api(reservation, "FAILED" if response.status_code >= 400 else "DONE")
+    response.provider_call_id = getattr(reservation, "call_id", "")
+    response.request_fingerprint = runtime.request_fingerprint("brightdata", "search", request_body)
+    return response
 
 
 def _brightdata_text(query: str) -> list[dict]:
@@ -315,20 +474,33 @@ def _brightdata_text(query: str) -> list[dict]:
         "Content-Type": "application/json",
     }
     response = None
+    call_ids: list[str] = []
     last_error: requests.RequestException | None = None
     for attempt in range(config.MAX_RETRIES + 2):
         try:
             response = _brightdata_post(
                 config.BRIGHTDATA_ENDPOINT,
+                _attempt_ordinal=attempt + 1,
                 json=payload,
                 headers=headers,
             )
+            if getattr(response, "provider_call_id", ""):
+                call_ids.append(response.provider_call_id)
             break
+        except BrightDataProviderRejected as exc:
+            rejected = exc.provider_result
+            return SearchResults([], "live", "brightdata", result_state=rejected.result_state, reason=rejected.result_reason, call_ids=rejected.call_ids)
         except requests.RequestException as exc:
             last_error = exc
+            if runtime.is_unknown_transport_error(exc):
+                raise BrightDataSearchError(f"Bright Data physical attempt is UNKNOWN: {exc}") from exc
             if attempt >= config.MAX_RETRIES + 1:
                 raise BrightDataSearchError(f"Bright Data request timed out/failed after retries: {exc}") from exc
             time.sleep(_retry_delay(None, attempt))
+        except Exception as exc:
+            raise BrightDataSearchError(
+                f"Bright Data physical attempt is {'UNKNOWN' if runtime.is_unknown_transport_error(exc) else 'FAILED'}: {exc}"
+            ) from exc
     if response is None:
         raise BrightDataSearchError(f"Bright Data request failed: {last_error}")
     if response.status_code == 401:
@@ -340,9 +512,12 @@ def _brightdata_text(query: str) -> list[dict]:
             runtime.record("api.brightdata.retries")
             response = _brightdata_post(
                 config.BRIGHTDATA_ENDPOINT,
+                _attempt_ordinal=attempt + 2,
                 json=payload,
                 headers=headers,
             )
+            if getattr(response, "provider_call_id", ""):
+                call_ids.append(response.provider_call_id)
             if response.status_code not in {429, 500, 502, 503, 504}:
                 break
             last_detail = response.text[:500].replace("\n", " ")
@@ -388,6 +563,7 @@ def _brightdata_text(query: str) -> list[dict]:
             runtime.record("api.brightdata.retries")
             response = _brightdata_post(
                 config.BRIGHTDATA_ENDPOINT,
+                _attempt_ordinal=config.MAX_RETRIES + 3 + parse_attempt,
                 json=payload,
                 headers=headers,
             )
@@ -412,7 +588,7 @@ def _brightdata_text(query: str) -> list[dict]:
                 "body": item.get("description", "") or item.get("snippet", ""),
             }
         )
-    return results
+    return SearchResults(results, "live", "brightdata", result_state="COMPLETED" if results else "EMPTY", reason="results" if results else "empty_response", call_ids=tuple(call_ids))
 
 
 def _search_text_live(query: str) -> list[dict]:
@@ -456,7 +632,7 @@ def _search_text(query: str) -> list[dict]:
         )
         if cached is not None:
             LOGGER.info("Search cache hit: %s", query)
-            return SearchResults(cached, "cache_hit", config.SEARCH_PROVIDER)
+            return SearchResults(cached, "cache_hit", config.SEARCH_PROVIDER, result_state="CACHE_HIT", reason="cached")
         if mode == "replay":
             # Offline reranking must not depend on which provider is enabled
             # in the interactive prompt. This fallback never runs in a mode
@@ -504,7 +680,7 @@ def _safe_search_text(query: str) -> list[dict]:
             return SearchResults(fallback, "circuit_fallback", "ddgs")
         except SearchBudgetExhausted:
             runtime.record("search.circuit_fallback.budget_blocked")
-            return SearchResults([], "budget_blocked", "ddgs")
+            return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="fallback_budget_exhausted")
     try:
         results = _search_text(query)
         if (
@@ -530,13 +706,14 @@ def _safe_search_text(query: str) -> list[dict]:
             except SearchBudgetExhausted as fallback_exc:
                 LOGGER.warning("Free search fallback budget exhausted: %s (%s)", query, fallback_exc)
                 runtime.record("search.fallback.budget_blocked")
-                return SearchResults([], "budget_blocked", "ddgs")
+                return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="fallback_budget_exhausted")
             except Exception as fallback_exc:
                 LOGGER.warning("Free search fallback also failed: %s (%s)", query, fallback_exc)
                 runtime.record("search.fallback.error")
         if isinstance(exc, SearchBudgetExhausted):
-            return SearchResults([], "budget_blocked", config.SEARCH_PROVIDER)
-        return SearchResults([], "error", config.SEARCH_PROVIDER)
+            return SearchResults([], "budget_blocked", config.SEARCH_PROVIDER, result_state="BLOCKED_BUDGET", reason=str(getattr(exc, "result_reason", "budget_exhausted")))
+        state = "UNKNOWN" if isinstance(exc, (TimeoutError, requests.Timeout)) or "timeout" in type(exc).__name__.casefold() or getattr(exc, "result_state", "") == "UNKNOWN" else "FAILED"
+        return SearchResults([], "error", config.SEARCH_PROVIDER, result_state=state, reason=str(exc))
 
 
 def _metadata_query_terms(metadata: dict | None) -> list[str]:
@@ -712,11 +889,17 @@ def _add_search_results(
 ) -> None:
     query_trust_bonus = _query_trust_bonus(query)
     for rank, result in enumerate(results, start=1):
-        url = _result_url(result)
+        try:
+            url = _result_url(result)
+        except ValueError:
+            runtime.record("search.malformed_link_items")
+            continue
         domain = scorer.normalize_domain(url)
         if not domain or scorer.is_mirror_directory_domain(company_name, domain):
             if domain:
                 runtime.record("search.candidate.mirror_rejected")
+            else:
+                runtime.record("search.malformed_link_items")
             continue
 
         title = result.get("title", "")
@@ -726,7 +909,11 @@ def _add_search_results(
         # website as bare text inside a PDF hosted on an otherwise ordinary
         # institutional domain.  PDF extraction remains discovery-only and is
         # still guarded by the legal/public-name check in the helper.
-        pdf_result = urlparse(url).path.casefold().endswith(".pdf")
+        try:
+            pdf_result = urlparse(url).path.casefold().endswith(".pdf")
+        except ValueError:
+            runtime.record("search.malformed_link_items")
+            continue
         if source_role in DISCOVERY_ONLY_ROLES or scorer.is_excluded_domain(domain) or pdf_result:
             _add_snippet_outbound_candidates(
                 candidates_by_domain, company_name, query, rank, result,
@@ -1324,6 +1511,15 @@ def _profile_external_websites(
     from bs4 import BeautifulSoup
 
     health = _source_health_snapshot(profile_url)
+    if health.get("terminal_blocked"):
+        runtime.record("source_profile.terminal_blocked_skips")
+        return []
+    if health.get("direct_probe_attempted") and health.get("last_http_status") in {401, 403}:
+        runtime.record("source_profile.direct_probe_latched")
+        return []
+    if float(health.get("cooldown_until", 0.0) or 0.0) > time.time():
+        runtime.record("source_profile.cooldown_skips")
+        return []
     if health.get("circuit_open"):
         runtime.record("source_profile.circuit_skips")
         _record_source_health(profile_url, "circuit_open")
@@ -1332,6 +1528,7 @@ def _profile_external_websites(
     headers = {"User-Agent": config.USER_AGENT, "Accept-Language": "tr,en;q=0.8"}
     pages: list[tuple[str, str, bool]] = []
     try:
+        _record_source_health(profile_url, "direct_probe_attempted")
         response = crawler._request_with_safe_redirects(profile_url, verify=True)
         response_url = getattr(response, "_b2b_final_url", getattr(response, "url", profile_url))
         profile_html, rendered = _profile_render_fallback(response_url, response.text)
@@ -1345,15 +1542,24 @@ def _profile_external_websites(
             _record_source_health(profile_url, "server_error", int(status_code))
         else:
             runtime.record("source_profile.failures")
-            _record_source_health(profile_url, "unavailable", status_code)
+            _record_source_health(profile_url, "unavailable", status_code, _retry_delay(getattr(exc, "response", None), 0) if status_code == 429 else None)
         LOGGER.info("Exhibitor profile could not be read: %s (%s)", profile_url, exc)
-        if status_code not in {401, 403, 429}:
+        if status_code == 429:
+            _record_source_health(profile_url, "cooldown", int(status_code), _retry_delay(getattr(exc, "response", None), 0))
             return []
+        if status_code not in {401, 403}:
+            return []
+        if health.get("renderer_probe_attempted"):
+            runtime.record("source_profile.renderer_probe_latched")
+            _record_source_health(profile_url, "blocked", int(status_code))
+            return []
+        _record_source_health(profile_url, "renderer_probe_attempted", int(status_code))
         rendered_html, rendered = _profile_render_fallback(
             profile_url,
             force=allow_forced_render,
         )
         if not rendered:
+            _record_source_health(profile_url, "blocked", int(status_code))
             return []
         pages.append((profile_url, rendered_html, True))
         _record_source_health(profile_url, "available", int(status_code))

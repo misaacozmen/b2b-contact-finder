@@ -8,6 +8,7 @@ themselves, preventing a bad crawl from poisoning later runs.
 from __future__ import annotations
 
 import json
+import os
 import logging
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -72,26 +73,31 @@ def verified_domains(company: str) -> list[dict]:
     return results
 
 
-def write_observations(path: Path, rows: list[dict]) -> None:
+def write_observations(path: Path, rows: list[dict], *, observed_at: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            evaluation = row.get("__evaluation", {})
-            selected = evaluation.get("candidate", {}) if isinstance(evaluation, dict) else {}
-            structured = evaluation.get("structured_identity", {}) if isinstance(evaluation, dict) else {}
-            record = {
-                "company": row.get("company", ""),
-                "selected_domain": scorer.normalize_domain(row.get("website", "")),
-                "status": row.get("status", ""),
-                "entity_id": selected.get("_entity_id", ""),
-                "relationship": selected.get("_entity_relationship", "observed_candidate"),
-                "source": row.get("website_source", ""),
-                "evidence_url": selected.get("_entity_evidence_url", selected.get("_profile_url", "")),
-                "structured_urls": structured.get("urls", []),
-                "structured_same_as": structured.get("same_as", []),
-                "first_party_relationships": relationship_graph.observation_payload(structured),
-                "confidence": "observed_high" if publication_policy.is_publishable_row(row) else "observed_review",
-                "observed_at": observed_at,
-            }
-            handle.write(json.dumps(redaction.sanitize(record), ensure_ascii=False) + "\n")
+    observed_at = observed_at or "2000-01-01T00:00:00+00:00"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                evaluation = row.get("__evaluation", {})
+                selected = evaluation.get("candidate", {}) if isinstance(evaluation, dict) else {}
+                structured = evaluation.get("structured_identity", {}) if isinstance(evaluation, dict) else {}
+                record = {
+                    "company": row.get("company", ""),
+                    "selected_domain": scorer.normalize_domain(row.get("website", "")),
+                    "status": row.get("status", ""),
+                    "entity_id": selected.get("_entity_id", ""),
+                    "relationship": selected.get("_entity_relationship", "observed_candidate"),
+                    "source": row.get("website_source", ""),
+                    "evidence_url": selected.get("_entity_evidence_url", selected.get("_profile_url", "")),
+                    "structured_urls": structured.get("urls", []),
+                    "structured_same_as": structured.get("same_as", []),
+                    "first_party_relationships": relationship_graph.observation_payload(structured),
+                    "confidence": "observed_high" if publication_policy.is_publishable_row(row) else "observed_review",
+                    "observed_at": observed_at,
+                }
+                handle.write(json.dumps(redaction.sanitize(record), ensure_ascii=False) + "\n")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

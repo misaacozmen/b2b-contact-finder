@@ -65,7 +65,8 @@ def validate_manifest(
             if role != "blind":
                 issues.append(f"{role}: expected workbook missing")
             continue
-        expected = (BASE_DIR / expected_text).resolve()
+        manifest_base = path.resolve().parent.parent if path.resolve().name == "benchmark_splits.json" else BASE_DIR
+        expected = (manifest_base / expected_text).resolve()
         if not expected.exists():
             issues.append(f"{role}: workbook not found: {expected}")
             continue
@@ -139,7 +140,8 @@ def main() -> None:
         expected_text = item.get("expected", "")
         if role not in actuals or not expected_text:
             continue
-        expected = (BASE_DIR / expected_text).resolve()
+        manifest_base = args.manifest.resolve().parent.parent if args.manifest.resolve().name == "benchmark_splits.json" else BASE_DIR
+        expected = (manifest_base / expected_text).resolve()
         metrics, complete = evaluate(expected, Path(actuals[role]))
         print(f"[{role}] complete={len(complete)}")
         print(f"  coverage: {assertion_coverage(expected)}")

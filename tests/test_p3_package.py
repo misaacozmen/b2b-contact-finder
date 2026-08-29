@@ -190,6 +190,7 @@ class PublicationPolicyTests(unittest.TestCase):
         evaluation = _safe_evaluation(
             email="sales@verified-mail.net",
             email_failed=True,
+            structured_domain_relation=True,
         )
         evaluation["reasons"] = [
             *evaluation["reasons"],

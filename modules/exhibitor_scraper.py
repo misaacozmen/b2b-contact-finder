@@ -1,4 +1,5 @@
 import json
+import hashlib
 import re
 import time
 import unicodedata
@@ -10,7 +11,7 @@ from bs4 import BeautifulSoup
 from charset_normalizer import from_bytes
 
 import config
-from modules import network_guard
+from modules import network_guard, run_context
 
 
 HEADERS = {
@@ -113,6 +114,7 @@ def _request_bounded(
     method: str,
     headers: dict[str, str],
     data: dict | None = None,
+    json_body: dict | None = None,
     timeout: int,
 ) -> tuple[bytes, str]:
     current = url
@@ -131,7 +133,10 @@ def _request_bounded(
             "stream": True,
         }
         if current_method == "POST":
-            kwargs["data"] = current_data
+            if json_body is not None:
+                kwargs["json"] = json_body
+            else:
+                kwargs["data"] = current_data
         response = request(current, **kwargs)
         try:
             if response.status_code in {301, 302, 303, 307, 308}:
@@ -205,6 +210,23 @@ def _post_json(
     if not isinstance(payload, dict):
         raise ValueError("invalid_json_object")
     return payload
+
+
+def _post_graphql(session: requests.Session, url: str, payload: dict) -> dict:
+    _body, text = _request_bounded(
+        session,
+        url,
+        method="POST",
+        headers={**HEADERS, "Content-Type": "application/json"},
+        json_body=payload,
+        timeout=max(config.REQUEST_TIMEOUT_SEC, 30),
+    )
+    result = json.loads(text)
+    if not isinstance(result, dict):
+        raise ValueError("invalid_graphql_response")
+    if result.get("errors"):
+        raise ValueError(f"graphql_error:{result['errors'][0]}")
+    return result
 
 
 def _first_external_website(html: str, base_domain: str) -> str:
@@ -327,7 +349,7 @@ def _texhibition_list_rows(
 ) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     rows: list[dict] = []
-    for link in soup.select('a[href*="/katilimcilar/"]'):
+    for link in soup.select('a[href*="/exhibitors/"], a[href*="/katilimcilar/"]'):
         item = link.select_one(".item")
         title = item.select_one(".title") if item else None
         if not title:
@@ -336,6 +358,9 @@ def _texhibition_list_rows(
         if not company:
             continue
         category = item.select_one(".category")
+        location = _clean(item.select_one(".location").get_text(" ", strip=True)) if item.select_one(".location") else ""
+        hall_match = re.search(r"\bHall\s+([^/]+)", location, re.I)
+        stand_match = re.search(r"/\s*(.+)$", location)
         rows.append({
             "company": company,
             "website": "",
@@ -344,32 +369,179 @@ def _texhibition_list_rows(
             "country": "",
             "profile_url": _absolute_url(listing_url, link.get("href", "")),
             "listing_url": listing_url,
-            "hall": "",
-            "stand": "",
+            "hall": _clean(hall_match.group(1)) if hall_match else "",
+            "stand": _clean(stand_match.group(1)) if stand_match else "",
             "sector": _clean(category.get_text(" ", strip=True)) if category else "",
             "description": "",
         })
-    return rows
+    for row in rows:
+        # The Turkish and English routes expose the same exhibitor slug.  Use
+        # that route-independent key so a language switch cannot mint a new
+        # source identity.
+        parsed_path = urlparse(row["profile_url"])
+        slug = parsed_path.path.rstrip("/").split("/")[-1].casefold()
+        source_id = "texhibition_2026:" + hashlib.sha256(run_context.canonical_json({"profile_slug": slug}).encode("utf-8")).hexdigest()
+        quality = "derived"
+        row["source_record_id"] = source_id
+        row["source_record_id_quality"] = quality
+    return dedupe_rows(rows)
 
 
 def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
     del fetch_details
-    listing_url = "https://www.texhibitionist.com/katilimcilar?v=1"
     session = _session()
     rows: list[dict] = []
-    page = 1
+    for listing_url in (
+        "https://www.texhibitionist.com/en/exhibitors?v=1",
+        "https://www.texhibitionist.com/katilimcilar?v=1",
+    ):
+        page = 1
+        visited_urls: set[str] = set()
+        page_fingerprints: set[str] = set()
+        expected_total: int | None = None
+        terminal_evidence = False
+        while True:
+            if page > config.MAX_TEXHIBITION_PAGES:
+                raise ValueError("texhibition_page_limit_exceeded")
+            url = listing_url if page == 1 else f"{listing_url}&page={page}"
+            if url in visited_urls:
+                raise ValueError("texhibition_url_cycle")
+            visited_urls.add(url)
+            html = _get(session, url)
+            page_rows = _texhibition_list_rows(html, listing_url)
+            if not page_rows:
+                break
+            soup = BeautifulSoup(html, "html.parser")
+            total_node = soup.select_one("[data-total], [data-total-count]")
+            if total_node:
+                raw_total = total_node.get("data-total") or total_node.get("data-total-count")
+                if str(raw_total).isdigit():
+                    expected_total = int(raw_total)
+            fingerprint = hashlib.sha256(run_context.canonical_json(sorted(row["source_record_id"] for row in page_rows)).encode()).hexdigest()
+            if fingerprint in page_fingerprints:
+                raise ValueError("texhibition_source_id_cycle")
+            page_fingerprints.add(fingerprint)
+            rows.extend(page_rows)
+            next_page = soup.select_one(f'a[href*="page={page + 1}"]')
+            if not next_page:
+                terminal_evidence = expected_total is not None or bool(soup.select_one("[rel='next'], .pagination, [class*='pagination'], [data-total], [data-total-count]"))
+                if not terminal_evidence:
+                    raise ValueError("texhibition_missing_terminal_pagination_evidence")
+                break
+            page += 1
+            time.sleep(delay_sec)
+        if rows:
+            break
+    if not terminal_evidence and rows:
+        raise ValueError("texhibition_missing_terminal_pagination_evidence")
+    if expected_total is not None and len({row["source_record_id"] for row in rows}) != expected_total:
+        raise ValueError("texhibition_total_count_mismatch")
+    return dedupe_rows(rows)
+
+
+def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
+    del fetch_details
+    view_id = config.ZUCHEX_VIEW_ID
+    event_id = config.ZUCHEX_EVENT_ID
+    if not view_id or not event_id or not config.ZUCHEX_FILTER_ID or not config.ZUCHEX_FILTER_VALUE_ID:
+        raise ValueError("zuchex_missing_required_ids")
+    endpoint = "https://visit.zuchex.com/api/graphql"
+    query = """
+    query EventExhibitorListViewConnectionQuery(
+      $viewId: ID!, $eventId: ID!, $endCursor: String
+      $selectedFilters: [Core_EventExhibitorListViewFilterInput!]
+    ) {
+      view: Core_eventExhibitorListView(viewId: $viewId, filters: $selectedFilters) {
+        id
+        exhibitors(cursor: {first: 50, after: $endCursor}) {
+          nodes { id: _id name withEvent(eventId: $eventId) { booth } }
+          pageInfo { hasNextPage endCursor }
+          totalCount
+        }
+      }
+    }
+    """
+    session = _session()
+    rows: list[dict] = []
+    unique_ids: set[str] = set()
+    expected_total: int | None = None
+    seen_cursors: set[str] = set()
+    page_number = 0
+    cursor = None
+    selected_filters = [{
+        "mustEventFiltersIn": [{
+                "filterId": config.ZUCHEX_FILTER_ID,
+                "values": [config.ZUCHEX_FILTER_VALUE_ID],
+        }],
+    }]
+    listing_url = "https://www.zuchex.com/tr/ziyaretci/Katilimci-Listesi-2026.html"
     while True:
-        url = listing_url if page == 1 else f"{listing_url}&page={page}"
-        html = _get(session, url)
-        page_rows = _texhibition_list_rows(html, listing_url)
-        if not page_rows:
+        page_number += 1
+        if page_number > config.MAX_ZUCHEX_PAGES:
+            raise ValueError("zuchex_page_limit_exceeded")
+        if cursor is not None:
+            if cursor in seen_cursors:
+                raise ValueError("zuchex_cursor_cycle")
+            seen_cursors.add(cursor)
+        payload = _post_graphql(session, endpoint, {
+            "query": query,
+            "variables": {
+                "viewId": view_id,
+                "eventId": event_id,
+                "endCursor": cursor,
+                "selectedFilters": selected_filters,
+            },
+        })
+        try:
+            data = payload["data"]
+            view = data["view"]
+            connection = view["exhibitors"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            total_count = int(connection["totalCount"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("zuchex_invalid_nested_graphql_schema") from exc
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise ValueError("zuchex_invalid_nested_graphql_schema")
+        if expected_total is None:
+            expected_total = total_count
+        elif expected_total != total_count:
+            raise ValueError("zuchex_total_count_changed")
+        for item in nodes:
+            if not isinstance(item, dict):
+                raise ValueError("zuchex_invalid_node")
+            source_id = str(item.get("_id") or item.get("id") or "").strip()
+            if not source_id:
+                raise ValueError("zuchex_missing_source_id")
+            if source_id in unique_ids:
+                continue
+            unique_ids.add(source_id)
+            event_data = item.get("withEvent") or {}
+            rows.append({
+                "company": _clean(item.get("name", "")),
+                "website": "",
+                "listed_website": "",
+                "source": "zuchex_2026",
+                "country": "Türkiye",
+                "profile_url": "",
+                "listing_url": listing_url,
+                "hall": "",
+                "stand": _clean(event_data.get("booth", "")),
+                "sector": "ev ve mutfak esyalari",
+                "description": "",
+                "_id": source_id,
+                "source_record_id": f"zuchex_2026:{source_id}",
+            })
+        if not page_info.get("hasNextPage"):
             break
-        rows.extend(page_rows)
-        soup = BeautifulSoup(html, "html.parser")
-        if not soup.select_one(f'a[href*="page={page + 1}"]'):
-            break
-        page += 1
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            raise ValueError("zuchex_missing_pagination_cursor")
         time.sleep(delay_sec)
+    if expected_total is None or len(unique_ids) != expected_total:
+        raise ValueError(
+            f"zuchex_total_count_mismatch:{len(unique_ids)}!={expected_total}"
+        )
     return dedupe_rows(rows)
 
 
@@ -891,19 +1063,19 @@ def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[d
 def dedupe_rows(rows: list[dict]) -> list[dict]:
     deduped: dict[str, dict] = {}
     for row in rows:
-        key = _clean(row.get("company", "")).casefold()
-        if not key:
+        row = dict(row)
+        company = _clean(row.get("company", ""))
+        if not company:
             continue
-        existing = deduped.get(key)
+        source_id, quality = run_context.source_record_identity(row, default_source="unknown")
+        row["source_record_id_quality"] = quality
+        row["company"] = company
+        row["source_record_id"] = source_id
+        existing = deduped.get(source_id)
         if existing is None:
-            deduped[key] = row
+            deduped[source_id] = row
             continue
-        if not existing.get("website") and row.get("website"):
-            existing["website"] = row["website"]
-        if not existing.get("sector") and row.get("sector"):
-            existing["sector"] = row["sector"]
-        if not existing.get("description") and row.get("description"):
-            existing["description"] = row["description"]
-        if row.get("source") and row["source"] not in existing.get("source", ""):
-            existing["source"] = f"{existing.get('source', '')};{row['source']}".strip(";")
+        for field, value in row.items():
+            if not existing.get(field) and value:
+                existing[field] = value
     return list(deduped.values())

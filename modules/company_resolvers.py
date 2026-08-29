@@ -94,17 +94,18 @@ def _name_compatible(company: str, item: dict) -> bool:
 def brandfetch_domains(company: str) -> list[dict]:
     """Return Brandfetch name matches without treating them as authoritative."""
     if not (config.ENABLE_BRANDFETCH_DOMAIN_SEARCH and config.BRANDFETCH_CLIENT_ID and company):
-        return []
+        return runtime.provider_result([], state="NOT_ENABLED", reason="provider_disabled")
     namespace = "brandfetch_domain_search"
     cached = _cached(namespace, company)
     if cached is not None:
         runtime.record("resolver.brandfetch.cache_hit")
-        return _clean_results(cached, "brandfetch")
+        return runtime.provider_result(_clean_results(cached, "brandfetch"), state="CACHE_HIT", reason="cached")
     if config.SEARCH_CACHE_MODE == "replay":
         runtime.record("resolver.brandfetch.replay_miss")
-        return []
-    if not runtime.reserve_api("brandfetch", config.BRANDFETCH_REQUEST_BUDGET):
-        return []
+        return runtime.provider_result([], state="REPLAY_MISS", reason="replay_cache_miss")
+    reservation = runtime.reserve_api("brandfetch", operation="domain_search", request_fingerprint=runtime.request_fingerprint("brandfetch", "domain_search", {"company": company}))
+    if not reservation:
+        return runtime.rejected_provider_result(reservation)
     try:
         runtime.wait_for_request_slot()
         response = requests.get(
@@ -116,31 +117,40 @@ def brandfetch_domains(company: str) -> list[dict]:
         payload = response.json()
         items = payload if isinstance(payload, list) else []
         _save(namespace, company, items)
-        return _clean_results(items, "brandfetch")
-    except (requests.RequestException, ValueError, TypeError) as exc:
+        runtime.complete_api(reservation, "DONE")
+        cleaned = _clean_results(items, "brandfetch")
+        return runtime.provider_result(cleaned, state="COMPLETED" if cleaned else "EMPTY", reason="results" if cleaned else "empty_response", call_ids=(getattr(reservation, "call_id", ""),))
+    except Exception as exc:
+        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        runtime.complete_api(reservation, state)
         runtime.record("resolver.brandfetch.error")
         LOGGER.warning(
             "Brandfetch domain search failed for %s: %s",
             company,
             _safe_request_error(exc),
         )
-        return []
+        return runtime.provider_result([], state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
 
 
 def hunter_domains(company: str) -> list[dict]:
     """Return Hunter Domain Finder matches; the beta endpoint is discovery-only."""
     if not (config.ENABLE_HUNTER_DOMAIN_FINDER and config.HUNTER_API_KEY and company):
-        return []
+        return runtime.provider_result([], state="NOT_ENABLED", reason="provider_disabled")
     namespace = "hunter_domain_finder"
     cached = _cached(namespace, company)
     if cached is not None:
         runtime.record("resolver.hunter.cache_hit")
-        return _clean_results(cached, "hunter_domain_finder")
+        return runtime.provider_result(_clean_results(cached, "hunter_domain_finder"), state="CACHE_HIT", reason="cached")
     if config.SEARCH_CACHE_MODE == "replay":
         runtime.record("resolver.hunter.replay_miss")
-        return []
-    if not runtime.reserve_api("hunter_domain_finder", config.HUNTER_REQUEST_BUDGET):
-        return []
+        return runtime.provider_result([], state="REPLAY_MISS", reason="replay_cache_miss")
+    reservation = runtime.reserve_api("hunter", operation="domain_search", request_fingerprint=runtime.request_fingerprint("hunter", "domain_search", {"company": company}))
+    if not reservation:
+        return runtime.rejected_provider_result(reservation)
+    # Central authorization is the last gate before the first physical call;
+    # duplicate reservations above still inherit their durable result.
+    if not runtime.paid_access_allowed("hunter"):
+        return runtime.provider_result([], state="NOT_ENABLED", reason="paid_not_authorized", call_ids=(getattr(reservation, "call_id", ""),))
     try:
         runtime.wait_for_request_slot()
         response = requests.get(
@@ -154,17 +164,25 @@ def hunter_domains(company: str) -> list[dict]:
         )
         response.raise_for_status()
         payload = response.json()
-        items = payload.get("data", []) if isinstance(payload, dict) else []
+        if not isinstance(payload, dict):
+            raise ValueError("Hunter response is not a JSON object")
+        items = payload.get("data", [])
+        if not isinstance(items, list):
+            raise ValueError("Hunter response data is not a JSON list")
         _save(namespace, company, items)
-        return _clean_results(items, "hunter_domain_finder")
-    except (requests.RequestException, ValueError, TypeError) as exc:
+        runtime.complete_api(reservation, "DONE")
+        cleaned = _clean_results(items, "hunter_domain_finder")
+        return runtime.provider_result(cleaned, state="COMPLETED" if cleaned else "EMPTY", reason="results" if cleaned else "empty_response", call_ids=(getattr(reservation, "call_id", ""),))
+    except Exception as exc:
+        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        runtime.complete_api(reservation, state)
         runtime.record("resolver.hunter.error")
         LOGGER.warning(
             "Hunter Domain Finder failed for %s: %s",
             company,
             _safe_request_error(exc),
         )
-        return []
+        return runtime.provider_result([], state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
 
 
 def resolve_company_domains(company: str) -> list[dict]:

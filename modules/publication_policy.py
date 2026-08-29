@@ -8,6 +8,8 @@ signal for offline risk/coverage analysis, not a probability.
 
 from __future__ import annotations
 
+import config
+
 from modules import identity, scorer
 
 
@@ -20,10 +22,71 @@ EXCLUDED_ROLES = {
 
 
 def is_publishable_row(row: dict) -> bool:
-    return (
+    persisted_scheduler_row = all(
+        key in row for key in ("free_state", "paid_state")
+    )
+    if (
+        row.get("quarantine_state")
+        or row.get("quarantine_status")
+        or "legacy_recovery_provisional" in str(row.get("publication_blockers", ""))
+        or str(row.get("source_record_id_quality", "")).casefold() == "legacy_recovery"
+    ):
+        return False
+    if (
+        not row.get("source_record_id")
+        or not row.get("free_state")
+        or not row.get("paid_state")
+        or "paid_required" not in row
+    ):
+        # Legacy/unit-level policy calls may omit scheduler metadata; only
+        # require it when the field is present in a persisted run payload.
+        if persisted_scheduler_row:
+            return False
+    if str(row.get("free_state", "")).upper() in {"PENDING", "RUNNING", "UNKNOWN", "BLOCKED_BUDGET"}:
+        return False
+    if bool(row.get("paid_required")) and str(row.get("paid_state", "")).upper() != "DONE":
+        return False
+    if persisted_scheduler_row and str(row.get("paid_state", "")).upper() not in {"DONE", "NOT_REQUIRED"}:
+        return False
+    eligible = (
         row.get("status") in OK_STATUSES
         and row.get("publication_eligible") is True
     )
+    if not eligible or not persisted_scheduler_row:
+        return eligible
+    # Older direct memory callers do not carry the persisted scoring/contact
+    # fields.  The strict publication contract applies once those fields are
+    # present in a scheduler payload.
+    if not any(key in row for key in ("score", "email_publication_status", "phone_publication_status")):
+        return eligible
+    if int(row.get("score") or 0) < int(getattr(config, "MIN_ACCEPT_SCORE", 65)):
+        return False
+    evaluation = dict(row.get("__evaluation") or {})
+    if row.get("identity_resolution") and "_identity_resolution" not in evaluation:
+        evaluation["_identity_resolution"] = row.get("identity_resolution")
+    assessment = row.get("identity_assessment") or evaluation.get("identity_assessment") or {}
+    if not bool(assessment.get("publishable")) or assessment.get("conflicts"):
+        return False
+    reasons = " ".join(str(value) for value in (
+        row.get("reason", ""), row.get("publication_blockers", ""),
+        evaluation.get("reasons", []) if isinstance(evaluation, dict) else "",
+    )).casefold()
+    if any(token in reasons for token in ("sector_conflict", "context_conflict", "country_conflict", "country_mismatch", "foreign_country")):
+        return False
+    if "cross_domain_email_accepted_from_verified_official_page" in reasons and not evaluation.get("structured_domain_relation"):
+        return False
+    if len(scorer.legal_identity_tokens(str(row.get("company", "")))) <= 1:
+        if not (
+            scorer.normalize_domain(str(row.get("website", "")))
+            and scorer.domain_identity_match(str(row.get("company", "")), str(row.get("website", "")))[0]
+            and _has_reason(str(row.get("reason", "")).split(";"), ("legal_name_",))
+            and "country_identity_tr_" in reasons
+            and "context_match:" in reasons
+        ):
+            return False
+    valid_email = bool(row.get("email")) and str(row.get("email_publication_status", "")).casefold() == "allowed"
+    valid_phone = bool(row.get("phone")) and str(row.get("phone_publication_status", "")).casefold() == "allowed"
+    return valid_email or valid_phone
 
 
 def _has_reason(reasons: list[str], prefixes: tuple[str, ...]) -> bool:
@@ -68,8 +131,19 @@ def evaluate(
     fingerprint_resolution = str(
         evaluation.get("_identity_resolution", "") or ""
     ).startswith("candidate_resolved_by_")
-    if not assessment.get("provisionally_publishable") and not fingerprint_resolution:
-        blockers.append("identity_not_publishable")
+    legal_or_ownership_evidence = _has_reason(reasons, ("legal_name_phrase_match:", "legal_name_full_match:", "legal_name_ownership_match:")) or bool(evaluation.get("structured_domain_relation"))
+    if len(scorer.legal_identity_tokens(company)) <= 1 and not (
+        scorer.normalize_domain(candidate.get("url", ""))
+        and scorer.domain_identity_match(company, candidate.get("url", ""))[0]
+        and legal_or_ownership_evidence
+        and _has_reason(reasons, ("country_identity_tr_",))
+        and _has_reason(reasons, ("context_match:", "page_identity_strong:"))
+    ):
+        blockers.append("generic_single_token_identity_not_verified")
+    if not assessment.get("publishable"):
+        # A fingerprint/fast-path resolution is useful evidence, but never a
+        # publication authorization by itself.
+        blockers.append("identity_resolution_not_publishable" if fingerprint_resolution else "identity_not_publishable")
     blockers.extend(
         f"identity_conflict:{item.get('kind', 'unknown')}"
         for item in conflicts
@@ -78,6 +152,7 @@ def evaluate(
         blockers.append("no_first_party_contact")
     cross_domain_email_resolved = (
         "cross_domain_email_accepted_from_verified_official_page" in reasons
+        and bool(evaluation.get("structured_domain_relation"))
     )
     if evaluation.get("email_failed") and not cross_domain_email_resolved:
         blockers.append("email_gate_failed")
@@ -110,8 +185,6 @@ def evaluate(
         score += 2
     if scorer.domain_identity_match(company, candidate.get("url", ""))[0]:
         score += 5
-    if fingerprint_resolution:
-        score += 18
     score -= min(len(conflicts), 2) * 35
     if evaluation.get("email_failed") and not cross_domain_email_resolved:
         score -= 20

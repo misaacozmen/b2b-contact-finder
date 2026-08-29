@@ -289,13 +289,14 @@ class ModuleBoundariesTests(unittest.TestCase):
                             written_rows.extend(rows)
                             return "ok"
 
-                        pipeline_runner.run_pipeline(
-                            input_file,
-                            process_company_fn=main.process_company,
-                            write_outputs_fn=capture_outputs,
-                            set_output_dir_fn=lambda p: None,
-                            empty_result_fn=main._empty_result,
-                        )
+                        with self.assertRaisesRegex(RuntimeError, "writer must return immutable artifact metadata"):
+                            pipeline_runner.run_pipeline(
+                                input_file,
+                                process_company_fn=main.process_company,
+                                write_outputs_fn=capture_outputs,
+                                set_output_dir_fn=lambda p: None,
+                                empty_result_fn=main._empty_result,
+                            )
                         self.assertEqual(len(written_rows), 1)
                         self.assertEqual(written_rows[0]["status"], "PATCHED_FAILED_STATUS")
 

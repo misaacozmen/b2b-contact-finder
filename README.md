@@ -126,6 +126,8 @@ Tek kaynak çekmek için:
 python scrape_exhibitors.py --source ifco
 python scrape_exhibitors.py --source idos
 python scrape_exhibitors.py --source beauty
+python scrape_exhibitors.py --source texhibition
+python scrape_exhibitors.py --source zuchex
 ```
 
 Oluşan Excel kolonları:
@@ -172,9 +174,10 @@ Remove-Item Env:\BRIGHTDATA_API_KEY
 
 ## Çıktılar
 
-- `output/contacts.xlsx`: doğrulanmış ve manuel kontrol gerektiren tüm bulunan sonuçlar
-- `output/verified_contacts.xlsx`: yalnızca otomatik kullanıma uygun `OK_HIGH_CONFIDENCE` / `OK_MEDIUM_CONFIDENCE` sonuçları
-- `output/review_queue.xlsx`: manuel kontrol gerektiren, belirsiz veya bulunamayan sonuçlar
+- `output/all_results.xlsx`: tüm kaynak kayıtları ve statüleri için kanonik yüzey
+- `output/contacts.xlsx`: yalnızca yayınlanabilir `OK_HIGH_CONFIDENCE` / `OK_MEDIUM_CONFIDENCE` kayıtları
+- `output/review_queue.xlsx`: yayınlanamayan veya manuel inceleme gereken kayıtlar
+- `output/verified_contacts.xlsx`: `contacts.xlsx` ile aynı geçici uyumluluk alias'ı; deprecated
 - `output/failed.xlsx`: bulunamayan ya da eksik kalan kayıtlar
 - `output/website_candidates.xlsx`: her firma için ilk 3 website adayı, skor ve seçim gerekçesi
 - `output/report.txt`: özet rapor
@@ -182,10 +185,11 @@ Remove-Item Env:\BRIGHTDATA_API_KEY
 - `output/evidence.jsonl`: sorgu, aday, taranan sayfa ve alan bazlı kaynak kanıtları
 - `output/entity_relationships.jsonl`: otomatik güven listesine alınmayan şirket–marka–domain gözlemleri
 - `output/telemetry.json`: API, HTTP ve cache kullanım sayaçları
-- `state/progress.sqlite3`: firma başına atomik, kesinti sonrası devam checkpoint'i
+- `runs/<run_id>/output`, `runs/<run_id>/state`: koşuya özel atomik çıktı, cache ve checkpoint alanı
+- `state/progress.sqlite3`: eski koşular için salt okunur legacy checkpoint
 - `state/progress.json`: aktif SQLite koşusunu gösteren küçük işaret dosyası
 
-Program tamamlanınca checkpoint dosyaları temizlenir. İşlem yarıda kalırsa sonraki aynı koşu input hash'i ve koşu imzasıyla kaldığı yerden devam eder.
+Ücretli sağlayıcılar yalnızca açık `--allow-paid` ile kullanılır. İşlem yarıda kalırsa önce immutable run bundle handoff hazırlanır; yetkilendirme dosyası doğrulandıktan sonra yeni child continuation oluşturulur ve yalnız child run devam eder. Replay export yalnızca ayrı `export_replay.py` komutuyla üretilir.
 
 API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Varsayılan koşu bütçeleri Bright Data için 500, Google Places için 100 istektir. Ana komutta değiştirilebilir:
 

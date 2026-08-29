@@ -1,4 +1,6 @@
 import argparse
+import os
+import tempfile
 from pathlib import Path
 
 import config
@@ -12,6 +14,7 @@ from modules.exhibitor_scraper import (
     scrape_maktek,
     scrape_metalexpo,
     scrape_texhibition,
+    scrape_zuchex,
 )
 from modules.utils import ensure_directories
 
@@ -24,6 +27,7 @@ SCRAPERS = {
     "maktek": scrape_maktek,
     "metalexpo": scrape_metalexpo,
     "texhibition": scrape_texhibition,
+    "zuchex": scrape_zuchex,
 }
 
 
@@ -67,7 +71,20 @@ def run(source: str, output: Path, fetch_details: bool, delay: float) -> list[di
         rows.extend(source_rows)
 
     rows = dedupe_rows(rows)
-    excel.write_company_records(output, rows)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.stem}.", suffix=output.suffix + ".staging", dir=output.parent,
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        excel.write_company_records(temporary, rows)
+        # Re-open before publication so a partial/invalid workbook is never
+        # allowed to replace the last known-good input.
+        excel.read_company_records(temporary)
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
     print(f"Toplam benzersiz firma: {len(rows)}")
     print(f"Website bulunan: {sum(1 for row in rows if row.get('website'))}")
     print(f"Yazildi: {output}")

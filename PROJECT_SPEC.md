@@ -13,8 +13,8 @@ bulup Excel'e yazan, fuar-bağımsız (Metalexpo, Automechanika, Hannover Messe 
 ---
 
 ## Kısıtlar (önemli, sapma)
-- **Bütçe: $0.** Ücretli arama API kullanılmayacak. Sadece DDGS (duckduckgo-search / ddgs Python paketi).
-- **LinkedIn adımı YOK.** Doğrudan website araması yapılacak.
+- **Tarihsel politika (arşiv):** Bu sürümün eski kabulü $0 bütçe ve LinkedIn yoktu.
+- **Güncel politika:** Ücretli sağlayıcılar yalnızca açık `--allow-paid` ve manifestteki sabit bütçelerle çalışır; varsayılan tur ücretsizdir.
 - DDGS rate-limit'e karşı **agresif olmayan** bir tempo: varsayılan **2-3 paralel worker**, istekler arası **1-3 saniye rastgele gecikme**.
 - Sorgu sayısı firma başına sabit 5 değil, **kademeli/early-stop**: ilk sorgu yüksek güvenle sonuç verirse kalan sorgular atlanır.
 
@@ -68,7 +68,7 @@ ContactFinder/
    g. HER FİRMADAN SONRA checkpoint.py ile progress.json güncelle (kesinti güvenliği)
    h. utils.py ile rastgele 1-3 sn bekle (rate-limit koruması)
 4. Tüm firmalar bitince:
-   a. excel.py: contacts.xlsx ve failed.xlsx yaz
+   a. excel.py: all_results.xlsx, contacts.xlsx, review_queue.xlsx ve failed.xlsx yaz
    b. report.py: doğruluk raporunu hesapla, report.txt'ye yaz VE konsola yazdır
 5. progress.json'ı temizle/arşivle (tamamlandı işareti)
 ```

@@ -16,6 +16,7 @@ import config
 import main
 from modules import aliases, cache_store, checkpoint, crawler, entity_registry, network_guard, runtime, scorer
 from validate_golden_xlsx import assertion_coverage, evaluate, readiness_issues
+from fixture_factory import benchmark_manifest
 
 
 class ScaleAndValidationPackageTests(unittest.TestCase):
@@ -162,14 +163,14 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
                 remaining = checkpoint.load_progress(second_input, "second")
                 self.assertEqual(remaining["results_so_far"][0]["company"], "B")
 
-    def test_duplicate_company_rows_merge_metadata(self) -> None:
+    def test_same_name_rows_remain_distinct_source_records(self) -> None:
         rows, removed = main._deduplicate_company_records([
             {"company": "Örnek A.Ş.", "website": "", "sector": "kozmetik", "source": "fair1"},
             {"company": "ORNEK A.S.", "website": "https://ornek.com.tr", "sector": "", "source": "fair2"},
         ])
-        self.assertEqual(removed, 1)
-        self.assertEqual(rows[0]["website"], "https://ornek.com.tr")
-        self.assertEqual(rows[0]["source"], "fair1;fair2")
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["source_record_id"], rows[1]["source_record_id"])
 
     def test_cache_is_written_compressed_and_remains_readable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -214,9 +215,9 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
 
     def test_paid_api_budget_is_atomic(self) -> None:
         runtime.reset()
-        self.assertTrue(runtime.reserve_api("test", 1))
-        self.assertFalse(runtime.reserve_api("test", 1))
-        self.assertEqual(runtime.snapshot()["counters"]["api.test.requests"], 1)
+        self.assertTrue(runtime.reserve_api("brightdata", 1))
+        self.assertFalse(runtime.reserve_api("brightdata", 1))
+        self.assertEqual(runtime.snapshot()["counters"]["api.brightdata.requests"], 1)
 
     def test_crawler_http_budget_is_atomic(self) -> None:
         runtime.reset()
@@ -292,7 +293,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
     def test_benchmark_validator_public_mode_success(self) -> None:
         import validate_benchmark_suite
         sets, issues = validate_benchmark_suite.validate_manifest(
-            Path("data/benchmark_splits.json"),
+            benchmark_manifest(),
             private_seen_workbook=None,
         )
         self.assertEqual(issues, [])
@@ -301,7 +302,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
     def test_benchmark_validator_private_missing_file_error(self) -> None:
         import validate_benchmark_suite
         _, issues = validate_benchmark_suite.validate_manifest(
-            Path("data/benchmark_splits.json"),
+            benchmark_manifest(),
             private_seen_workbook=Path("non_existent_firms.xlsx"),
         )
         self.assertTrue(any("private seen workbook not found" in issue for issue in issues))
@@ -314,7 +315,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             wb_empty = Path(directory) / "empty.xlsx"
             excel.write_company_records(wb_empty, [])
             _, issues = validate_benchmark_suite.validate_manifest(
-                Path("data/benchmark_splits.json"),
+                benchmark_manifest(),
                 private_seen_workbook=wb_empty,
             )
             self.assertTrue(any("count mismatch: actual 0 != expected 71" in issue for issue in issues))
@@ -323,7 +324,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             wb_70 = Path(directory) / "seen_70.xlsx"
             excel.write_company_records(wb_70, [{"company": f"Synthetic Unseen Co {i}"} for i in range(70)])
             _, issues_70 = validate_benchmark_suite.validate_manifest(
-                Path("data/benchmark_splits.json"),
+                benchmark_manifest(),
                 private_seen_workbook=wb_70,
             )
             self.assertTrue(any("count mismatch: actual 70 != expected 71" in issue for issue in issues_70))
@@ -332,7 +333,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             wb_72 = Path(directory) / "seen_72.xlsx"
             excel.write_company_records(wb_72, [{"company": f"Synthetic Unseen Co {i}"} for i in range(72)])
             _, issues_72 = validate_benchmark_suite.validate_manifest(
-                Path("data/benchmark_splits.json"),
+                benchmark_manifest(),
                 private_seen_workbook=wb_72,
             )
             self.assertTrue(any("count mismatch: actual 72 != expected 71" in issue for issue in issues_72))
@@ -341,7 +342,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             wb_71 = Path(directory) / "seen_71.xlsx"
             excel.write_company_records(wb_71, [{"company": f"Synthetic Clean Co {i}"} for i in range(71)])
             _, issues_71 = validate_benchmark_suite.validate_manifest(
-                Path("data/benchmark_splits.json"),
+                benchmark_manifest(),
                 private_seen_workbook=wb_71,
             )
             self.assertEqual(issues_71, [])
@@ -351,7 +352,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             overlap_rows = [{"company": f"Synthetic Clean Co {i}"} for i in range(70)] + [{"company": "cormind"}]
             excel.write_company_records(wb_overlap, overlap_rows)
             _, issues_ov = validate_benchmark_suite.validate_manifest(
-                Path("data/benchmark_splits.json"),
+                benchmark_manifest(),
                 private_seen_workbook=wb_overlap,
             )
             self.assertTrue(any("private seen overlap: 1" in issue for issue in issues_ov))
@@ -367,7 +368,7 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
             )
             excel.write_company_records(wb_multi, multi_rows)
             _, issues_multi = validate_benchmark_suite.validate_manifest(
-                Path("data/benchmark_splits.json"),
+                benchmark_manifest(),
                 private_seen_workbook=wb_multi,
             )
             self.assertTrue(any("development_golden4: private seen overlap: 1" in issue for issue in issues_multi))
@@ -431,12 +432,12 @@ class ScaleAndValidationPackageTests(unittest.TestCase):
 
     def test_benchmark_validator_cli_exit_codes(self) -> None:
         # Public CLI run -> exit code 0
-        r_pub = subprocess.run([sys.executable, "validate_benchmark_suite.py"], capture_output=True, text=True)
+        r_pub = subprocess.run([sys.executable, "validate_benchmark_suite.py", "--manifest", str(benchmark_manifest())], capture_output=True, text=True)
         self.assertEqual(r_pub.returncode, 0)
         self.assertIn("private_seen_gate: NOT_REQUESTED", r_pub.stdout)
 
         # Non-existent file -> exit code 2
-        r_bad = subprocess.run([sys.executable, "validate_benchmark_suite.py", "--private-seen-workbook", "missing.xlsx"], capture_output=True, text=True)
+        r_bad = subprocess.run([sys.executable, "validate_benchmark_suite.py", "--manifest", str(benchmark_manifest()), "--private-seen-workbook", "missing.xlsx"], capture_output=True, text=True)
         self.assertEqual(r_bad.returncode, 2)
 
     def test_repository_has_no_public_seen_hashes_fixture_or_tool(self) -> None:

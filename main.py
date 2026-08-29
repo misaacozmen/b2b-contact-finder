@@ -39,6 +39,7 @@ from modules import (
     run_budget,
     runtime,
     runtime_paths,
+    run_context,
     scorer,
     search,
     secrets_store,
@@ -335,6 +336,8 @@ def _cross_domain_email_is_safe_first_party(
     source page, DNS verification and already-established website identity are.
     """
     if not evaluation.get("email_failed") or not identity_verified:
+        return False
+    if not evaluation.get("structured_domain_relation"):
         return False
     selected_email = str(evaluation.get("email", "") or "")
     source_url = str(evaluation.get("email_source_url", "") or "")
@@ -657,6 +660,13 @@ def _evaluate_candidate(
             or scorer.public_brand_domain_match(company, email_domain)
         )
 
+    structured_identity_for_contacts = _structured_identity_score(company, crawl_result["pages"])[2]
+    related_domains = {scorer.normalize_domain(value) for value in (*structured_identity_for_contacts.get("urls", []), *structured_identity_for_contacts.get("same_as", [])) if scorer.normalize_domain(value)}
+    has_structured_owner_claim = bool(structured_identity_for_contacts.get("ownership_statements") or structured_identity_for_contacts.get("legal_names"))
+    for record in ranked_email_records:
+        mail_domain = scorer.normalize_domain(str(record.get("value", "")).rsplit("@", 1)[-1])
+        record["structured_domain_relation"] = bool(has_structured_owner_claim and any(scorer.same_registrable_domain(mail_domain, domain) for domain in related_domains))
+
     ranked_phone_records = _select_phone_records(phone_records)
     contact_policy = contact_publication.filter_records(
         crawl_result["url"], ranked_email_records, ranked_phone_records,
@@ -693,7 +703,7 @@ def _evaluate_candidate(
     context_failed = "context_gate_failed" in reasons
     email_failed = "email_gate_failed" in reasons
 
-    structured_identity = _structured_identity_score(company, crawl_result["pages"])[2]
+    structured_identity = structured_identity_for_contacts
     candidate["_structured_identity"] = structured_identity
     semantic_identity = entity_semantics.assess(
         company, metadata, crawl_result["pages"],
@@ -1625,10 +1635,6 @@ def _reviewable_authoritative_candidate(company: str, candidate: dict) -> bool:
 
 def _unsupported_search_text_candidate(company: str, evaluation: dict) -> bool:
     """Reject retailer/directory-like results that never prove company identity."""
-    if str(evaluation.get("_identity_resolution", "")).startswith(
-        "candidate_resolved_by_"
-    ):
-        return False
     candidate = evaluation.get("candidate", {})
     reasons = evaluation.get("reasons", [])
     if candidate.get("role") in {"directory", "fair_profile", "news"}:
@@ -1686,10 +1692,6 @@ def _listed_domain_conflict_requires_review(
 
 
 def _weak_search_identity_requires_review(company: str, evaluation: dict) -> bool:
-    if str(evaluation.get("_identity_resolution", "")).startswith(
-        "candidate_resolved_by_"
-    ):
-        return False
     candidate = evaluation.get("candidate", {})
     if candidate.get("query") in {
         "fair_listed_website",
@@ -2519,6 +2521,7 @@ def _result_quality_key(row: dict) -> tuple[int, ...]:
 _RUN_SCOPED_CONFIG_NAMES = (
     "OUTPUT_DIR",
     "CONTACTS_FILE",
+    "ALL_RESULTS_FILE",
     "VERIFIED_CONTACTS_FILE",
     "REVIEW_QUEUE_FILE",
     "FAILED_FILE",
@@ -2531,10 +2534,20 @@ _RUN_SCOPED_CONFIG_NAMES = (
     "DISCOVERY_COVERAGE_FILE",
     "QUALITY_AUDIT_FILE",
     "REPLAY_SNAPSHOT_FILE",
+    "REPLAY_MANIFEST_INPUT",
+    "MANIFEST_FILE",
+    "STATE_DIR",
+    "PROGRESS_FILE",
+    "PROGRESS_DB_FILE",
+    "SEARCH_CACHE_DIR",
+    "CRAWL_CACHE_DIR",
+    "EMAIL_CACHE_DIR",
     "SEARCH_PROVIDER",
     "ENABLE_GOOGLE_PLACES",
     "ENABLE_BRANDFETCH_DOMAIN_SEARCH",
     "ENABLE_HUNTER_DOMAIN_FINDER",
+    "ENABLE_LINKEDIN_COMPANY_LOOKUP",
+    "ENABLE_LLM_ARBITER",
     "SEARCH_HTTP_REQUEST_BUDGET",
     "CRAWLER_HTTP_REQUEST_BUDGET",
     "BRIGHTDATA_REQUEST_BUDGET",
@@ -2552,6 +2565,11 @@ def run(
     output_dir: Path | None = None,
     companies: set[str] | None = None,
     only_statuses: set[str] | None = None,
+    *,
+    allow_paid: bool | None = None,
+    run_dir: Path | None = None,
+    resume_run: Path | None = None,
+    from_run_manifest: Path | None = None,
 ) -> str:
     """Run the pipeline without leaking per-run config into later calls."""
     with _RUN_LOCK:
@@ -2559,7 +2577,7 @@ def run(
             name: getattr(config, name) for name in _RUN_SCOPED_CONFIG_NAMES
         }
         try:
-            return _run(input_file, output_dir, companies, only_statuses)
+            return _run(input_file, output_dir, companies, only_statuses, allow_paid=allow_paid, run_dir=run_dir, resume_run=resume_run, from_run_manifest=from_run_manifest)
         finally:
             try:
                 close_logging()
@@ -2573,6 +2591,11 @@ def _run(
     output_dir: Path | None = None,
     companies: set[str] | None = None,
     only_statuses: set[str] | None = None,
+    *,
+    allow_paid: bool | None = None,
+    run_dir: Path | None = None,
+    resume_run: Path | None = None,
+    from_run_manifest: Path | None = None,
 ) -> str:
     return pipeline_runner.run_pipeline(
         input_file,
@@ -2583,27 +2606,27 @@ def _run(
         write_outputs_fn=_write_outputs,
         set_output_dir_fn=_set_output_dir,
         empty_result_fn=_empty_result,
+        allow_paid=allow_paid,
+        run_dir=run_dir,
+        resume_run_dir=resume_run,
+        from_run_manifest=from_run_manifest,
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="B2B Contact Finder")
     parser.add_argument("--input", type=Path, default=config.INPUT_FILE, help="Path to firms.xlsx")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Output directory")
-    parser.add_argument(
-        "--run-state-dir",
-        type=Path,
-        default=None,
-        help="Run-specific checkpoint and cache directory",
-    )
+    parser.add_argument("--run-dir", type=Path, default=None, help="Canonical run directory containing output/ and state/")
+    parser.add_argument("--resume-run", type=Path, default=None, help="Resume an existing run directory")
+    parser.add_argument("--from-run-manifest", type=Path, default=None, help="Verified completed manifest for --only-status selection")
     parser.add_argument("--companies", default="", help="Comma-separated exact company names")
-    parser.add_argument("--only-status", default="", help="Run statuses found in the output directory's existing contacts.xlsx")
+    parser.add_argument("--only-status", default="", help="Run statuses found in the output directory's all_results.xlsx")
     parser.add_argument(
-        "--search-cache", choices=("use", "refresh", "off", "replay"), default="use",
+        "--search-cache", choices=("use", "refresh", "off", "replay"), default=None,
         help="Persistent SERP/Places cache mode",
     )
     parser.add_argument(
-        "--crawl-cache", choices=("use", "refresh", "off", "replay"), default="use",
+        "--crawl-cache", choices=("use", "refresh", "off", "replay"), default=None,
         help="Persistent official-site page cache mode",
     )
     parser.add_argument("--rerank-cache", action="store_true", help="Offline replay: do not make search or crawl requests")
@@ -2613,37 +2636,99 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Portable replay_snapshot.json.gz created by an earlier run",
     )
-    parser.add_argument("--brightdata-budget", type=int, default=config.BRIGHTDATA_REQUEST_BUDGET, help="Maximum paid Bright Data HTTP requests for this run")
-    parser.add_argument("--linkedin-company-budget", type=int, default=config.LINKEDIN_COMPANY_REQUEST_BUDGET, help="Maximum Bright Data LinkedIn Company requests for this run")
-    parser.add_argument("--google-places-budget", type=int, default=config.GOOGLE_PLACES_REQUEST_BUDGET, help="Maximum paid Google Places requests for this run")
+    parser.add_argument("--brightdata-budget", type=int, default=None, help="Maximum paid Bright Data HTTP requests for this run")
+    parser.add_argument("--linkedin-company-budget", type=int, default=None, help="Maximum Bright Data LinkedIn Company requests for this run")
+    parser.add_argument("--google-places-budget", type=int, default=None, help="Maximum paid Google Places requests for this run")
+    parser.add_argument("--brandfetch-budget", type=int, default=None, help="Maximum paid Brandfetch requests for this run")
+    parser.add_argument("--hunter-budget", type=int, default=None, help="Maximum paid Hunter requests for this run")
+    parser.add_argument("--llm-budget", type=int, default=None, help="Maximum paid LLM requests for this run")
+    paid_group = parser.add_mutually_exclusive_group()
+    paid_group.add_argument("--allow-paid", dest="allow_paid", action="store_true", default=None, help="Enable paid providers for this run and persist their budgets in the manifest")
+    paid_group.add_argument("--no-allow-paid", dest="allow_paid", action="store_false", help="Explicitly disable paid providers")
+    parser.add_argument("--replay-manifest", type=Path, default=None, help="Validated sharded replay manifest")
     parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="Use environment/saved resolver settings without prompting",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-if __name__ == "__main__":
-    args = parse_args()
-    if args.run_state_dir:
-        _set_run_state_dir(args.run_state_dir)
-    config.SEARCH_CACHE_MODE = "replay" if args.rerank_cache else args.search_cache
-    config.CRAWL_CACHE_MODE = "replay" if args.rerank_cache else args.crawl_cache
-    config.BRIGHTDATA_REQUEST_HARD_CAP = max(0, args.brightdata_budget)
-    config.GOOGLE_PLACES_REQUEST_HARD_CAP = max(0, args.google_places_budget)
-    config.BRIGHTDATA_REQUEST_BUDGET = config.BRIGHTDATA_REQUEST_HARD_CAP
-    config.LINKEDIN_COMPANY_REQUEST_HARD_CAP = max(0, args.linkedin_company_budget)
-    config.LINKEDIN_COMPANY_REQUEST_BUDGET = config.LINKEDIN_COMPANY_REQUEST_HARD_CAP
-    config.GOOGLE_PLACES_REQUEST_BUDGET = config.GOOGLE_PLACES_REQUEST_HARD_CAP
+def resolve_cli_run_config(argv=None):
+    """Resolve effective run config through the CLI option/resolver path only."""
+    args = parse_args(argv)
+    if args.search_cache is not None:
+        config.SEARCH_CACHE_MODE = args.search_cache
+    if args.crawl_cache is not None:
+        config.CRAWL_CACHE_MODE = args.crawl_cache
+    budget_args = {
+        "brightdata_budget": "BRIGHTDATA_REQUEST_BUDGET",
+        "linkedin_company_budget": "LINKEDIN_COMPANY_REQUEST_BUDGET",
+        "google_places_budget": "GOOGLE_PLACES_REQUEST_BUDGET",
+        "brandfetch_budget": "BRANDFETCH_REQUEST_BUDGET",
+        "hunter_budget": "HUNTER_REQUEST_BUDGET",
+        "llm_budget": "LLM_ARBITER_BUDGET",
+    }
+    for arg_name, config_name in budget_args.items():
+        value = getattr(args, arg_name)
+        if value is not None:
+            setattr(config, config_name, max(0, int(value)))
+    if args.non_interactive:
+        _apply_saved_resolver_configuration()
+    return run_context.RunConfig.from_config(paid_enabled=bool(args.allow_paid))
+
+
+def cli(argv=None) -> int:
+    args = parse_args(argv)
+    if args.search_cache is not None:
+        config.SEARCH_CACHE_MODE = args.search_cache
+    if args.crawl_cache is not None:
+        config.CRAWL_CACHE_MODE = args.crawl_cache
+    if args.rerank_cache:
+        config.SEARCH_CACHE_MODE = "replay"
+        config.CRAWL_CACHE_MODE = "replay"
+    if args.brightdata_budget is not None:
+        config.BRIGHTDATA_REQUEST_HARD_CAP = max(0, args.brightdata_budget)
+        config.BRIGHTDATA_REQUEST_BUDGET = config.BRIGHTDATA_REQUEST_HARD_CAP
+    if args.linkedin_company_budget is not None:
+        config.LINKEDIN_COMPANY_REQUEST_HARD_CAP = max(0, args.linkedin_company_budget)
+        config.LINKEDIN_COMPANY_REQUEST_BUDGET = config.LINKEDIN_COMPANY_REQUEST_HARD_CAP
+    if args.google_places_budget is not None:
+        config.GOOGLE_PLACES_REQUEST_HARD_CAP = max(0, args.google_places_budget)
+        config.GOOGLE_PLACES_REQUEST_BUDGET = config.GOOGLE_PLACES_REQUEST_HARD_CAP
+    if args.brandfetch_budget is not None:
+        config.BRANDFETCH_REQUEST_BUDGET = max(0, args.brandfetch_budget)
+    if args.hunter_budget is not None:
+        config.HUNTER_REQUEST_BUDGET = max(0, args.hunter_budget)
+    if args.llm_budget is not None:
+        config.LLM_ARBITER_BUDGET = max(0, args.llm_budget)
     config.REPLAY_SNAPSHOT_INPUT = args.replay_snapshot
+    config.REPLAY_MANIFEST_INPUT = args.replay_manifest
     if args.rerank_cache:
         config.MIN_DELAY_SEC = 0
         config.MAX_DELAY_SEC = 0
+    selected_companies = {value.strip() for value in args.companies.split(",") if value.strip()}
+    selected_statuses = {value.strip() for value in args.only_status.split(",") if value.strip()}
+    if args.run_dir and args.resume_run:
+        raise SystemExit("--run-dir and --resume-run are mutually exclusive")
+    if selected_statuses and not args.from_run_manifest:
+        raise SystemExit("--only-status requires --from-run-manifest")
+    if args.resume_run:
+        pipeline_runner.validate_resume_before_credentials(
+            args.input, args.resume_run, allow_paid=args.allow_paid,
+            companies=selected_companies or None, only_statuses=selected_statuses or None,
+            from_run_manifest=args.from_run_manifest, search_cache=args.search_cache,
+            crawl_cache=args.crawl_cache, brightdata_budget=args.brightdata_budget,
+            google_places_budget=args.google_places_budget,
+            linkedin_budget=args.linkedin_company_budget, rerank_cache=args.rerank_cache,
+        )
     if args.non_interactive:
         _apply_saved_resolver_configuration()
     else:
         configure_apis_interactively()
-    selected_companies = {value.strip() for value in args.companies.split(",") if value.strip()}
-    selected_statuses = {value.strip() for value in args.only_status.split(",") if value.strip()}
-    print(run(args.input, args.output_dir, selected_companies or None, selected_statuses or None))
+    print(run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

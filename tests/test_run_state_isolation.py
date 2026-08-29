@@ -280,7 +280,7 @@ class RunStateIsolationTests(unittest.TestCase):
             **weak,
             "_identity_resolution": "candidate_resolved_by_target_fingerprint",
         }
-        self.assertFalse(
+        self.assertTrue(
             main._weak_search_identity_requires_review(
                 "ORNEK DEMIR PROFIL", resolved
             )

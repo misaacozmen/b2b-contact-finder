@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "manual_verification": "2026-08-28",
+  "sources": ["Texhibition", "Zuchex"],
+  "records": [
+    {"source_record_id": "texhibition_2026:fixture-001", "company": "Atlas Textile", "website": "https://atlas-textile.example", "expected_publication_eligible": false, "reason": "same-name collision"},
+    {"source_record_id": "zuchex_2026:fixture-001", "company": "Atlas Textile", "website": "https://atlas-textile.example", "expected_publication_eligible": false, "reason": "same-name collision"},
+    {"source_record_id": "texhibition_2026:fixture-002", "company": "Zuchex Home", "website": "https://different-owner.example", "expected_publication_eligible": false, "reason": "homonym false publication"}
+  ]
+}

@@ -67,6 +67,41 @@ _STANDALONE_ASSIGN = re.compile(rf'(?i)((?:\A|[\s{{,])\b(?:{_EMBEDDED_PROPS})\b\
 _STANDALONE_UNQUOTED = re.compile(rf'(?i)((?:\A|[\s{{,])\b(?:{_EMBEDDED_PROPS})\b\s*[:=]\s*)(?!(?:["\'`]|\[REDACTED\](?![^\s,}}])))([^\s,}}]+)')
 
 
+def normalize_unicode_scalars(value: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> Any:
+    """Replace lone UTF-16 surrogate code points throughout a value tree."""
+    if _depth > MAX_SANITIZE_DEPTH:
+        return "[REDACTED]"
+    if isinstance(value, str):
+        return value.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+    if _seen is None:
+        _seen = set()
+    if isinstance(value, (dict, list, tuple, set)):
+        value_id = id(value)
+        if value_id in _seen:
+            return "[REDACTED]"
+        _seen.add(value_id)
+    if isinstance(value, dict):
+        result = {
+            normalize_unicode_scalars(str(key), _depth=_depth + 1, _seen=_seen): normalize_unicode_scalars(item, _depth=_depth + 1, _seen=_seen)
+            for key, item in value.items()
+        }
+        _seen.remove(value_id)
+        return result
+    if isinstance(value, list):
+        result = [normalize_unicode_scalars(item, _depth=_depth + 1, _seen=_seen) for item in value]
+        _seen.remove(value_id)
+        return result
+    if isinstance(value, tuple):
+        result = tuple(normalize_unicode_scalars(item, _depth=_depth + 1, _seen=_seen) for item in value)
+        _seen.remove(value_id)
+        return result
+    if isinstance(value, set):
+        result = {normalize_unicode_scalars(item, _depth=_depth + 1, _seen=_seen) for item in value}
+        _seen.remove(value_id)
+        return result
+    return value
+
+
 def _sensitive_key(value: object) -> bool:
     raw = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value).strip())
     key = re.sub(r"[-.\s]+", "_", raw.casefold())
@@ -91,7 +126,7 @@ def _redact_plain_text(text: str) -> tuple[str, bool]:
 
 
 def redact_text(value: str) -> str:
-    raw_str = str(value)
+    raw_str = normalize_unicode_scalars(str(value))
     if _CONTAINER_PROP.search(raw_str):
         return "[REDACTED]"
     p_text, p_mod = _redact_plain_text(raw_str)
@@ -147,6 +182,7 @@ def redact_log_text(text: str) -> str:
 def _sanitize_depth(value: Any, depth: int, seen: set[int]) -> Any:
     if depth > MAX_SANITIZE_DEPTH:
         return "[REDACTED]"
+    value = normalize_unicode_scalars(value, _depth=depth)
     val_id = id(value)
     if isinstance(value, dict):
         if val_id in seen:

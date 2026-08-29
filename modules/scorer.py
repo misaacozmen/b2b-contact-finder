@@ -44,7 +44,12 @@ def normalize_domain(url_or_domain: str) -> str:
         return ""
     if "://" not in value:
         value = f"https://{value}"
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        # ``urlparse`` rejects malformed IPv6/port forms.  Discovery treats
+        # those as an absent domain; one bad result must not abort the item.
+        return ""
     domain = parsed.netloc.lower() or parsed.path.lower()
     if domain.startswith("www."):
         domain = domain[4:]

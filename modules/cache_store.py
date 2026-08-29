@@ -177,7 +177,7 @@ def save(directory: Path, namespace: str, key: str, value: Any, schema_version: 
     compressed_path = _path(directory, namespace, key, compressed=True)
     legacy_path = _path(directory, namespace, key, compressed=False)
     compressed_path.parent.mkdir(parents=True, exist_ok=True)
-    sanitized_value = redaction.sanitize(value)
+    sanitized_value = redaction.normalize_unicode_scalars(redaction.sanitize(value))
     payload = {
         "schema_version": schema_version,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -186,13 +186,18 @@ def save(directory: Path, namespace: str, key: str, value: Any, schema_version: 
     tmp = compressed_path.with_name(
         f"{compressed_path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
     )
-    with _io_lock(compressed_path):
-        try:
-            with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
-                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-            _replace_with_retry(tmp, compressed_path, namespace)
-            legacy_path.unlink(missing_ok=True)
-        finally:
-            tmp.unlink(missing_ok=True)
+    try:
+        with _io_lock(compressed_path):
+            try:
+                with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as handle:
+                    json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+                _replace_with_retry(tmp, compressed_path, namespace)
+                legacy_path.unlink(missing_ok=True)
+            finally:
+                tmp.unlink(missing_ok=True)
+    except Exception as exc:
+        runtime.record(f"cache.{namespace}.write_error")
+        runtime.record(f"cache.{namespace}.write_error.{exc.__class__.__name__}")
+        return None
     replay_snapshot.record(_store_name(directory), namespace, key, schema_version, sanitized_value)
     runtime.record(f"cache.{namespace}.write")

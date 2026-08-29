@@ -7,10 +7,11 @@ from modules import scorer
 import run_golden_5
 from validate_benchmark_suite import validate_manifest
 from validate_golden_xlsx import _sheet_rows, readiness_issues
+from fixture_factory import benchmark_manifest, golden, path as fixture_path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-GOLDEN5_DIR = ROOT / "outputs" / "golden_5_20260716"
+ROOT = fixture_path()
+GOLDEN5_DIR = golden(5).parent
 
 
 def _names(path: Path, sheet: str | None = None, column: str = "Company") -> set[str]:
@@ -27,16 +28,15 @@ class Golden5PackageTests(unittest.TestCase):
         current = _names(manual, "Manual Report")
         prior = set()
         for path in (
-            ROOT / "outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx",
-            ROOT / "outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx",
-            ROOT / "outputs/golden_3_20260715/golden_3_manual_validation_15.xlsx",
-            ROOT / "outputs/golden_4_20260715/golden_4_manual_validation_15.xlsx",
+            fixture_path("outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx"),
+            fixture_path("outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx"),
+            golden(3), golden(4),
         ):
             prior.update(_names(path, "Manual Report"))
         self.assertEqual(len(current), 20)
         self.assertFalse(current & prior)
 
-        splits = json.loads((ROOT / "data/benchmark_splits.json").read_text(encoding="utf-8"))
+        splits = json.loads(benchmark_manifest().read_text(encoding="utf-8"))
         g5_set = next(s for s in splits["sets"] if s.get("name") == "golden_5")
         self.assertIs(g5_set.get("private_seen_check"), True)
 
@@ -84,7 +84,7 @@ class Golden5PackageTests(unittest.TestCase):
         self.assertEqual(issues, [])
 
     def test_pending_blind_set_keeps_benchmark_manifest_valid(self):
-        _, issues = validate_manifest(ROOT / "data/benchmark_splits.json")
+        _, issues = validate_manifest(benchmark_manifest())
         self.assertEqual(issues, [])
 
 

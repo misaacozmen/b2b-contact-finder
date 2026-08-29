@@ -40,7 +40,7 @@ class FieldPublicationPolicyTests(unittest.TestCase):
         self.assertTrue(decision["eligible"])
         self.assertEqual(decision["reason"], "verified_first_party_source")
 
-    def test_cross_domain_email_requires_dns_but_stays_allowed_when_verified(self):
+    def test_cross_domain_email_requires_structured_relation_in_addition_to_dns(self):
         source = "https://official.example/contact"
         blocked = contact_publication.evaluate_email(
             "https://official.example",
@@ -51,14 +51,15 @@ class FieldPublicationPolicyTests(unittest.TestCase):
             _email("sales@mail-provider.example", source, "verified"),
         )
         self.assertFalse(blocked["eligible"])
-        self.assertIn("cross_domain_email_dns_unverified", blocked["reason"])
-        self.assertTrue(allowed["eligible"])
+        self.assertIn("cross_domain_email_relation_unverified", blocked["reason"])
+        self.assertFalse(allowed["eligible"])
 
         company_domain = contact_publication.evaluate_email(
             "https://official.example",
             _email(
                 "sales@official-company.example", source, "unverified",
                 company_domain_identity=True,
+                structured_domain_relation=True,
             ),
         )
         self.assertTrue(company_domain["eligible"])

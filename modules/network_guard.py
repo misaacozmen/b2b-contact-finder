@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 import requests
 from requests.adapters import HTTPAdapter
 
+from modules import runtime
+
 
 @dataclass(frozen=True)
 class ResolvedTarget:
@@ -17,6 +19,25 @@ class ResolvedTarget:
     hostname: str
     port: int
     address: str
+
+
+def safe_urlparse(value: str, *, metric: str = "url"):
+    """Parse untrusted URL text and reject controls or malformed hosts."""
+    raw = str(value or "")
+    if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        runtime.record(f"{metric}.parse_control_character")
+        return None
+    try:
+        parsed = urlparse(raw)
+        _ = parsed.hostname
+        _ = parsed.port
+    except (TypeError, ValueError, UnicodeError):
+        runtime.record(f"{metric}.parse_error")
+        return None
+    if parsed.netloc.count("[") != parsed.netloc.count("]"):
+        runtime.record(f"{metric}.parse_invalid_brackets")
+        return None
+    return parsed
 
 
 class _PinnedHTTPAdapter(HTTPAdapter):
@@ -98,7 +119,9 @@ def resolve_public_http_url(
 ) -> tuple[ResolvedTarget | None, str]:
     """Resolve a URL once and return a public address suitable for pinning."""
     try:
-        parsed = urlparse(url)
+        parsed = safe_urlparse(url, metric="network")
+        if parsed is None:
+            return None, "invalid_url"
         port = parsed.port
     except ValueError:
         return None, "invalid_url"

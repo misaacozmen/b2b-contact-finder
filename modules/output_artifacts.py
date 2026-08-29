@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
+import os
+import shutil
+import uuid
+from pathlib import Path
 from typing import Callable
+
+from openpyxl import load_workbook
 
 import config
 from modules import (
     contact_publication,
+    contact_identity,
     discovery_coverage,
     entity_memory,
     entity_registry,
@@ -13,11 +23,121 @@ from modules import (
     publication_policy,
     quality_audit,
     redaction,
-    replay_snapshot,
     report,
     runtime,
     scorer,
 )
+
+
+class ArtifactResult(str):
+    """String-compatible writer result carrying immutable artifact metadata."""
+
+    def __new__(cls, report_text: str, artifacts: dict, entity_memory_rows: list[dict]):
+        result = str.__new__(cls, report_text)
+        result.artifacts = artifacts
+        result.entity_memory_rows = entity_memory_rows
+        return result
+
+
+def is_quarantined_row(row: dict) -> bool:
+    return bool(
+        row.get("quarantine_state")
+        or row.get("quarantine_status")
+        or "legacy_recovery_provisional" in str(row.get("publication_blockers", ""))
+        or str(row.get("source_record_id_quality", "")).casefold() == "legacy_recovery"
+    )
+
+
+def apply_quarantine(row: dict, *, state: str, status: str = "", blockers: str = "") -> dict:
+    """Reapply durable item quarantine to every newly saved result."""
+    row["quarantine_state"] = str(state)
+    row["quarantine_status"] = str(status)
+    row["publication_eligible"] = False
+    marker = "HANDOFF_PENDING" if str(state) == "HANDOFF_PENDING" else "legacy_recovery_provisional"
+    row["publication_blockers"] = "; ".join(sorted(set(filter(None, [str(blockers), str(row.get("publication_blockers", "")), marker]))))
+    if marker != "HANDOFF_PENDING":
+        suppress_all_contacts(row, marker)
+    return row
+
+
+def is_publishable_row(row: dict) -> bool:
+    return publication_policy.is_publishable_row(row)
+
+
+def apply_global_identity_collision_gate(rows: list[dict]) -> list[dict]:
+    """Fail closed when distinct entities share a contact or website."""
+    def has_relationship(row: dict) -> bool:
+        if row.get("human_verified") is True and row.get("entity_relationship"):
+            return True
+        for relation in row.get("human_verified_relationships", []) or []:
+            if isinstance(relation, dict) and relation.get("human_verified") is True:
+                return True
+        return False
+    fields = ("website", "email", "phone")
+    indexed: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        entity = str(row.get("entity_id") or row.get("source_record_id") or row.get("company") or "").strip()
+        for field in fields:
+            value = contact_identity.contact_key(field, row.get(field))
+            if value:
+                indexed.setdefault((field, value), []).append((entity, row))
+    for (field, value), matches in indexed.items():
+        entities = {entity for entity, _row in matches}
+        if len(entities) < 2 or all(has_relationship(row) for _entity, row in matches):
+            continue
+        reason = "cross_entity_contact_collision"
+        for _entity, row in matches:
+            row["status"] = "REVIEW_NEEDED"
+            row["publication_eligible"] = False
+            row["collision_reason"] = reason
+            row.setdefault("publication_blockers", "")
+            row["publication_blockers"] = "; ".join(filter(None, [row.get("publication_blockers", ""), reason]))
+            row[field] = ""
+    # Pending rows and same-name rows from different sources are always review-only.
+    by_name: dict[str, list[dict]] = {}
+    for row in rows:
+        key = str(row.get("company") or "").strip().casefold()
+        by_name.setdefault(key, []).append(row)
+    for matches in by_name.values():
+        source_ids = {str(row.get("source_record_id") or "") for row in matches}
+        if len(matches) > 1 and len(source_ids) == len(matches):
+            for row in matches:
+                row["status"] = "REVIEW_NEEDED"
+                row["publication_eligible"] = False
+                row["collision_reason"] = "cross_source_name_collision"
+                row["publication_blockers"] = "; ".join(filter(None, [row.get("publication_blockers", ""), "cross_source_name_collision"]))
+                suppress_all_contacts(row, "cross_source_name_collision")
+    for row in rows:
+        if str(row.get("status", "")).upper() in {"PENDING", "PENDING_PAID", "PENDING_FREE_RETRY", "PROCESSING_FAILED"}:
+            row["publication_eligible"] = False
+            row["publication_blockers"] = "; ".join(filter(None, [row.get("publication_blockers", ""), "pending_run_state"]))
+            suppress_all_contacts(row, "pending_run_state")
+    return rows
+
+
+def _atomic_excel(path: Path, writer: Callable[[Path, object], None], rows: list[dict], *, frozen_timestamp: str = "2000-01-01T00:00:00+00:00") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.stem}.{os.getpid()}.staging.xlsx")
+    try:
+        parameters = inspect.signature(writer).parameters
+        if "frozen_timestamp" in parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            writer(temporary, rows, frozen_timestamp=frozen_timestamp)
+        else:
+            writer(temporary, rows)
+        if not temporary.exists():
+            raise RuntimeError(f"artifact writer produced no file: {path.name}")
+        workbook = load_workbook(temporary, read_only=True, data_only=True)
+        header = [cell.value for cell in next(workbook.active.iter_rows(max_row=1))]
+        if not header or any(value is None for value in header):
+            workbook.close()
+            raise RuntimeError(f"artifact has invalid header: {path.name}")
+        if workbook.active.max_row - 1 != len(rows):
+            workbook.close()
+            raise RuntimeError(f"artifact row count mismatch: {path.name}")
+        workbook.close()
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def attach_candidates(row: dict, candidates: list[dict]) -> dict:
@@ -158,7 +278,7 @@ def policy_output_fields(evaluation: dict) -> dict:
     }
 
 
-def clear_unpublished_contacts(row: dict) -> None:
+def suppress_all_contacts(row: dict, reason: str) -> None:
     row["website"] = ""
     row["website_source"] = ""
     row["email"] = ""
@@ -167,9 +287,9 @@ def clear_unpublished_contacts(row: dict) -> None:
     row["alternative_emails"] = ""
     row["alternative_email_sources"] = ""
     row["email_verification"] = "not_checked"
-    row["email_verification_reason"] = "website_not_found"
+    row["email_verification_reason"] = reason
     row["email_publication_status"] = "suppressed"
-    row["email_publication_reason"] = "website_not_published"
+    row["email_publication_reason"] = reason
     row["phone"] = ""
     row["phone_source"] = ""
     row["phone_source_url"] = ""
@@ -177,7 +297,19 @@ def clear_unpublished_contacts(row: dict) -> None:
     row["alternative_phones"] = ""
     row["alternative_phone_sources"] = ""
     row["phone_publication_status"] = "suppressed"
-    row["phone_publication_reason"] = "website_not_published"
+    row["phone_publication_reason"] = reason
+
+
+def clear_unpublished_contacts(row: dict) -> None:
+    """Compatibility alias for the fail-closed contact suppression."""
+    suppress_all_contacts(row, "website_not_published")
+
+
+def partition_output_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Return publishable and review rows without changing the input list."""
+    published = [row for row in rows if is_publishable_row(row)]
+    review = [row for row in rows if not is_publishable_row(row)]
+    return published, review
 
 
 def apply_publication_policy(
@@ -228,10 +360,22 @@ def confidence_status(score: int, has_contact: bool, reasons: list[str], identit
     return "REVIEW_NEEDED", "review"
 
 
-def write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
+def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapshot: dict | None = None) -> ArtifactResult:
+    frozen_snapshot = dict(telemetry_snapshot) if telemetry_snapshot is not None else runtime.snapshot()
+    frozen_timestamp = str(frozen_snapshot.get("generated_at", "2000-01-01T00:00:00+00:00"))
+    apply_global_identity_collision_gate(rows)
+    output_root = Path(config.OUTPUT_DIR)
+    staging_root = output_root / ".staging" / uuid.uuid4().hex
+    staging_root.mkdir(parents=True, exist_ok=False)
+    memory_rows = [dict(row) for row in rows if is_publishable_row(row)]
+
+    def staged(path: Path) -> Path:
+        return staging_root / Path(path).name
+
+    all_results_path = staged(output_root / "all_results.xlsx")
     for row in rows:
         row["website_status"] = (
-            "verified" if row.get("website") and publication_policy.is_publishable_row(row)
+            "verified" if row.get("website") and is_publishable_row(row)
             else "review" if row.get("website") or row.get("status") == "WEBSITE_AMBIGUOUS"
             else "not_found"
         )
@@ -240,16 +384,11 @@ def write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
             else "partial" if row.get("email") or row.get("phone")
             else "missing"
         )
-        if publication_policy.is_publishable_row(row):
+        if is_publishable_row(row):
             discovery_coverage.mark_published(row.get("company", ""))
-    evidence.write_jsonl(config.EVIDENCE_FILE, rows)
-    entity_registry.write_observations(config.ENTITY_RELATIONSHIPS_FILE, rows)
-    if (
-        config.SEARCH_CACHE_MODE != "replay"
-        and config.CRAWL_CACHE_MODE != "replay"
-    ):
-        entity_memory.remember([row for row in rows if publication_policy.is_publishable_row(row)])
-    quality_audit.write(config.QUALITY_AUDIT_FILE, rows)
+    evidence.write_jsonl(staged(config.EVIDENCE_FILE), rows)
+    entity_registry.write_observations(staged(config.ENTITY_RELATIONSHIPS_FILE), rows, observed_at=frozen_timestamp)
+    quality_audit.write(staged(config.QUALITY_AUDIT_FILE), rows, runtime_snapshot=frozen_snapshot)
     for row in rows:
         row.pop("__index", None)
         row.pop("__candidates", None)
@@ -258,42 +397,114 @@ def write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
         row.pop("__search_trace", None)
         row.pop("__source_health", None)
         row.pop("__paid_escalation_complete", None)
-    published_rows = [
-        row for row in rows
-        if publication_policy.is_publishable_row(row)
-    ]
+    published_rows, review_rows = partition_output_rows(rows)
     # contacts.xlsx is the publication surface. Review/abstain rows remain in
     # the dedicated audit artifacts and must never look like published firms.
     sanitized_published_rows = redaction.sanitize(published_rows)
-    review_rows = [row for row in rows if not publication_policy.is_publishable_row(row)]
     sanitized_review_rows = redaction.sanitize(review_rows)
     sanitized_all_rows = redaction.sanitize(rows)
-    excel.write_contacts(config.CONTACTS_FILE, sanitized_published_rows)
-    excel.write_contacts(
-        config.VERIFIED_CONTACTS_FILE,
-        sanitized_published_rows,
-    )
-    excel.write_contacts(
-        config.REVIEW_QUEUE_FILE,
-        sanitized_review_rows,
-    )
-    excel.write_failed(config.FAILED_FILE, redaction.sanitize(report.failed_rows(rows)))
-    excel.write_website_candidates(config.CANDIDATES_FILE, sanitized_all_rows)
-    report_text = redaction.redact_text(report.build_report(rows, elapsed_seconds))
-    config.REPORT_FILE.write_text(report_text, encoding="utf-8")
+    _atomic_excel(all_results_path, excel.write_contacts, sanitized_all_rows, frozen_timestamp=frozen_timestamp)
+    _atomic_excel(staged(config.CONTACTS_FILE), excel.write_contacts, sanitized_published_rows, frozen_timestamp=frozen_timestamp)
+    _atomic_excel(staged(config.VERIFIED_CONTACTS_FILE), excel.write_contacts, sanitized_published_rows, frozen_timestamp=frozen_timestamp)
+    _atomic_excel(staged(config.REVIEW_QUEUE_FILE), excel.write_contacts, sanitized_review_rows, frozen_timestamp=frozen_timestamp)
+    _atomic_excel(staged(config.FAILED_FILE), excel.write_failed, redaction.sanitize(report.failed_rows(rows)), frozen_timestamp=frozen_timestamp)
+    _atomic_excel(staged(config.CANDIDATES_FILE), excel.write_website_candidates, sanitized_all_rows, frozen_timestamp=frozen_timestamp)
+    report_text = redaction.redact_text(report.build_report(rows, elapsed_seconds, runtime_snapshot=frozen_snapshot))
+    report_path = staged(config.REPORT_FILE)
+    report_tmp = report_path.with_name(f".{report_path.name}.{os.getpid()}.tmp")
+    try:
+        report_tmp.write_text(report_text, encoding="utf-8")
+        if report_tmp.exists():
+            report_tmp.replace(report_path)
+    finally:
+        report_tmp.unlink(missing_ok=True)
     discovery_coverage.write(
-        config.DISCOVERY_COVERAGE_FILE,
+        staged(config.DISCOVERY_COVERAGE_FILE),
         config.DISCOVERY_ACQUISITION_QUERIES_PER_COMPANY,
     )
-    replay_snapshot.write(config.REPLAY_SNAPSHOT_FILE)
-    runtime.write(config.TELEMETRY_FILE)
-    return report_text
+    runtime.write(staged(config.TELEMETRY_FILE), frozen_snapshot)
+    mandatory = [
+        staged(path) for path in (
+            output_root / "all_results.xlsx", config.CONTACTS_FILE,
+            config.VERIFIED_CONTACTS_FILE, config.REVIEW_QUEUE_FILE,
+            config.FAILED_FILE, config.CANDIDATES_FILE, config.EVIDENCE_FILE,
+            config.ENTITY_RELATIONSHIPS_FILE, config.QUALITY_AUDIT_FILE,
+            config.DISCOVERY_COVERAGE_FILE, config.REPORT_FILE, config.TELEMETRY_FILE,
+        )
+    ]
+    if any(not path.exists() for path in mandatory):
+        raise RuntimeError("finalization missing mandatory artifact")
+    artifact_set_hash = hashlib.sha256("".join(
+        f"{path.name}:{hashlib.sha256(path.read_bytes()).hexdigest()}\n" for path in sorted(mandatory)
+    ).encode("utf-8")).hexdigest()
+    artifact_dir = output_root / "artifacts" / artifact_set_hash
+    artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+    artifact_staging = artifact_dir.parent / f".{artifact_set_hash}.{uuid.uuid4().hex}.staging"
+    artifact_staging.mkdir(parents=False, exist_ok=False)
+    artifact_info = {}
+    for path in mandatory:
+        target = artifact_staging / path.name
+        shutil.move(str(path), str(target))
+        info = {"sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "bytes": target.stat().st_size}
+        if target.suffix == ".xlsx":
+            workbook = load_workbook(target, read_only=True, data_only=True)
+            info["rows"] = workbook.active.max_row - 1
+            info["columns"] = workbook.active.max_column
+            workbook.close()
+        artifact_info[target.name] = info
+    if artifact_dir.exists():
+        existing_info = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in artifact_dir.iterdir() if path.is_file()
+        }
+        if existing_info != {name: info["sha256"] for name, info in artifact_info.items()}:
+            raise RuntimeError("existing artifact set hash has different contents")
+        shutil.rmtree(artifact_staging)
+    else:
+        artifact_staging.replace(artifact_dir)
+    for source_path, target in zip(mandatory, (
+        output_root / "all_results.xlsx", config.CONTACTS_FILE,
+        config.VERIFIED_CONTACTS_FILE, config.REVIEW_QUEUE_FILE,
+        config.FAILED_FILE, config.CANDIDATES_FILE, config.EVIDENCE_FILE,
+        config.ENTITY_RELATIONSHIPS_FILE, config.QUALITY_AUDIT_FILE,
+        config.DISCOVERY_COVERAGE_FILE, config.REPORT_FILE, config.TELEMETRY_FILE,
+    )):
+        shutil.copy2(artifact_dir / source_path.name, target)
+    artifacts = {"artifact_set_sha256": artifact_set_hash, "files": artifact_info, "artifact_dir": str(artifact_dir)}
+    shutil.rmtree(staging_root, ignore_errors=True)
+    return ArtifactResult(report_text, artifacts, memory_rows)
+
+
+def publish_manifest(*, path: Path, run_id: str, input_hash: str, config_sha256: str,
+                     counts: dict, artifacts: dict, complete: bool = True,
+                     telemetry: dict | None = None) -> None:
+    if not complete or not artifacts:
+        raise RuntimeError("cannot publish incomplete artifact set")
+    payload = {}
+    if path.exists():
+        try:
+            payload.update(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            pass
+    payload.update({
+        "complete": True, "artifact_schema_version": 3, "run_id": run_id,
+        "input_sha256": input_hash, "config_sha256": config_sha256,
+        "counts": counts, **artifacts,
+    })
+    if telemetry is not None:
+        payload["telemetry"] = telemetry
+    payload["phase"] = "COMPLETE"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.staging.json")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 _attach_candidates = attach_candidates
 _contact_output_fields = contact_output_fields
 _evaluation_evidence = evaluation_evidence
 _policy_output_fields = policy_output_fields
+_suppress_all_contacts = suppress_all_contacts
 _clear_unpublished_contacts = clear_unpublished_contacts
 _apply_publication_policy = apply_publication_policy
 _confidence_status = confidence_status

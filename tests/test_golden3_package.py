@@ -3,10 +3,11 @@ from pathlib import Path
 
 from modules import scorer
 from validate_golden_xlsx import _sheet_rows, readiness_issues
+from fixture_factory import golden, path as fixture_path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-GOLDEN3_DIR = ROOT / "outputs" / "golden_3_20260715"
+ROOT = fixture_path()
+GOLDEN3_DIR = GOLDEN3_DIR = golden(3).parent
 
 
 class Golden3PackageTests(unittest.TestCase):
@@ -19,8 +20,8 @@ class Golden3PackageTests(unittest.TestCase):
         }
         prior = set()
         for path in (
-            ROOT / "outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx",
-            ROOT / "outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx",
+            fixture_path("outputs/golden_manual_validation_20260713/golden_manual_validation_30.xlsx"),
+            fixture_path("outputs/golden_2_20260714/golden_2_manual_validation_30.xlsx"),
         ):
             prior.update(
                 scorer.normalize_text(str(row.get("Company") or "")).strip()

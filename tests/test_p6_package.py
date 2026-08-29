@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import config
 import main
-from modules import discovery_coverage, query_planner, runtime, search
+from modules import discovery_coverage, pipeline_runner, query_planner, runtime, search
 
 
 class DiverseQueryBudgetTests(unittest.TestCase):
@@ -110,18 +110,20 @@ class DiverseQueryBudgetTests(unittest.TestCase):
         ), patch.multiple(
             main.checkpoint,
             load_progress=Mock(return_value=None), save_result=Mock(),
-            clear_progress=Mock(),
+            clear_run_progress=Mock(),
         ), patch.multiple(
             main,
             process_company=Mock(side_effect=process),
             _write_outputs=Mock(return_value="done"),
+        ), patch.multiple(
+            pipeline_runner,
             ensure_directories=Mock(), setup_logging=Mock(return_value=Mock()),
         ):
             input_path = Path(directory) / "input.xlsx"
             input_path.touch()
-            result = main.run(input_path)
+            with self.assertRaisesRegex(RuntimeError, "writer must return immutable artifact metadata"):
+                main.run(input_path, allow_paid=True)
 
-        self.assertEqual(result, "done")
         self.assertEqual(calls, [
             ("FREE OK", "ddgs", False),
             ("PAID NEEDED", "ddgs", False),

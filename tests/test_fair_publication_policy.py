@@ -10,6 +10,7 @@ class FairPublicationPolicyTests(unittest.TestCase):
             "email": "sales@group-mail.com",
             "email_source_url": "https://official.com.tr/iletisim",
             "email_verification": "verified",
+            "structured_domain_relation": True,
             "crawl_result": {"url": "https://official.com.tr"},
             "reasons": ["email_domain_mismatch", "email_gate_failed"],
         }

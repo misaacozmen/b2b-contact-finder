@@ -49,7 +49,7 @@ Son çekilen 3 fuar kaynağı:
 IFCO: 99 firma
 F İstanbul / IDOS: 436 firma
 BeautyEurasia: 59 firma
-Toplam: 594 firma
+Arşiv notu: Eski çalışma durumu toplam 594 firma olarak kaydedilmişti; güncel koşu durumu değildir.
 ```
 
 Sıra bazlı ayrım:
@@ -79,7 +79,7 @@ output\final_merged_contacts.xlsx
 Özet:
 
 ```text
-Toplam: 594
+Arşiv özeti — güncel durum değildir. Toplam: 594
 Website: 495
 E-posta: 414
 Telefon: 435
@@ -215,11 +215,7 @@ python filter_comparison.py --input output\final_vs_metadata_full.xlsx --output 
 
 - API key'i koda yazma; PowerShell env ile ver.
 - `output/contacts.xlsx` eski ana çıktı, üstüne yazmamak için `--output-dir` kullan.
-- `state/progress.json` kalırsa koşu eski input hash'ine göre resume etmeye çalışabilir. Büyük yeni koşu öncesi gerekirse sil:
-
-```powershell
-if (Test-Path state\progress.json) { Remove-Item state\progress.json }
-```
+- `state/progress.json` yalnız geriye dönük uyumluluk işaretidir; silerek lease/checkpoint açılmaz. Yeni koşular run-id'ye bağlı SQLite state ve lease kullanır.
 
 - IFCO'da ülke filtresi yok; IFCO'dan gelen 99 firma kesin Türkiye demek değildir.
 - IDOS ve BeautyEurasia Türkiye filtresiyle çekildi.
