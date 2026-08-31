@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import os
 import uuid
@@ -240,6 +241,145 @@ def initialize_schema(path: Path | None = None) -> None:
         connection.close()
     finally:
         config.PROGRESS_DB_FILE = original
+
+
+def create_handoff_snapshot(
+    active_db: Path,
+    destination: Path,
+    *,
+    run_id: str | None = None,
+    expected_count: int | None = None,
+) -> dict[str, Any]:
+    """Create an atomic, replay-free SQLite handoff snapshot.
+
+    The active database is opened read-only and is never vacuumed or otherwise
+    modified.  The SQLite backup API copies it to a private staging file;
+    replay entries are removed and the resulting file is validated before the
+    final atomic replace.
+    """
+    active_db, destination = Path(active_db).resolve(), Path(destination).resolve()
+    if not active_db.is_file():
+        raise FileNotFoundError(active_db)
+    if active_db == destination or (destination.exists() and active_db.samefile(destination)):
+        raise ValueError("handoff snapshot must not replace its active source")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source_uri = f"file:{active_db.as_posix()}?mode=ro"
+    staging = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.staging")
+
+    def snapshot_rows(connection: sqlite3.Connection, selected_run_id: str) -> tuple[list[tuple], list[tuple]]:
+        items = connection.execute(
+            "SELECT item_index,source_record_id,payload_sha256 FROM run_items WHERE run_id=? ORDER BY item_index",
+            (selected_run_id,),
+        ).fetchall()
+        results = connection.execute(
+            "SELECT item_index,payload FROM results WHERE run_id=? ORDER BY item_index",
+            (selected_run_id,),
+        ).fetchall()
+        if len(items) != len(results) or {int(item[0]) for item in items} != {int(row[0]) for row in results}:
+            raise RuntimeError("handoff item/result count mismatch")
+        item_hashes = {int(item[0]): str(item[2] or "") for item in items}
+        for item_index, payload in results:
+            digest = hashlib.sha256(str(payload).encode("utf-8")).hexdigest()
+            if item_hashes[int(item_index)] and item_hashes[int(item_index)] != digest:
+                raise RuntimeError(f"handoff payload hash mismatch: {item_index}")
+        return items, [(int(index), hashlib.sha256(str(payload).encode("utf-8")).hexdigest()) for index, payload in results]
+
+    try:
+        with closing(sqlite3.connect(source_uri, uri=True)) as source:
+            source.execute("PRAGMA query_only=ON")
+            runs = source.execute("SELECT run_id FROM runs ORDER BY run_id").fetchall()
+            selected_run_id = str(run_id or (runs[0][0] if len(runs) == 1 else ""))
+            if not selected_run_id or not any(str(row[0]) == selected_run_id for row in runs):
+                raise RuntimeError("handoff run identity is ambiguous or missing")
+            source_items, source_results = snapshot_rows(source, selected_run_id)
+            if expected_count is not None and len(source_items) != int(expected_count):
+                raise RuntimeError("handoff expected item count mismatch")
+            destination_tmp = sqlite3.connect(staging)
+            try:
+                source.backup(destination_tmp)
+                destination_tmp.commit()
+            finally:
+                destination_tmp.close()
+
+        with closing(sqlite3.connect(staging)) as staged:
+            staged.execute("DELETE FROM replay_entries")
+            staged.commit()
+            staged.execute("VACUUM")
+            if staged.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("handoff staging integrity_check failed")
+            staged_items, staged_results = snapshot_rows(staged, selected_run_id)
+            if len(staged_items) != len(source_items) or staged_items != source_items or staged_results != source_results:
+                raise RuntimeError("handoff staging payload lineage mismatch")
+            replay_count = int(staged.execute("SELECT COUNT(*) FROM replay_entries").fetchone()[0])
+            if replay_count != 0:
+                raise RuntimeError("handoff staging still contains replay entries")
+            staged.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        os.replace(staging, destination)
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{staging}{suffix}").unlink(missing_ok=True)
+    return {
+        "path": str(destination),
+        "run_id": selected_run_id,
+        "items": len(source_items),
+        "results": len(source_results),
+        "replay_entries": 0,
+        "sha256": file_hash(destination),
+        "bytes": destination.stat().st_size,
+    }
+
+
+def replace_handoff_checkpoint(
+    snapshot: Path,
+    active_db: Path,
+    *,
+    expected_sha256: str,
+    expected_bytes: int,
+) -> None:
+    """Atomically install a validated snapshot under the caller's run lease.
+
+    The caller must have joined all workers and closed its SQLite connections.
+    Existing sidecars or SQLite locks are rejected; they are never removed.
+    Copy/validation/replace failures leave the original checkpoint in place.
+    """
+    snapshot, active_db = Path(snapshot).resolve(), Path(active_db).resolve()
+    if not snapshot.is_file() or not active_db.is_file():
+        raise FileNotFoundError("handoff snapshot and active checkpoint must exist")
+    if snapshot == active_db or snapshot.samefile(active_db):
+        raise ValueError("handoff snapshot must differ from the active checkpoint")
+
+    def require_no_sidecars() -> None:
+        for path in (snapshot, active_db):
+            if any(Path(f"{path}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")):
+                raise RuntimeError("handoff replacement refuses SQLite sidecars or open connections")
+
+    require_no_sidecars()
+    before_hash = file_hash(active_db)
+    staging = active_db.with_name(f".{active_db.name}.{uuid.uuid4().hex}.staging")
+    try:
+        with snapshot.open("rb") as source, staging.open("xb") as target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        if staging.stat().st_size != int(expected_bytes) or file_hash(staging) != expected_sha256:
+            raise RuntimeError("handoff replacement snapshot hash or size mismatch")
+        with closing(sqlite3.connect(f"{staging.as_uri()}?mode=ro&immutable=1", uri=True)) as staged:
+            if staged.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                raise RuntimeError("handoff replacement integrity_check failed")
+
+        require_no_sidecars()
+        try:
+            with closing(sqlite3.connect(f"{active_db.as_uri()}?mode=rw", uri=True, timeout=0)) as active:
+                active.execute("BEGIN EXCLUSIVE")
+                active.rollback()
+        except sqlite3.Error as exc:
+            raise RuntimeError("handoff replacement requires an idle checkpoint") from exc
+        require_no_sidecars()
+        if file_hash(active_db) != before_hash:
+            raise RuntimeError("active checkpoint changed during handoff replacement")
+        os.replace(staging, active_db)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def seed_recovered_run(*, path: Path, run_id: str, input_hash: str, run_signature: str,

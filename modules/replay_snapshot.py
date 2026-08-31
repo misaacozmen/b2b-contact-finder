@@ -25,22 +25,25 @@ _LOADED_FROM = ""
 _STORE_DB: Path | None = None
 _STORE_RUN_ID = ""
 _STORE_READ_ONLY = False
+_SHARD_ROOT: Path | None = None
 
 
 def reset() -> None:
-    global _ENTRIES, _LOADED_FROM, _STORE_DB, _STORE_RUN_ID, _STORE_READ_ONLY
+    global _ENTRIES, _LOADED_FROM, _STORE_DB, _STORE_RUN_ID, _STORE_READ_ONLY, _SHARD_ROOT
     with _LOCK:
         _ENTRIES = {}
         _LOADED_FROM = ""
         _STORE_DB = None
         _STORE_RUN_ID = ""
         _STORE_READ_ONLY = False
+        _SHARD_ROOT = None
 
 
 def configure_run_store(db_path: Path, run_id: str, *, read_only: bool = False) -> None:
-    global _STORE_DB, _STORE_RUN_ID, _STORE_READ_ONLY
+    global _STORE_DB, _STORE_RUN_ID, _STORE_READ_ONLY, _SHARD_ROOT
     _STORE_DB, _STORE_RUN_ID = Path(db_path), str(run_id)
     _STORE_READ_ONLY = bool(read_only)
+    _SHARD_ROOT = _STORE_DB.parent / "replay_shards"
     if _STORE_READ_ONLY:
         if not _STORE_DB.exists():
             raise FileNotFoundError(_STORE_DB)
@@ -79,16 +82,48 @@ def _externalize_crawl_bodies(value: Any, *, shard_root: Path) -> Any:
     return value
 
 
+def _stored_value(value: Any, *, shard_root: Path | None = None) -> Any:
+    """Return a SQLite/export-safe value, externalizing nested body fields."""
+    if shard_root is None:
+        return _safe(value)
+    # Body shards are persisted/exported artifacts too: redact before writing
+    # them, retaining byte-identical content only for already-safe bodies.
+    return _externalize_crawl_bodies(_safe(value), shard_root=shard_root)
+
+
+def _shard_path(digest: str) -> Path:
+    if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise RuntimeError("invalid replay body shard marker")
+    if _SHARD_ROOT is None:
+        raise RuntimeError("replay body shard root is not configured")
+    return _SHARD_ROOT / f"{digest}.json.gz"
+
+
+def _shard_markers(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        if "__replay_shard__" in value:
+            found.add(str(value["__replay_shard__"]))
+        for item in value.values():
+            found.update(_shard_markers(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_shard_markers(item))
+    return found
+
+
 def _hydrate_crawl_bodies(value: Any) -> Any:
     if isinstance(value, dict):
         marker = value.get("__replay_shard__")
-        if marker and _STORE_DB is not None:
-            path = _STORE_DB.parent / "replay_shards" / f"{marker}.json.gz"
+        if marker is not None:
+            if set(value) - {"__replay_shard__", "bytes", "compression"} or value.get("compression") != "gzip":
+                raise RuntimeError("invalid replay body shard marker")
+            path = _shard_path(marker)
             if not path.is_file():
                 raise RuntimeError(f"replay body shard is missing: {marker}")
             with gzip.open(path, "rb") as handle:
                 raw = handle.read()
-            if hashlib.sha256(raw).hexdigest() != str(marker):
+            if hashlib.sha256(raw).hexdigest() != marker or int(value.get("bytes", -1)) != len(raw):
                 raise RuntimeError(f"replay body shard hash mismatch: {marker}")
             return raw.decode("utf-8")
         return {key: _hydrate_crawl_bodies(item) for key, item in value.items()}
@@ -127,14 +162,14 @@ def record(store: str, namespace: str, key: str, schema_version: int, value: Any
         int(schema_version),
     )
     with _LOCK:
+        sqlite_value = _stored_value(value, shard_root=_SHARD_ROOT)
         _ENTRIES[marker] = {
             "key_hint": "[REDACTED]",
             "prefix_sha256": _prefix_digests(str(key)),
-            "value": _safe(value),
+            "value": sqlite_value,
         }
     if _STORE_DB is not None and _STORE_RUN_ID:
         with closing(sqlite3.connect(_STORE_DB)) as connection:
-            sqlite_value = _externalize_crawl_bodies(_safe(value), shard_root=_STORE_DB.parent / "replay_shards") if "crawl" in marker[0].casefold() or "crawl" in marker[1].casefold() else _safe(value)
             connection.execute("INSERT OR REPLACE INTO replay_entries VALUES (?,?,?,?,?,?,?)", (_STORE_RUN_ID, marker[0], marker[1], marker[2], marker[3], json.dumps(_prefix_digests(str(key))), json.dumps(sqlite_value, ensure_ascii=False, separators=(",", ":"))))
             connection.commit()
 
@@ -157,8 +192,8 @@ def lookup(store: str, namespace: str, key: str, schema_version: int) -> tuple[b
                 stored = None
             if not stored:
                 return False, None
-            _ENTRIES[marker] = {"key_hint": "[REDACTED]", "prefix_sha256": json.loads(stored[0]), "value": _hydrate_crawl_bodies(json.loads(stored[1]))}
-        value = _ENTRIES[marker]["value"]
+            _ENTRIES[marker] = {"key_hint": "[REDACTED]", "prefix_sha256": json.loads(stored[0]), "value": json.loads(stored[1])}
+        value = _hydrate_crawl_bodies(_ENTRIES[marker]["value"])
     runtime.record(f"snapshot.{namespace}.hit")
     return True, _safe(value)
 
@@ -177,7 +212,7 @@ def lookup_prefix(
     prefix_digest = _key_digest(str(key_prefix))
     with _LOCK:
         matches = [
-            entry["value"]
+            _hydrate_crawl_bodies(entry["value"])
             for marker, entry in _ENTRIES.items()
             if marker[0] == str(store)
             and marker[1] == str(namespace)
@@ -213,7 +248,7 @@ def _entry_rows() -> list[dict]:
             "key_hint": "[REDACTED]",
             "prefix_sha256": list(entry.get("prefix_sha256", [])),
             "schema_version": marker[3],
-            "value": _safe(entry["value"]),
+            "value": _stored_value(entry["value"], shard_root=_SHARD_ROOT),
         }
         for marker, entry in sorted(items, key=lambda item: item[0])
     ]
@@ -224,7 +259,7 @@ def _iter_entry_rows():
         in_memory = list(_ENTRIES.items())
     if in_memory:
         for marker, entry in sorted(in_memory, key=lambda item: item[0]):
-            yield {"store": marker[0], "namespace": marker[1], "key_sha256": marker[2], "key_hint": "[REDACTED]", "prefix_sha256": list(entry.get("prefix_sha256", [])), "schema_version": marker[3], "value": _safe(entry["value"])}
+            yield {"store": marker[0], "namespace": marker[1], "key_sha256": marker[2], "key_hint": "[REDACTED]", "prefix_sha256": list(entry.get("prefix_sha256", [])), "schema_version": marker[3], "value": _stored_value(entry["value"], shard_root=_SHARD_ROOT)}
         return
     if _STORE_DB is None or not _STORE_DB.exists():
         return
@@ -232,7 +267,7 @@ def _iter_entry_rows():
         with closing(_store_connection()) as connection:
             cursor = connection.execute("SELECT store,namespace,key_sha256,schema_version,prefix_json,value_json FROM replay_entries WHERE run_id=? ORDER BY store,namespace,key_sha256,schema_version", (_STORE_RUN_ID,))
             for store, namespace, key_sha256, schema_version, prefix_json, value_json in cursor:
-                yield {"store": store, "namespace": namespace, "key_sha256": key_sha256, "key_hint": "[REDACTED]", "prefix_sha256": json.loads(prefix_json), "schema_version": int(schema_version), "value": _safe(json.loads(value_json))}
+                yield {"store": store, "namespace": namespace, "key_sha256": key_sha256, "key_hint": "[REDACTED]", "prefix_sha256": json.loads(prefix_json), "schema_version": int(schema_version), "value": json.loads(value_json)}
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc).lower():
             raise
@@ -310,8 +345,11 @@ def export_shards(
         chunk_size = 0
 
     entry_count = 0
+    exported_body_shards: set[str] = set()
     for row in _iter_entry_rows():
         entry_count += 1
+        row["value"] = _stored_value(row.get("value"), shard_root=staging / "replay_shards")
+        exported_body_shards.update(_shard_markers(row["value"]))
         line = (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(line) > limit:
             raise ValueError("single replay entry exceeds shard size limit")
@@ -320,6 +358,20 @@ def export_shards(
         chunk.append(line)
         chunk_size += len(line)
     flush()
+    body_shards: list[dict] = []
+    source_shard_root = _SHARD_ROOT
+    for digest in sorted(exported_body_shards):
+        _shard_path(digest) if source_shard_root is not None else None
+        target = staging / "replay_shards" / f"{digest}.json.gz"
+        if not target.is_file():
+            if source_shard_root is None:
+                raise RuntimeError(f"replay body shard source is missing: {digest}")
+            source = source_shard_root / target.name
+            if not source.is_file():
+                raise RuntimeError(f"replay body shard source is missing: {digest}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+        body_shards.append({"path": f"replay_shards/{target.name}", "sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "bytes": target.stat().st_size})
     manifest = {
         "format_version": FORMAT_VERSION,
         "run_id": run_id,
@@ -328,6 +380,7 @@ def export_shards(
         "shard_count": len(shard_records),
         "max_uncompressed_bytes": limit,
         "shards": shard_records,
+        "replay_shards": body_shards,
     }
     temporary = staging / f".manifest.{os.getpid()}.tmp"
     temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -344,7 +397,7 @@ def load_shards(
     max_uncompressed_bytes: int = 64 * 1024 * 1024,
 ) -> dict:
     """Load a replay export only when its run and config identity match."""
-    global _ENTRIES
+    global _ENTRIES, _SHARD_ROOT
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if int(manifest.get("format_version", -1)) != FORMAT_VERSION:
@@ -354,6 +407,19 @@ def load_shards(
     shards = manifest.get("shards", [])
     if len(shards) != int(manifest.get("shard_count", -1)):
         raise ValueError("replay shard count mismatch")
+    body_shards = manifest.get("replay_shards", [])
+    if not isinstance(body_shards, list):
+        raise ValueError("invalid replay body shard manifest")
+    body_root = manifest_path.parent / "replay_shards"
+    available_body_shards: set[str] = set()
+    for body in body_shards:
+        digest = str(Path(str(body.get("path", ""))).name).removesuffix(".json.gz")
+        if body.get("path") != f"replay_shards/{digest}.json.gz" or len(digest) != 64 or digest in available_body_shards:
+            raise ValueError("invalid replay body shard path")
+        path = manifest_path.parent / str(body["path"])
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != body.get("sha256") or path.stat().st_size != int(body.get("bytes", -1)):
+            raise ValueError("replay body shard integrity check failed")
+        available_body_shards.add(digest)
     loaded: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     seen_paths: set[str] = set()
     total = 0
@@ -382,6 +448,8 @@ def load_shards(
             if marker in loaded:
                 raise ValueError("duplicate replay entry marker")
             loaded[marker] = {"key_hint": "[REDACTED]", "prefix_sha256": list(entry.get("prefix_sha256", [])), "value": _safe(entry.get("value"))}
+            if not _shard_markers(loaded[marker]["value"]).issubset(available_body_shards):
+                raise ValueError("replay entry references an unmanifested body shard")
             total += 1
             shard_count += 1
         if shard_count != int(shard.get("entry_count", -1)):
@@ -390,13 +458,14 @@ def load_shards(
         raise ValueError("replay export entry count mismatch")
     with _LOCK:
         _ENTRIES = dict(loaded)
+        _SHARD_ROOT = body_root
         global _LOADED_FROM
         _LOADED_FROM = str(manifest_path)
     return {"path": str(manifest_path), "entry_count": total}
 
 
 def load(path: Path, *, max_uncompressed_bytes: int) -> dict:
-    global _LOADED_FROM
+    global _LOADED_FROM, _SHARD_ROOT
     with gzip.open(path, "rb") as handle:
         raw = handle.read(max(1, int(max_uncompressed_bytes)) + 1)
     if len(raw) > int(max_uncompressed_bytes):
@@ -443,6 +512,7 @@ def load(path: Path, *, max_uncompressed_bytes: int) -> dict:
         }
     with _LOCK:
         _ENTRIES.update(loaded)
+        _SHARD_ROOT = Path(path).parent / "replay_shards"
         _LOADED_FROM = str(path)
     runtime.record("snapshot.load")
     runtime.record("snapshot.entries_loaded", len(loaded))

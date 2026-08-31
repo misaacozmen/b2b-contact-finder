@@ -245,6 +245,7 @@ def write_contacts(path: Path, rows: Iterable[dict], *, frozen_timestamp: str = 
             "free_state",
             "paid_required",
             "paid_state",
+            "delivery_state",
             "website",
             "website_source",
             "website_status",

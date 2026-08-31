@@ -8,6 +8,8 @@ signal for offline risk/coverage analysis, not a probability.
 
 from __future__ import annotations
 
+from typing import Any
+
 import config
 
 from modules import identity, scorer
@@ -18,6 +20,19 @@ OK_STATUSES = {"OK_HIGH_CONFIDENCE", "OK_MEDIUM_CONFIDENCE"}
 EXCLUDED_ROLES = {
     "directory", "fair_profile", "shared_listing", "marketplace", "news",
     "public_body",
+}
+LEGAL_NAME_REASON_PREFIXES = (
+    "legal_name_phrase_match:",
+    "legal_name_full_match:",
+    "legal_name_ownership_match:",
+)
+CONTEXT_CONFLICT_OVERRIDE = "metadata_context_conflict_overridden_by_exact_compound_identity"
+CONFLICT_TOKENS = {
+    "sector_conflict",
+    "context_conflict",
+    "country_conflict",
+    "country_mismatch",
+    "foreign_country",
 }
 
 
@@ -71,7 +86,13 @@ def is_publishable_row(row: dict) -> bool:
         row.get("reason", ""), row.get("publication_blockers", ""),
         evaluation.get("reasons", []) if isinstance(evaluation, dict) else "",
     )).casefold()
-    if any(token in reasons for token in ("sector_conflict", "context_conflict", "country_conflict", "country_mismatch", "foreign_country")):
+    reason_tokens = _normalized_reason_tokens(row.get("reason", ""))
+    blocker_tokens = _normalized_reason_tokens(row.get("publication_blockers", ""))
+    evaluation_tokens = _normalized_reason_tokens(
+        evaluation.get("reasons", []) if isinstance(evaluation, dict) else "",
+    )
+    conflict_tokens = (reason_tokens | blocker_tokens | evaluation_tokens) - {CONTEXT_CONFLICT_OVERRIDE}
+    if any(marker in token for token in conflict_tokens for marker in CONFLICT_TOKENS):
         return False
     if "cross_domain_email_accepted_from_verified_official_page" in reasons and not evaluation.get("structured_domain_relation"):
         return False
@@ -79,7 +100,7 @@ def is_publishable_row(row: dict) -> bool:
         if not (
             scorer.normalize_domain(str(row.get("website", "")))
             and scorer.domain_identity_match(str(row.get("company", "")), str(row.get("website", "")))[0]
-            and _has_reason(str(row.get("reason", "")).split(";"), ("legal_name_",))
+            and _has_reason(str(row.get("reason", "")).split(";"), LEGAL_NAME_REASON_PREFIXES)
             and "country_identity_tr_" in reasons
             and "context_match:" in reasons
         ):
@@ -90,7 +111,19 @@ def is_publishable_row(row: dict) -> bool:
 
 
 def _has_reason(reasons: list[str], prefixes: tuple[str, ...]) -> bool:
-    return any(str(reason).startswith(prefixes) for reason in reasons)
+    return any(str(reason).strip().startswith(prefixes) for reason in reasons)
+
+
+def _normalized_reason_tokens(value: Any) -> set[str]:
+    values = value if isinstance(value, (list, tuple, set)) else (value,)
+    tokens: set[str] = set()
+    for value_item in values:
+        tokens.update(
+            token.strip().casefold()
+            for token in str(value_item).split(";")
+            if token.strip()
+        )
+    return tokens
 
 
 def _bounded_score(value: int) -> int:

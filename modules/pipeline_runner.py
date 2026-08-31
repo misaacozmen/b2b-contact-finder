@@ -1009,9 +1009,14 @@ def _run_pipeline_impl_body(
             artifact_dir = run_root / "output" / "artifacts" / checkpoint.file_hash(checkpoint_path)
             artifact_dir.mkdir(parents=True, exist_ok=True)
             frozen_checkpoint = artifact_dir / "recovery_state.sqlite3"
-            shutil.copy2(checkpoint_path, frozen_checkpoint)
-            frozen_hash = checkpoint.file_hash(frozen_checkpoint)
-            frozen_bytes = frozen_checkpoint.stat().st_size
+            handoff_snapshot = checkpoint.create_handoff_snapshot(
+                checkpoint_path,
+                frozen_checkpoint,
+                run_id=context.run_id,
+                expected_count=len(company_records),
+            )
+            frozen_hash = str(handoff_snapshot["sha256"])
+            frozen_bytes = int(handoff_snapshot["bytes"])
             artifact_set_sha256 = hashlib.sha256(f"recovery_state.sqlite3:{frozen_hash}\n".encode()).hexdigest()
             target_artifact_dir = run_root / "output" / "artifacts" / artifact_set_sha256
             if target_artifact_dir != artifact_dir:
@@ -1019,6 +1024,13 @@ def _run_pipeline_impl_body(
                 shutil.copy2(frozen_checkpoint, target_artifact_dir / frozen_checkpoint.name)
                 shutil.rmtree(artifact_dir, ignore_errors=True)
                 artifact_dir = target_artifact_dir
+            # The sanitized handoff snapshot is the run's frozen checkpoint;
+            # make the live checkpoint byte-identical before publishing the
+            # manifest so FROZEN_RECOVERY validation has one immutable source.
+            checkpoint.replace_handoff_checkpoint(
+                artifact_dir / frozen_checkpoint.name, checkpoint_path,
+                expected_sha256=frozen_hash, expected_bytes=frozen_bytes,
+            )
             files = {"recovery_state.sqlite3": {"sha256": frozen_hash, "bytes": frozen_bytes}}
             run_context.write_manifest(
                 manifest_path, context.with_phase("PAID"), run_config, complete=False,

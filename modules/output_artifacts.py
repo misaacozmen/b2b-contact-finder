@@ -367,8 +367,6 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
     output_root = Path(config.OUTPUT_DIR)
     staging_root = output_root / ".staging" / uuid.uuid4().hex
     staging_root.mkdir(parents=True, exist_ok=False)
-    memory_rows = [dict(row) for row in rows if is_publishable_row(row)]
-
     def staged(path: Path) -> Path:
         return staging_root / Path(path).name
 
@@ -389,6 +387,10 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
     evidence.write_jsonl(staged(config.EVIDENCE_FILE), rows)
     entity_registry.write_observations(staged(config.ENTITY_RELATIONSHIPS_FILE), rows, observed_at=frozen_timestamp)
     quality_audit.write(staged(config.QUALITY_AUDIT_FILE), rows, runtime_snapshot=frozen_snapshot)
+    published_rows, review_rows = partition_output_rows(rows)
+    failed_output_rows = report.failed_rows(rows)
+    report_text = redaction.redact_text(report.build_report(rows, elapsed_seconds, runtime_snapshot=frozen_snapshot))
+    memory_rows = [dict(row) for row in published_rows]
     for row in rows:
         row.pop("__index", None)
         row.pop("__candidates", None)
@@ -397,7 +399,6 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
         row.pop("__search_trace", None)
         row.pop("__source_health", None)
         row.pop("__paid_escalation_complete", None)
-    published_rows, review_rows = partition_output_rows(rows)
     # contacts.xlsx is the publication surface. Review/abstain rows remain in
     # the dedicated audit artifacts and must never look like published firms.
     sanitized_published_rows = redaction.sanitize(published_rows)
@@ -407,9 +408,8 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
     _atomic_excel(staged(config.CONTACTS_FILE), excel.write_contacts, sanitized_published_rows, frozen_timestamp=frozen_timestamp)
     _atomic_excel(staged(config.VERIFIED_CONTACTS_FILE), excel.write_contacts, sanitized_published_rows, frozen_timestamp=frozen_timestamp)
     _atomic_excel(staged(config.REVIEW_QUEUE_FILE), excel.write_contacts, sanitized_review_rows, frozen_timestamp=frozen_timestamp)
-    _atomic_excel(staged(config.FAILED_FILE), excel.write_failed, redaction.sanitize(report.failed_rows(rows)), frozen_timestamp=frozen_timestamp)
+    _atomic_excel(staged(config.FAILED_FILE), excel.write_failed, redaction.sanitize(failed_output_rows), frozen_timestamp=frozen_timestamp)
     _atomic_excel(staged(config.CANDIDATES_FILE), excel.write_website_candidates, sanitized_all_rows, frozen_timestamp=frozen_timestamp)
-    report_text = redaction.redact_text(report.build_report(rows, elapsed_seconds, runtime_snapshot=frozen_snapshot))
     report_path = staged(config.REPORT_FILE)
     report_tmp = report_path.with_name(f".{report_path.name}.{os.getpid()}.tmp")
     try:

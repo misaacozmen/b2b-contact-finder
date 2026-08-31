@@ -11,6 +11,9 @@ input/*.ndjson
 output/
 outputs/
 state/
+/runs/
+/recovery_validation/
+/input/remaining_159_plan.json
 artifact_work/
 .codex_work/
 .codex-tmp/

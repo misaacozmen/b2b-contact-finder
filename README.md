@@ -19,6 +19,13 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
+893 firmalık özel incident reconciliation testleri, Git'e eklenmeyen input,
+recovery/remaining SQLite ve V2 çıktıları gerektirir. Normal test koşusunda bu
+dört test açık gerekçeyle atlanır. Kaynakları bulunan yerel ortamda çalıştırmak
+için `B2B_RUN_INCIDENT_RECONCILIATION=1` ayarlanmalıdır; açıkça etkinleştirilen
+testlerde eksik kaynaklar hata sayılır. Bu testlerin üretim kaynaklarını
+doğrulaması yaklaşık 15 dakika sürebilir; normal CI doğrulamasına dahil değildir.
+
 ### Brandfetch ve Hunter resolver kurulumu
 
 Firma adindan domain kesfi icin Brandfetch Brand Search ve Hunter Domain Finder

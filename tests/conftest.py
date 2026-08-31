@@ -5,16 +5,34 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
 
 import config as app_config
 config = app_config
+_TIMING_LOG = None
+
+
+def _log_timing(event: str, **values) -> None:
+    if _TIMING_LOG is None:
+        return
+    details = ";".join(f"{key}={value}" for key, value in values.items())
+    with _TIMING_LOG.open("a", encoding="utf-8") as handle:
+        handle.write(f"{event};{details}\n")
 
 
 def pytest_configure(config):
     """Create all synthetic fixtures below one disposable session root."""
+    global _TIMING_LOG
+    _TIMING_LOG = Path(
+        os.environ.get(
+            "B2B_TEST_TIMING_LOG",
+            str(Path(tempfile.gettempdir()) / "b2b_test_timing.log"),
+        )
+    )
+    _TIMING_LOG.parent.mkdir(parents=True, exist_ok=True)
     fixture_root = Path(tempfile.mkdtemp(prefix="b2b_test_fixtures_"))
     os.environ["B2B_TEST_FIXTURE_ROOT"] = str(fixture_root)
     runtime_root = Path(tempfile.mkdtemp(prefix="b2b_test_runtime_"))
@@ -132,6 +150,33 @@ def _protected_manifest() -> dict[str, str]:
     return manifest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def protected_production_paths_unchanged():
+    """Hash protected production trees once around the complete test session."""
+    started = time.perf_counter()
+    _log_timing("session_hash_start.begin", monotonic=f"{started:.6f}")
+    before_manifest = _protected_manifest()
+    _log_timing(
+        "session_hash_start.end",
+        monotonic=f"{time.perf_counter():.6f}",
+        elapsed=f"{time.perf_counter() - started:.3f}",
+        files=len(before_manifest),
+    )
+    try:
+        yield
+    finally:
+        started = time.perf_counter()
+        _log_timing("session_hash_end.begin", monotonic=f"{started:.6f}")
+        after_manifest = _protected_manifest()
+        _log_timing(
+            "session_hash_end.end",
+            monotonic=f"{time.perf_counter():.6f}",
+            elapsed=f"{time.perf_counter() - started:.3f}",
+            files=len(after_manifest),
+        )
+        assert after_manifest == before_manifest, "tests modified protected production paths"
+
+
 def _reset_runtime_globals() -> None:
     from modules import discovery_coverage, google_places, linkedin_company, llm_arbiter, replay_snapshot, runtime, search
 
@@ -154,12 +199,10 @@ def isolated_runtime(tmp_path):
         for name in dir(config)
         if name.isupper()
     }
-    before_manifest = _protected_manifest()
     _reset_runtime_globals()
     try:
         yield
     finally:
         _reset_runtime_globals()
-        assert _protected_manifest() == before_manifest, "tests modified protected production paths"
         for name, value in original_config.items():
             setattr(config, name, value)
