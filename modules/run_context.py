@@ -3,20 +3,123 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import sqlite3
+import shutil
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import closing
 
 import config
 
 
 PHASES = ("FREE", "PAID", "FINALIZING", "COMPLETE")
 RUN_SCHEMA_VERSION = int(getattr(config, "RUN_SCHEMA_VERSION", 3))
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = int(getattr(config, "CONFIG_SCHEMA_VERSION", 3))
+
+# One registry drives the recorded run configuration, its hash, and replay
+# application.  Keep this list limited to non-secret values: credentials and
+# provider tokens must never become part of a manifest.
+SEMANTIC_CONFIG_REGISTRY: tuple[tuple[str, str, str], ...] = (
+    ("SEARCH_PROVIDER", "search_provider", "str"),
+    ("SEARCH_CACHE_MODE", "search_cache_mode", "str"),
+    ("CRAWL_CACHE_MODE", "crawl_cache_mode", "str"),
+    ("SEARCH_CACHE_TTL_DAYS", "search_cache_ttl_days", "int"),
+    ("SEARCH_EMPTY_CACHE_TTL_DAYS", "search_empty_cache_ttl_days", "float"),
+    ("CRAWL_CACHE_TTL_DAYS", "crawl_cache_ttl_days", "int"),
+    ("CACHE_SCHEMA_VERSION", "cache_schema_version", "int"),
+    ("CRAWL_CACHE_SCHEMA_VERSION", "crawl_cache_schema_version", "int"),
+    ("CRAWL_CACHE_CAPABILITY_SCHEMA_VERSION", "crawl_cache_capability_schema_version", "int"),
+    ("METADATA_SCHEMA_VERSION", "metadata_schema_version", "int"),
+    ("EVIDENCE_SCHEMA_VERSION", "evidence_schema_version", "int"),
+    ("MAX_WORKERS", "max_workers", "int"),
+    ("GLOBAL_REQUESTS_PER_SECOND", "global_requests_per_second", "float"),
+    ("MAX_ZUCHEX_PAGES", "max_zuchex_pages", "int"),
+    ("MAX_TEXHIBITION_PAGES", "max_texhibition_pages", "int"),
+    ("ZUCHEX_VIEW_ID", "zuchex_view_id", "str"),
+    ("ZUCHEX_EVENT_ID", "zuchex_event_id", "str"),
+    ("ZUCHEX_FILTER_ID", "zuchex_filter_id", "str"),
+    ("ZUCHEX_FILTER_VALUE_ID", "zuchex_filter_value_id", "str"),
+    ("MAX_AUTONOMOUS_RESOLUTION_ROUNDS", "max_autonomous_resolution_rounds", "int"),
+    ("MAX_TARGETED_QUERIES_PER_ROUND", "max_targeted_queries_per_round", "int"),
+    ("MAX_TARGETED_CRAWLS_PER_ROUND", "max_targeted_crawls_per_round", "int"),
+    ("MAX_SEARCH_QUERIES_PER_COMPANY", "max_search_queries_per_company", "int"),
+    ("DEFAULT_PAID_SEARCH_QUERY_LIMIT", "default_paid_search_query_limit", "int"),
+    ("MAX_FALLBACK_SEARCH_QUERIES", "max_fallback_search_queries", "int"),
+    ("MAX_ADAPTIVE_SEARCH_QUERIES", "max_adaptive_search_queries", "int"),
+    ("MAX_CONTACT_PAGES", "max_contact_pages", "int"),
+    ("MAX_CONTACT_ATTEMPTS", "max_contact_attempts", "int"),
+    ("MAX_IDENTITY_PAGES", "max_identity_pages", "int"),
+    ("MAX_FULL_CANDIDATE_EVALUATIONS", "max_full_candidate_evaluations", "int"),
+    ("MAX_IDENTITY_EVIDENCE_RECRAWLS", "max_identity_evidence_recrawls", "int"),
+    ("MAX_SITEMAPS", "max_sitemaps", "int"),
+    ("MAX_SITEMAP_URLS", "max_sitemap_urls", "int"),
+    ("MAX_DOCUMENT_LINKS", "max_document_links", "int"),
+    ("MAX_STATIC_RECOVERY_PAGES", "max_static_recovery_pages", "int"),
+    ("MAX_HOST_VARIANT_ATTEMPTS", "max_host_variant_attempts", "int"),
+    ("REQUEST_TIMEOUT_SEC", "request_timeout_sec", "int"),
+    ("BRIGHTDATA_TIMEOUT_SEC", "brightdata_timeout_sec", "int"),
+    ("GOOGLE_PLACES_TIMEOUT_SEC", "google_places_timeout_sec", "int"),
+    ("HUNTER_TIMEOUT_SEC", "hunter_timeout_sec", "int"),
+    ("BRANDFETCH_TIMEOUT_SEC", "brandfetch_timeout_sec", "int"),
+    ("LINKEDIN_COMPANY_TIMEOUT_SEC", "linkedin_company_timeout_sec", "int"),
+    ("LLM_ARBITER_TIMEOUT_SEC", "llm_arbiter_timeout_sec", "int"),
+    ("MAX_HTTP_REDIRECTS", "max_http_redirects", "int"),
+    ("MAX_RETRIES", "max_retries", "int"),
+    ("MAX_RETRY_AFTER_SEC", "max_retry_after_sec", "int"),
+    ("ENABLE_JS_FALLBACK", "enable_js_fallback", "bool"),
+    ("ENABLE_JS_PROFILE_FALLBACK", "enable_js_profile_fallback", "bool"),
+    ("MAX_BROWSER_RENDER_WORKERS", "max_browser_render_workers", "int"),
+    ("JS_RENDER_TIMEOUT_SEC", "js_render_timeout_sec", "int"),
+    ("ENABLE_PDF_OCR", "enable_pdf_ocr", "bool"),
+    ("PDF_OCR_MAX_PAGES", "pdf_ocr_max_pages", "int"),
+    ("PDF_OCR_DPI", "pdf_ocr_dpi", "int"),
+    ("PDF_MIN_TEXT_CHARS", "pdf_min_text_chars", "int"),
+    ("ENABLE_GOOGLE_PLACES", "enable_google_places", "bool"),
+    ("ENABLE_BRANDFETCH_DOMAIN_SEARCH", "enable_brandfetch", "bool"),
+    ("ENABLE_HUNTER_FALLBACK", "enable_hunter_fallback", "bool"),
+    ("ENABLE_HUNTER_DOMAIN_FINDER", "enable_hunter", "bool"),
+    ("ENABLE_LINKEDIN_COMPANY_LOOKUP", "enable_linkedin", "bool"),
+    ("ENABLE_LLM_ARBITER", "enable_llm", "bool"),
+    ("COMPANY_RESOLVER_MAX_RESULTS", "company_resolver_max_results", "int"),
+    ("LLM_ARBITER_MODEL", "llm_model", "str"),
+    ("TARGET_COUNTRY", "target_country", "str"),
+    ("TARGET_COUNTRY_QUERY_TERMS", "target_country_query_terms", "json"),
+    ("LOCALE", "locale", "str"),
+    ("PHONE_DEFAULT_COUNTRY", "phone_default_country", "str"),
+    ("PHONE_OUTPUT_FORMAT", "phone_output_format", "str"),
+    ("PHONE_ALLOWED_COUNTRIES", "phone_allowed_countries", "json"),
+    ("REVIEW_SCORE", "review_score", "int"),
+    ("MEDIUM_CONFIDENCE_SCORE", "medium_confidence_score", "int"),
+    ("HIGH_CONFIDENCE_SCORE", "high_confidence_score", "int"),
+    ("PUBLICATION_POLICY_MODE", "publication_policy_mode", "str"),
+    ("PUBLICATION_POLICY_MIN_SAFETY_SCORE", "publication_policy_min_safety_score", "int"),
+    ("SAFE_OK_MIN_SCORE", "safe_ok_min_score", "int"),
+    ("MIN_ACCEPT_SCORE", "min_accept_score", "int"),
+    ("EARLY_STOP_SCORE_THRESHOLD", "early_stop_score_threshold", "int"),
+    ("MAX_CANDIDATE_EVALUATIONS", "max_candidate_evaluations", "int"),
+    ("MAX_CANDIDATE_SCORE_GAP", "max_candidate_score_gap", "int"),
+    ("AMBIGUOUS_CANDIDATE_MARGIN", "ambiguous_candidate_margin", "int"),
+)
+
+
+def runtime_capability_profile() -> dict[str, bool]:
+    """Report optional local capabilities without invoking network/providers."""
+    browser_dependency = importlib.util.find_spec("playwright") is not None
+    ocr_dependencies = all(
+        importlib.util.find_spec(name) is not None
+        for name in ("fitz", "pytesseract", "PIL")
+    )
+    return {
+        "browser_dependency_available": browser_dependency,
+        "browser_enabled": bool(getattr(config, "ENABLE_JS_FALLBACK", False)),
+        "ocr_dependency_available": ocr_dependencies and bool(shutil.which("tesseract")),
+        "ocr_enabled": bool(getattr(config, "ENABLE_PDF_OCR", False)),
+    }
 
 
 def canonical_json(value: object) -> str:
@@ -97,59 +200,22 @@ class RunConfig:
 
     @staticmethod
     def _semantic_settings() -> tuple[tuple[str, object], ...]:
-        fields: dict[str, tuple[str, type]] = {
-            "SEARCH_PROVIDER": ("search_provider", str),
-            "SEARCH_CACHE_MODE": ("search_cache_mode", str),
-            "CRAWL_CACHE_MODE": ("crawl_cache_mode", str),
-            "SEARCH_CACHE_TTL_DAYS": ("search_cache_ttl_days", int),
-            "CRAWL_CACHE_TTL_DAYS": ("crawl_cache_ttl_days", int),
-            "CACHE_SCHEMA_VERSION": ("cache_schema_version", int),
-            "CRAWL_CACHE_SCHEMA_VERSION": ("crawl_cache_schema_version", int),
-            "MAX_WORKERS": ("max_workers", int),
-            "GLOBAL_REQUESTS_PER_SECOND": ("global_requests_per_second", float),
-            "MAX_ZUCHEX_PAGES": ("max_zuchex_pages", int),
-            "MAX_TEXHIBITION_PAGES": ("max_texhibition_pages", int),
-            "ZUCHEX_VIEW_ID": ("zuchex_view_id", str),
-            "ZUCHEX_EVENT_ID": ("zuchex_event_id", str),
-            "ZUCHEX_FILTER_ID": ("zuchex_filter_id", str),
-            "ZUCHEX_FILTER_VALUE_ID": ("zuchex_filter_value_id", str),
-            "ENABLE_GOOGLE_PLACES": ("enable_google_places", bool),
-            "ENABLE_BRANDFETCH_DOMAIN_SEARCH": ("enable_brandfetch", bool),
-            "ENABLE_HUNTER_DOMAIN_FINDER": ("enable_hunter", bool),
-            "ENABLE_LINKEDIN_COMPANY_LOOKUP": ("enable_linkedin", bool),
-            "ENABLE_LLM_ARBITER": ("enable_llm", bool),
-            "LLM_ARBITER_MODEL": ("llm_model", str),
-            "REVIEW_SCORE": ("review_score", int),
-            "MEDIUM_CONFIDENCE_SCORE": ("medium_confidence_score", int),
-            "HIGH_CONFIDENCE_SCORE": ("high_confidence_score", int),
-            "PUBLICATION_POLICY_MODE": ("publication_policy_mode", str),
-            "PUBLICATION_POLICY_MIN_SAFETY_SCORE": ("publication_policy_min_safety_score", int),
-            "SAFE_OK_MIN_SCORE": ("safe_ok_min_score", int),
-            "MIN_ACCEPT_SCORE": ("min_accept_score", int),
-            "EARLY_STOP_SCORE_THRESHOLD": ("early_stop_score_threshold", int),
-            "MAX_CANDIDATE_EVALUATIONS": ("max_candidate_evaluations", int),
-            "MAX_SEARCH_QUERIES_PER_COMPANY": ("max_search_queries_per_company", int),
-            "DEFAULT_PAID_SEARCH_QUERY_LIMIT": ("default_paid_search_query_limit", int),
-            "MAX_FALLBACK_SEARCH_QUERIES": ("max_fallback_search_queries", int),
-            "MAX_ADAPTIVE_SEARCH_QUERIES": ("max_adaptive_search_queries", int),
-            "MAX_CONTACT_PAGES": ("max_contact_pages", int),
-            "MAX_CANDIDATE_SCORE_GAP": ("max_candidate_score_gap", int),
-            "AMBIGUOUS_CANDIDATE_MARGIN": ("ambiguous_candidate_margin", int),
-        }
         result: list[tuple[str, object]] = [("config_schema_version", CONFIG_SCHEMA_VERSION)]
-        for name, (canonical_name, kind) in fields.items():
+        for name, canonical_name, kind in SEMANTIC_CONFIG_REGISTRY:
             if not hasattr(config, name):
                 continue
             value = getattr(config, name)
-            if kind is bool:
+            if kind == "bool":
                 value = bool(value)
-            elif kind is int:
+            elif kind == "int":
                 value = int(value)
-            elif kind is float:
+            elif kind == "float":
                 value = float(value)
-            else:
+            elif kind == "str":
                 value = str(value)
             result.append((canonical_name, value))
+        for name, value in runtime_capability_profile().items():
+            result.append((f"capability_{name}", bool(value)))
         return tuple(sorted(result))
 
     @classmethod
@@ -227,34 +293,22 @@ class RunConfig:
 
     def apply_effective_settings(self) -> None:
         """Apply only recorded, non-secret typed settings to the process config."""
-        reverse = {
-            "search_provider": "SEARCH_PROVIDER", "search_cache_mode": "SEARCH_CACHE_MODE",
-            "crawl_cache_mode": "CRAWL_CACHE_MODE", "model": "LLM_ARBITER_MODEL",
-            "publication_policy_min_safety_score": "PUBLICATION_POLICY_MIN_SAFETY_SCORE",
-            "safe_ok_min_score": "SAFE_OK_MIN_SCORE", "min_accept_score": "MIN_ACCEPT_SCORE",
-            "early_stop_score_threshold": "EARLY_STOP_SCORE_THRESHOLD",
-            "max_candidate_evaluations": "MAX_CANDIDATE_EVALUATIONS",
-            "max_search_queries_per_company": "MAX_SEARCH_QUERIES_PER_COMPANY",
-            "default_paid_search_query_limit": "DEFAULT_PAID_SEARCH_QUERY_LIMIT",
-            "max_fallback_search_queries": "MAX_FALLBACK_SEARCH_QUERIES",
-            "max_adaptive_search_queries": "MAX_ADAPTIVE_SEARCH_QUERIES",
-            "max_contact_pages": "MAX_CONTACT_PAGES", "max_candidate_score_gap": "MAX_CANDIDATE_SCORE_GAP",
-            "ambiguous_candidate_margin": "AMBIGUOUS_CANDIDATE_MARGIN",
-            "search_cache_ttl_days": "SEARCH_CACHE_TTL_DAYS", "crawl_cache_ttl_days": "CRAWL_CACHE_TTL_DAYS",
-            "max_workers": "MAX_WORKERS", "global_requests_per_second": "GLOBAL_REQUESTS_PER_SECOND",
-            "max_zuchex_pages": "MAX_ZUCHEX_PAGES", "max_texhibition_pages": "MAX_TEXHIBITION_PAGES",
-            "zuchex_view_id": "ZUCHEX_VIEW_ID", "zuchex_event_id": "ZUCHEX_EVENT_ID",
-            "zuchex_filter_id": "ZUCHEX_FILTER_ID", "zuchex_filter_value_id": "ZUCHEX_FILTER_VALUE_ID",
-            "enable_google_places": "ENABLE_GOOGLE_PLACES", "enable_brandfetch": "ENABLE_BRANDFETCH_DOMAIN_SEARCH",
-            "enable_hunter": "ENABLE_HUNTER_DOMAIN_FINDER", "enable_linkedin": "ENABLE_LINKEDIN_COMPANY_LOOKUP",
-            "enable_llm": "ENABLE_LLM_ARBITER", "llm_model": "LLM_ARBITER_MODEL",
-            "review_score": "REVIEW_SCORE", "medium_confidence_score": "MEDIUM_CONFIDENCE_SCORE",
-            "high_confidence_score": "HIGH_CONFIDENCE_SCORE", "publication_policy_mode": "PUBLICATION_POLICY_MODE",
-        }
+        reverse = {canonical_name: (name, kind) for name, canonical_name, kind in SEMANTIC_CONFIG_REGISTRY}
         for key, value in self.effective_settings:
             target = reverse.get(key)
-            if target and hasattr(config, target):
-                setattr(config, target, value)
+            if target and hasattr(config, target[0]):
+                name, kind = target
+                if kind == "bool":
+                    value = bool(value)
+                elif kind == "int":
+                    value = int(value)
+                elif kind == "float":
+                    value = float(value)
+                elif kind == "str":
+                    value = str(value)
+                elif kind == "json" and isinstance(value, tuple):
+                    value = list(value)
+                setattr(config, name, value)
         budget_attrs = {
             "brightdata": "BRIGHTDATA_REQUEST_BUDGET", "google_places": "GOOGLE_PLACES_REQUEST_BUDGET",
             "brandfetch": "BRANDFETCH_REQUEST_BUDGET", "hunter": "HUNTER_REQUEST_BUDGET",
@@ -419,7 +473,7 @@ def validate_run_bundle(
     db_path = run_root / "state" / "progress.sqlite3"
     if not db_path.is_file():
         raise ValueError("run checkpoint is missing")
-    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as connection:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise ValueError("run checkpoint integrity failure")
         runs = connection.execute("SELECT run_id,input_hash FROM runs").fetchall()
@@ -528,7 +582,7 @@ def validate_run_bundle(
             if not checkpoint_artifact.is_file() or checkpoint_artifact.read_bytes() != db_path.read_bytes():
                 raise ValueError("frozen checkpoint is not byte-identical")
     if profile in {"FINALIZING", "COMPLETE"}:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as connection:
             phase = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
             if not phase or str(phase[0]) != ("COMPLETE" if profile == "COMPLETE" else "FINALIZING"):
                 raise ValueError("run/database phase mismatch")

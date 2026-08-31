@@ -3,6 +3,7 @@ import hashlib
 import re
 import time
 import unicodedata
+from datetime import datetime, timezone
 from html import unescape
 from urllib.parse import urljoin, urlparse
 
@@ -369,6 +370,7 @@ def _texhibition_list_rows(
             "country": "",
             "profile_url": _absolute_url(listing_url, link.get("href", "")),
             "listing_url": listing_url,
+            "source_detail_status": "NOT_REQUESTED",
             "hall": _clean(hall_match.group(1)) if hall_match else "",
             "stand": _clean(stand_match.group(1)) if stand_match else "",
             "sector": _clean(category.get_text(" ", strip=True)) if category else "",
@@ -387,8 +389,114 @@ def _texhibition_list_rows(
     return dedupe_rows(rows)
 
 
+def _detail_value(scope, labels: tuple[str, ...]) -> tuple[str, list[str]]:
+    wanted = {_fold(label) for label in labels}
+    for tag in scope.find_all(["dt", "th", "label", "strong", "b", "span", "div"]):
+        label = _fold(tag.get_text(" ", strip=True)).rstrip(":")
+        if not label or not any(label == item or label.startswith(item + ":") for item in wanted):
+            continue
+        container = tag.parent
+        if container and container.name == "tr":
+            cells = container.find_all(["th", "td"], recursive=False)
+            if len(cells) > 1:
+                value_node = cells[-1]
+                return _clean(value_node.get_text(" ", strip=True)), [str(link.get("href", "")) for link in value_node.find_all("a", href=True)]
+        if tag.name == "dt" and tag.find_next_sibling("dd"):
+            value_node = tag.find_next_sibling("dd")
+            return _clean(value_node.get_text(" ", strip=True)), [str(link.get("href", "")) for link in value_node.find_all("a", href=True)]
+        if container:
+            value_node = container.select_one(".value, .detail-value, .field-value")
+            if value_node and value_node is not tag:
+                return _clean(value_node.get_text(" ", strip=True)), [str(link.get("href", "")) for link in value_node.find_all("a", href=True)]
+        sibling = tag.find_next_sibling()
+        if sibling:
+            return _clean(sibling.get_text(" ", strip=True)), [str(link.get("href", "")) for link in sibling.find_all("a", href=True)]
+    return "", []
+
+
+def _texhibition_detail_scope(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = soup.select("main, article, [class*='profile'], [class*='detail'], [id*='profile'], [id*='detail']")
+    scope = max(candidates, key=lambda node: len(node.get_text(" ", strip=True)), default=soup)
+    for node in scope.select("footer, header, nav, aside, script, style, noscript"):
+        node.decompose()
+    return soup, scope
+
+
+def _texhibition_profile_details(html: str, profile_url: str) -> dict:
+    """Extract labelled exhibitor fields while excluding site-wide footer data."""
+    soup, scope = _texhibition_detail_scope(html)
+    legal_name, _ = _detail_value(scope, ("legal name", "company name", "firma unvani", "ticari unvan", "company"))
+    website_value, website_links = _detail_value(scope, ("website", "web site", "web sitesi", "firma website"))
+    address, _ = _detail_value(scope, ("address", "adres", "company address", "firma adresi"))
+    country, _ = _detail_value(scope, ("country", "ulke", "ülke"))
+    description, _ = _detail_value(scope, ("description", "about company", "about", "aciklama", "açıklama"))
+    brands, _ = _detail_value(scope, ("brands", "brand", "markalar"))
+    representations, _ = _detail_value(scope, ("representations", "representation", "temsilcilikler"))
+    phone, phone_links = _detail_value(scope, ("phone", "telephone", "telefon", "tel"))
+    email, email_links = _detail_value(scope, ("email", "e-mail", "e posta", "e-posta", "eposta"))
+
+    external_links = []
+    for href in [*website_links, *[str(link.get("href", "")) for link in scope.find_all("a", href=True)]]:
+        if href.casefold().startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        value = _normalize_website(href)
+        host = _catalog_host(value)
+        if value and host and host not in {"texhibitionist.com", "www.texhibitionist.com"} and not value.lower().startswith(("mailto:", "tel:")):
+            external_links.append(value)
+    website = (
+        _normalize_website(website_links[0]) if website_links
+        else _normalize_website(website_value) if website_value
+        else (external_links[0] if external_links else "")
+    )
+    email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", email, re.I)
+    if not email_match:
+        email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", scope.get_text(" ", strip=True), re.I)
+    phone_match = re.search(r"(?:\+?\d[\d\s()./-]{7,}\d)", phone or scope.get_text(" ", strip=True))
+    email = email_match.group(0) if email_match else _clean(email)
+    phone = _clean(phone_match.group(0)) if phone_match else _clean(phone)
+    if not description:
+        description = _meta_description(str(soup))
+    details = {
+        "listed_legal_name": legal_name,
+        "listed_website": website,
+        "website": website,
+        "listed_address": address,
+        "country": country,
+        "description": description,
+        "brands": brands,
+        "representations": representations,
+        "listed_phone": phone,
+        "listed_email": email,
+        "source_detail_url": profile_url,
+        "source_detail_content_sha256": hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest(),
+        "source_detail_status": "COMPLETED" if any((legal_name, website, address, country, description, brands, representations, phone, email)) else "EMPTY",
+    }
+    observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    details["source_evidence"] = json.dumps([
+        {"source_record_id": "", "field": field, "value": value, "url": profile_url,
+         "content_sha256": details["source_detail_content_sha256"], "observed_at": observed_at}
+        for field, value in details.items()
+        if field in {"listed_legal_name", "listed_website", "listed_address", "country", "description", "brands", "representations", "listed_phone", "listed_email"} and value
+    ], ensure_ascii=False, sort_keys=True)
+    return details
+
+
+def _apply_source_detail(row: dict, html: str, profile_url: str) -> dict:
+    details = _texhibition_profile_details(html, profile_url)
+    source_id = str(row.get("source_record_id", ""))
+    try:
+        claims = json.loads(details.get("source_evidence", "[]"))
+        for claim in claims:
+            claim["source_record_id"] = source_id
+        details["source_evidence"] = json.dumps(claims, ensure_ascii=False, sort_keys=True)
+    except json.JSONDecodeError:
+        pass
+    row.update({key: value for key, value in details.items() if value not in ("", None)})
+    return row
+
+
 def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
-    del fetch_details
     session = _session()
     rows: list[dict] = []
     for listing_url in (
@@ -436,11 +544,22 @@ def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> l
         raise ValueError("texhibition_missing_terminal_pagination_evidence")
     if expected_total is not None and len({row["source_record_id"] for row in rows}) != expected_total:
         raise ValueError("texhibition_total_count_mismatch")
+    if fetch_details:
+        for row in dedupe_rows(rows):
+            profile_url = str(row.get("profile_url", ""))
+            if not profile_url:
+                row["source_detail_status"] = "UNAVAILABLE_NO_PROFILE_URL"
+                continue
+            try:
+                _apply_source_detail(row, _get(session, profile_url), profile_url)
+            except Exception as exc:
+                row["source_detail_status"] = f"UNAVAILABLE:{type(exc).__name__}"
+                row["source_detail_url"] = profile_url
+            time.sleep(delay_sec)
     return dedupe_rows(rows)
 
 
 def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
-    del fetch_details
     view_id = config.ZUCHEX_VIEW_ID
     event_id = config.ZUCHEX_EVENT_ID
     if not view_id or not event_id or not config.ZUCHEX_FILTER_ID or not config.ZUCHEX_FILTER_VALUE_ID:
@@ -517,14 +636,19 @@ def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[d
                 continue
             unique_ids.add(source_id)
             event_data = item.get("withEvent") or {}
+            profile_url = next(
+                (str(item.get(key)).strip() for key in ("profileUrl", "profile_url", "url") if item.get(key)),
+                "",
+            )
             rows.append({
                 "company": _clean(item.get("name", "")),
                 "website": "",
                 "listed_website": "",
                 "source": "zuchex_2026",
                 "country": "Türkiye",
-                "profile_url": "",
+                "profile_url": profile_url,
                 "listing_url": listing_url,
+                "source_detail_status": "NOT_REQUESTED",
                 "hall": "",
                 "stand": _clean(event_data.get("booth", "")),
                 "sector": "ev ve mutfak esyalari",
@@ -542,6 +666,20 @@ def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[d
         raise ValueError(
             f"zuchex_total_count_mismatch:{len(unique_ids)}!={expected_total}"
         )
+    if fetch_details:
+        # The public list schema does not guarantee a profile URL.  Follow a
+        # URL only when it is actually present in the observed node payload;
+        # no guessed GraphQL field or endpoint is introduced.
+        for row in rows:
+            profile_url = str(row.get("profile_url", "") or "")
+            if not profile_url:
+                row["source_detail_status"] = "UNAVAILABLE_NO_PROFILE_URL"
+                continue
+            try:
+                _apply_source_detail(row, _get(session, profile_url), profile_url)
+            except Exception as exc:
+                row["source_detail_status"] = f"UNAVAILABLE:{type(exc).__name__}"
+            time.sleep(delay_sec)
     return dedupe_rows(rows)
 
 

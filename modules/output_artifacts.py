@@ -265,16 +265,20 @@ def evaluation_evidence(
 
 def policy_output_fields(evaluation: dict) -> dict:
     decision = evaluation.get("publication_policy", {})
+    blockers = decision.get("blockers", decision.get("hard_blockers", []))
     return {
         "publication_policy_version": decision.get(
             "policy_version", publication_policy.POLICY_VERSION,
         ),
         "publication_policy_action": decision.get("action", ""),
-        "publication_eligible": bool(decision.get("eligible", False)),
+        "publication_eligible": bool(decision.get("publishable", decision.get("eligible", False))),
+        "publication_advisory_eligible": bool(decision.get("advisory_eligible", decision.get("eligible", False))),
+        "website_identity_verified": bool(decision.get("website_identity_verified", False)),
+        "allowed_contact_fields": "; ".join(decision.get("allowed_contact_fields", [])),
         "publication_safety_score": int(decision.get("safety_score", 0) or 0),
         "publication_risk_index": int(decision.get("risk_index", 100) or 0),
         "publication_risk_tier": decision.get("risk_tier", "blocked"),
-        "publication_blockers": "; ".join(decision.get("hard_blockers", [])),
+        "publication_blockers": "; ".join(blockers),
     }
 
 
@@ -372,6 +376,26 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
 
     all_results_path = staged(output_root / "all_results.xlsx")
     for row in rows:
+        decision = publication_policy.decide_row(row)
+        row["publication_eligible"] = decision["publishable"]
+        row["publication_advisory_eligible"] = decision["advisory_eligible"]
+        row["website_identity_verified"] = decision["website_identity_verified"]
+        row["allowed_contact_fields"] = "; ".join(decision["allowed_contact_fields"])
+        if not decision["publishable"]:
+            row["publication_blockers"] = "; ".join(dict.fromkeys(
+                value for value in [str(row.get("publication_blockers", "")), *decision["blockers"]] if value
+            ))
+        evaluation = row.get("__evaluation")
+        if isinstance(evaluation, dict):
+            policy = evaluation.setdefault("publication_policy", {})
+            policy.update({
+                "publishable": decision["publishable"],
+                "blockers": decision["blockers"],
+                "website_identity_verified": decision["website_identity_verified"],
+                "allowed_contact_fields": decision["allowed_contact_fields"],
+                "policy_version": decision["policy_version"],
+                "advisory_eligible": decision["advisory_eligible"],
+            })
         row["website_status"] = (
             "verified" if row.get("website") and is_publishable_row(row)
             else "review" if row.get("website") or row.get("status") == "WEBSITE_AMBIGUOUS"
@@ -383,7 +407,11 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
             else "missing"
         )
         if is_publishable_row(row):
-            discovery_coverage.mark_published(row.get("company", ""))
+            discovery_coverage.mark_published(
+                row.get("company", ""),
+                row.get("source_record_id", ""),
+                row.get("original_index"),
+            )
     evidence.write_jsonl(staged(config.EVIDENCE_FILE), rows)
     entity_registry.write_observations(staged(config.ENTITY_RELATIONSHIPS_FILE), rows, observed_at=frozen_timestamp)
     quality_audit.write(staged(config.QUALITY_AUDIT_FILE), rows, runtime_snapshot=frozen_snapshot)

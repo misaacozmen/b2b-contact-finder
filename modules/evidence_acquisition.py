@@ -8,6 +8,8 @@ whether the current run mode and budget permit executing them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 
 from modules import entity_resolution, scorer
@@ -19,6 +21,7 @@ class EvidenceState:
     crawl_scopes: tuple[str, ...]
     search_queries: tuple[str, ...]
     terminal_reason: str
+    evidence_fingerprint: str = ""
 
     @property
     def complete(self) -> bool:
@@ -69,7 +72,9 @@ def _queries(
     sector = str(metadata.get("sector", "")).strip()
     address = str(metadata.get("listed_address", "")).strip()
     planned = [
-        f"{quoted} official website",
+        f"{quoted} official website"
+        if gaps & {"missing_legal_identity", "missing_relationship", "missing_identity_coherence", "ambiguous_candidates"}
+        else "",
         f"{quoted} ticari unvan KVKK"
         if gaps & {
             "missing_legal_identity", "missing_identity_coherence",
@@ -100,7 +105,7 @@ def analyze(
     undifferentiated broad search.
     """
     metadata = metadata or {}
-    profile = entity_resolution.build_target_profile(company)
+    profile = entity_resolution.build_target_profile(company, metadata)
     fingerprints = [
         entity_resolution.fingerprint(profile, item)
         for item in evaluations
@@ -175,11 +180,21 @@ def analyze(
         if gaps == {"no_candidates"}
         else "bounded_evidence_acquisition_required"
     )
+    fingerprint = hashlib.sha256(json.dumps([
+        {
+            "url": item.get("candidate", {}).get("url", ""),
+            "reasons": item.get("reasons", []),
+            "structured_identity": item.get("structured_identity", {}),
+            "crawl_pages": [page.get("url", "") for page in item.get("crawl_result", {}).get("pages", [])],
+        }
+        for item in evaluations
+    ], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return EvidenceState(
         frozenset(gaps),
         scopes,
         _queries(company, metadata, gaps, query_limit),
         terminal,
+        fingerprint,
     )
 
 
@@ -192,6 +207,6 @@ def should_continue(
     """Stop on completion, exhausted budget, or a round with no gap progress."""
     if current.complete or round_number >= max_rounds:
         return False
-    if previous is not None and current.gaps >= previous.gaps:
+    if previous is not None and current.gaps >= previous.gaps and current.evidence_fingerprint == previous.evidence_fingerprint:
         return False
     return bool(current.crawl_scopes or current.search_queries)

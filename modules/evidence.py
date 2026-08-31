@@ -19,8 +19,39 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for row in rows:
+                source_evidence = row.get("source_evidence", [])
+                if isinstance(source_evidence, str):
+                    try:
+                        source_evidence = json.loads(source_evidence)
+                    except json.JSONDecodeError:
+                        source_evidence = []
+                allowed_fields = row.get("allowed_contact_fields", [])
+                if isinstance(allowed_fields, str):
+                    allowed_fields = [
+                        value.strip() for value in allowed_fields.replace(",", ";").split(";")
+                        if value.strip()
+                    ]
                 record = {
+                    "run_id": row.get("run_id", ""),
                     "company": row.get("company", ""),
+                    "source_record_id": row.get("source_record_id", ""),
+                    "original_index": row.get("original_index", row.get("__index")),
+                    "publication_decision": {
+                        "publishable": bool(row.get("publication_eligible", False)),
+                        "advisory_eligible": bool(row.get("publication_advisory_eligible", False)),
+                        "website_identity_verified": bool(row.get("website_identity_verified", False)),
+                        "allowed_contact_fields": allowed_fields,
+                        "blockers": row.get("publication_blockers", ""),
+                        "policy_version": row.get("publication_policy_version", ""),
+                    },
+                    "source_detail": {
+                        "listed_legal_name": row.get("listed_legal_name", ""),
+                        "source_detail_status": row.get("source_detail_status", ""),
+                        "source_detail_url": row.get("source_detail_url", ""),
+                        "content_sha256": row.get("source_detail_content_sha256", ""),
+                        "evidence": source_evidence,
+                    },
+                    "source_evidence": source_evidence,
                     "selected": {
                         "website": row.get("website", ""),
                         "website_source": row.get("website_source", ""),

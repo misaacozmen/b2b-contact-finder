@@ -378,12 +378,31 @@ class Resolution:
     reason: str
 
 
-def build_target_profile(company: str) -> TargetProfile:
+def build_target_profile(company: str, metadata: dict | None = None) -> TargetProfile:
+    metadata = metadata or {}
+    legal_source = " ".join(str(metadata.get(key, "") or "") for key in (
+        "listed_legal_name", "legal_name", "legal_title", "legal_company_name",
+    ))
+    brand_source = " ".join(str(metadata.get(key, "") or "") for key in (
+        "brands", "brand", "representations",
+    ))
+    context_source = " ".join(str(metadata.get(key, "") or "") for key in (
+        "sector", "category", "product", "description", "fair", "trade_show",
+    ))
+    legal_tokens = tuple(dict.fromkeys(scorer.legal_identity_tokens(f"{company} {legal_source}")))
+    brand_tokens = tuple(dict.fromkeys(
+        scorer.primary_brand_tokens(company, limit=2)
+        + scorer.primary_brand_tokens(brand_source, limit=2)
+    ))
+    context_tokens = tuple(dict.fromkeys(
+        scorer.context_tokens(f"{company} {context_source}")
+        + scorer.metadata_contexts(metadata)
+    ))
     return TargetProfile(
         company=company,
-        legal_tokens=tuple(scorer.legal_identity_tokens(company)),
-        brand_tokens=tuple(scorer.primary_brand_tokens(company, limit=2)),
-        context_tokens=tuple(scorer.context_tokens(company)),
+        legal_tokens=legal_tokens,
+        brand_tokens=brand_tokens,
+        context_tokens=context_tokens,
     )
 
 

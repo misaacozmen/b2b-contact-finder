@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from io import BytesIO
 import re
+import shutil
 import threading
 import warnings
 import xml.etree.ElementTree as ET
@@ -11,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
-from modules import cache_store, network_guard, replay_snapshot, runtime, site_mapper, site_recovery
+from modules import cache_store, network_guard, replay_snapshot, runtime, run_context, site_mapper, site_recovery
 from modules.extractor import extract_contact_page_links, extract_contact_records, extract_emails, extract_phones
 from modules import scorer
 from modules.utils import retry_with_backoff
@@ -274,6 +275,7 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
+        runtime.record("capability_unavailable.browser")
         return None, "playwright_not_installed"
 
     target, reason = network_guard.resolve_public_http_url(url)
@@ -292,7 +294,7 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
             try:
                 context = browser.new_context(
                     user_agent=config.USER_AGENT,
-                    locale="tr-TR",
+                    locale=getattr(config, "LOCALE", "tr-TR"),
                     ignore_https_errors=False,
                     service_workers="block",
                 )
@@ -462,7 +464,11 @@ def _try_ocr_pdf(content: bytes) -> tuple[str | None, str | None]:
         import pytesseract
         from PIL import Image
     except ImportError:
+        runtime.record("capability_unavailable.ocr")
         return None, "pdf_ocr_dependencies_unavailable"
+    if not shutil.which("tesseract"):
+        runtime.record("capability_unavailable.ocr")
+        return None, "pdf_ocr_binary_unavailable"
     try:
         document = fitz.open(stream=content, filetype="pdf")
         texts = []
@@ -573,6 +579,15 @@ def _fetch_site_live(
     tls_insecure = False
     root_retrieval_method = "http"
     recovery_trace: list[dict] = []
+    browser_render_attempts = 0
+
+    def render_page(render_url: str) -> tuple[str | None, str | None]:
+        nonlocal browser_render_attempts
+        if browser_render_attempts >= 2:
+            runtime.record("crawler.browser_page_cap_reached")
+            return None, "browser_page_cap_reached"
+        browser_render_attempts += 1
+        return _try_render(render_url)
 
     html, error = _try_fetch(root)
     root_meta = getattr(_FETCH_STATE, "last", {})
@@ -700,7 +715,7 @@ def _fetch_site_live(
     ):
         runtime.record("recovery.browser_attempts")
         tls_insecure = tls_insecure or bool(error and "ssl_error" in error)
-        rendered_html, render_error = _try_render(base_url)
+        rendered_html, render_error = render_page(base_url)
         if rendered_html:
             runtime.record("recovery.browser_successes")
             root = base_url
@@ -711,7 +726,7 @@ def _fetch_site_live(
             errors.append(f"{base_url}:{render_error}")
     if config.ENABLE_JS_FALLBACK and html and _looks_like_js_shell(html):
         runtime.record("recovery.browser_attempts")
-        rendered_html, render_error = _try_render(root)
+        rendered_html, render_error = render_page(root)
         if rendered_html:
             runtime.record("recovery.browser_successes")
             html = rendered_html
@@ -867,11 +882,12 @@ def _fetch_site_live(
                     contact_retrieval_method = "official_link_reference"
                     contact_error = None
         if config.ENABLE_JS_FALLBACK and not contact_html and _renderable_fetch_error(contact_error) and (
-            contact_url in discovered_contact_urls or contact_render_attempts < 2
+            browser_render_attempts < 2
+            and (contact_url in discovered_contact_urls or contact_render_attempts < 2)
         ):
             runtime.record("recovery.browser_attempts")
             contact_render_attempts += 1
-            rendered_html, render_error = _try_render(contact_url)
+            rendered_html, render_error = render_page(contact_url)
             if rendered_html:
                 runtime.record("recovery.browser_successes")
                 contact_html = rendered_html
@@ -884,11 +900,12 @@ def _fetch_site_live(
             config.ENABLE_JS_FALLBACK
             and contact_html
             and _contact_page_needs_render(contact_html)
+            and browser_render_attempts < 2
             and contact_render_attempts < 2
         ):
             runtime.record("recovery.browser_attempts")
             contact_render_attempts += 1
-            rendered_html, render_error = _try_render(contact_url)
+            rendered_html, render_error = render_page(contact_url)
             if rendered_html:
                 runtime.record("recovery.browser_successes")
                 contact_html = rendered_html
@@ -998,12 +1015,17 @@ def fetch_site(
     seed_key = "|".join(sorted(safe_seeds))
     identity_seed_key = "|".join(sorted(safe_identity_seeds))
     scope_key = ",".join(dict.fromkeys(evidence_scopes or ()))
+    capability_profile = run_context.runtime_capability_profile()
+    capability_key = run_context.canonical_json(capability_profile)
     cache_key = (
         f"{url}|pages={config.MAX_CONTACT_PAGES}|attempts={config.MAX_CONTACT_ATTEMPTS}"
-        f"|sitemaps={config.MAX_SITEMAPS}"
+        f"|sitemaps={config.MAX_SITEMAPS}|capabilities={capability_key}"
     )
     if profile == "identity":
-        cache_key = f"{url}|profile=identity|pages={config.MAX_IDENTITY_PAGES}"
+        cache_key = (
+            f"{url}|profile=identity|pages={config.MAX_IDENTITY_PAGES}"
+            f"|capabilities={capability_key}"
+        )
     # Contact seeds do not affect the identity profile, so including them made
     # identical light crawls occupy several cache keys and harmed replay.
     if seed_key and profile == "full":
@@ -1076,7 +1098,25 @@ def fetch_site(
                 runtime.record("cache.site.security_interstitial_rejected", len(cached_pages) - len(safe_pages))
                 if not safe_pages:
                     cached["error"] = "cached_security_interstitial"
+            recorded_capabilities = cached.get("capability_profile")
+            if not isinstance(recorded_capabilities, dict):
+                # A legacy replay entry has no claim about the optional
+                # capabilities that were available when it was collected.
+                # Preserve it for offline diagnostics, but surface that gap
+                # instead of presenting it as current enhanced evidence.
+                cached["capability_status"] = "unknown_legacy"
+                unavailable = []
+                if capability_profile.get("browser_enabled"):
+                    unavailable.append("browser")
+                if capability_profile.get("ocr_enabled"):
+                    unavailable.append("ocr")
+                cached["capability_unavailable"] = unavailable
+                for name in unavailable:
+                    runtime.record(f"capability_unavailable.{name}")
+            elif recorded_capabilities != capability_profile:
+                cached["capability_status"] = "capability_profile_mismatch"
             cached["cache_status"] = "hit"
+            cached.setdefault("capability_profile", recorded_capabilities or capability_profile)
             return cached
         if mode == "replay":
             if scope_key:
@@ -1128,6 +1168,7 @@ def fetch_site(
         identity_seed_urls=safe_identity_seeds,
     )
     result["cache_status"] = "live"
+    result["capability_profile"] = capability_profile
     if mode in {"use", "refresh"}:
         cache_store.save(
             config.CRAWL_CACHE_DIR, "site", cache_key, result,

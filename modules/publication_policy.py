@@ -8,6 +8,7 @@ signal for offline risk/coverage analysis, not a probability.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import config
@@ -36,7 +37,7 @@ CONFLICT_TOKENS = {
 }
 
 
-def is_publishable_row(row: dict) -> bool:
+def _legacy_is_publishable_row(row: dict) -> bool:
     persisted_scheduler_row = all(
         key in row for key in ("free_state", "paid_state")
     )
@@ -108,6 +109,150 @@ def is_publishable_row(row: dict) -> bool:
     valid_email = bool(row.get("email")) and str(row.get("email_publication_status", "")).casefold() == "allowed"
     valid_phone = bool(row.get("phone")) and str(row.get("phone_publication_status", "")).casefold() == "allowed"
     return valid_email or valid_phone
+
+
+def _reason_values(row: dict, evaluation: dict) -> set[str]:
+    return (
+        _normalized_reason_tokens(row.get("reason", ""))
+        | _normalized_reason_tokens(row.get("publication_blockers", ""))
+        | _normalized_reason_tokens(evaluation.get("reasons", []))
+    )
+
+
+def _context_resolution(row: dict, evaluation: dict) -> dict:
+    value = row.get("context_resolution")
+    if not isinstance(value, dict):
+        value = evaluation.get("context_resolution")
+    return value if isinstance(value, dict) else {}
+
+
+def _context_resolution_is_verified(context: dict) -> bool:
+    """Require ownership, activity compatibility, and one independent match."""
+    ownership = any(bool(context.get(key)) for key in (
+        "legal_ownership_verified", "brand_ownership_verified",
+        "target_legal_name_verified", "brand_owner_verified",
+        "legal_name_verified", "ownership_verified",
+    ))
+    compatibility = any(bool(context.get(key)) for key in (
+        "candidate_sector_compatible", "candidate_product_compatible",
+        "site_sector_product_compatible", "sector_compatible",
+    ))
+    matches = context.get("independent_matches") or context.get("independent_identity_matches") or []
+    if isinstance(matches, dict):
+        matches = [matches]
+    match_kinds = {"phone", "full_address", "address", "company_number", "company_registration_number"}
+    independent_match = False
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        kind = str(match.get("kind") or match.get("type") or "").casefold().replace(" ", "_")
+        url = str(match.get("url") or match.get("source_url") or "").strip()
+        content_hash = str(match.get("content_sha256") or match.get("content_hash") or "").casefold()
+        source_record_id = str(match.get("source_record_id") or "").strip()
+        if kind in match_kinds and url and re.fullmatch(r"[0-9a-f]{64}", content_hash) and source_record_id:
+            independent_match = True
+            break
+    return ownership and compatibility and independent_match and not context.get("conflicts")
+
+
+def _website_identity_verified(row: dict, evaluation: dict) -> bool:
+    assessment = row.get("identity_assessment") or evaluation.get("identity_assessment") or {}
+    candidate = evaluation.get("candidate") or {}
+    if assessment.get("conflicts") or assessment.get("publishable") is False:
+        return False
+    website = str(row.get("website") or candidate.get("url") or "").strip()
+    if not website:
+        return False
+    if _context_resolution_is_verified(_context_resolution(row, evaluation)):
+        return True
+    reasons = _reason_values(row, evaluation)
+    identity_evidence = any(token.startswith((
+        "page_identity_strong:", "page_identity_medium:", "structured_identity_",
+        "legal_name_", "country_identity_tr_", "context_match:",
+    )) for token in reasons)
+    resolution = str(row.get("identity_resolution") or evaluation.get("identity_resolution") or evaluation.get("_identity_resolution") or "")
+    return bool(assessment.get("publishable") is True and (identity_evidence or resolution or candidate))
+
+
+def decide_row(row: dict, evaluation: dict | None = None) -> dict:
+    """Return the one explainable final publication decision for a row."""
+    evaluation = evaluation if isinstance(evaluation, dict) else (
+        row.get("__evaluation") if isinstance(row.get("__evaluation"), dict) else {}
+    )
+    persisted = all(key in row for key in ("source_record_id", "free_state", "paid_state", "paid_required"))
+    strict_persisted = persisted and any(key in row for key in ("score", "email_publication_status", "phone_publication_status"))
+    advisory = bool(row.get("publication_advisory_eligible", row.get("advisory_eligible", row.get("publication_eligible") is True)))
+    allowed_contact_fields = []
+    if row.get("email") and str(row.get("email_publication_status", "")).casefold() == "allowed":
+        allowed_contact_fields.append("email")
+    if row.get("phone") and str(row.get("phone_publication_status", "")).casefold() == "allowed":
+        allowed_contact_fields.append("phone")
+    blockers: list[str] = []
+    if row.get("quarantine_state") or row.get("quarantine_status") or "legacy_recovery_provisional" in str(row.get("publication_blockers", "")):
+        blockers.append("quarantined")
+    if strict_persisted:
+        if not row.get("source_record_id"):
+            blockers.append("source_record_id_missing")
+        if str(row.get("free_state", "")).upper() in {"PENDING", "RUNNING", "UNKNOWN", "BLOCKED_BUDGET"}:
+            blockers.append("free_scheduler_not_terminal")
+        if bool(row.get("paid_required")) and str(row.get("paid_state", "")).upper() != "DONE":
+            blockers.append("paid_scheduler_not_terminal")
+        if str(row.get("paid_state", "")).upper() not in {"DONE", "NOT_REQUIRED"}:
+            blockers.append("paid_scheduler_not_terminal")
+        if str(row.get("status", "")) not in OK_STATUSES:
+            blockers.append("status_not_publishable")
+        if int(row.get("score") or 0) < int(getattr(config, "MIN_ACCEPT_SCORE", 65)):
+            blockers.append("score_below_minimum")
+        if not _website_identity_verified(row, evaluation):
+            blockers.append("website_identity_unverified")
+        assessment = row.get("identity_assessment") or evaluation.get("identity_assessment") or {}
+        if assessment.get("conflicts"):
+            blockers.append("identity_conflict")
+        reasons = _reason_values(row, evaluation)
+        context = _context_resolution(row, evaluation)
+        override_present = any(token == CONTEXT_CONFLICT_OVERRIDE for token in reasons)
+        real_conflicts = {
+            token for token in reasons
+            if any(marker in token for marker in CONFLICT_TOKENS)
+            and token != CONTEXT_CONFLICT_OVERRIDE
+        }
+        if real_conflicts:
+            blockers.append("context_conflict")
+        if override_present and not _context_resolution_is_verified(context):
+            blockers.append("context_resolution_unverified")
+        if "cross_domain_email_accepted_from_verified_official_page" in reasons and not evaluation.get("structured_domain_relation"):
+            blockers.append("cross_domain_email_unresolved")
+        if not allowed_contact_fields:
+            blockers.append("no_allowed_contact_field")
+        if not _legacy_is_publishable_row(row):
+            blockers.append("publication_gate_failed")
+        publishable = not blockers
+    else:
+        publishable = _legacy_is_publishable_row(row)
+        if not publishable and advisory:
+            blockers.append("publication_gate_failed")
+    if not publishable and not blockers:
+        blockers.append("publication_gate_failed")
+    return {
+        "publishable": bool(publishable),
+        "blockers": list(dict.fromkeys(blockers)),
+        "website_identity_verified": _website_identity_verified(row, evaluation),
+        "allowed_contact_fields": allowed_contact_fields,
+        "policy_version": POLICY_VERSION,
+        "advisory_eligible": advisory,
+    }
+
+
+def is_publishable_row(row: dict) -> bool:
+    """Boolean compatibility wrapper around :func:`decide_row`."""
+    decision = decide_row(row)
+    if all(key in row for key in ("source_record_id", "free_state", "paid_state", "paid_required")):
+        row["publication_eligible"] = decision["publishable"]
+        if not decision["publishable"]:
+            row["publication_blockers"] = "; ".join(dict.fromkeys(
+                value for value in [str(row.get("publication_blockers", "")), *decision["blockers"]] if value
+            ))
+    return bool(decision["publishable"])
 
 
 def _has_reason(reasons: list[str], prefixes: tuple[str, ...]) -> bool:
@@ -199,6 +344,11 @@ def evaluate(
     if "tls_insecure_transport" in reasons:
         blockers.append("tls_certificate_unverified")
 
+    if CONTEXT_CONFLICT_OVERRIDE in _normalized_reason_tokens(reasons) and not _context_resolution_is_verified(
+        _context_resolution({}, evaluation)
+    ):
+        blockers.append("context_resolution_unverified")
+
     support_count = int(assessment.get("support_count", 0) or 0)
     bundle_components = int(assessment.get("first_party_bundle_components", 0) or 0)
     score = 25
@@ -247,18 +397,40 @@ def evaluate(
     else:
         risk_tier = "elevated"
 
+    policy_row = {
+        "company": company,
+        "website": candidate.get("url", ""),
+        "status": proposed_status,
+        "publication_eligible": eligible,
+        "score": safety_score,
+        "identity_assessment": assessment,
+        "email": evaluation.get("email", ""),
+        "phone": evaluation.get("phone", ""),
+        "email_publication_status": evaluation.get("email_publication_status", "suppressed"),
+        "phone_publication_status": evaluation.get("phone_publication_status", "suppressed"),
+        "__evaluation": evaluation,
+    }
+    final_decision = decide_row(policy_row, evaluation)
     return {
         "policy_version": POLICY_VERSION,
         "mode": "downgrade_only",
         "proposed_status": proposed_status,
         "action": action,
         "eligible": eligible,
+        "publishable": bool(eligible and final_decision["publishable"]),
+        "blockers": list(dict.fromkeys([*blockers, *final_decision["blockers"]])) if not (eligible and final_decision["publishable"]) else [],
+        "website_identity_verified": final_decision["website_identity_verified"],
+        "allowed_contact_fields": final_decision["allowed_contact_fields"],
+        "advisory_eligible": eligible,
         "risk_eligible": risk_eligible,
         "safety_score": safety_score,
         "risk_index": 100 - safety_score,
         "risk_tier": risk_tier,
         "minimum_safety_score": minimum_safety_score,
-        "hard_blockers": list(dict.fromkeys(blockers)),
+        "hard_blockers": list(dict.fromkeys([
+            *blockers,
+            *(final_decision["blockers"] if not (eligible and final_decision["publishable"]) else []),
+        ])),
         "evidence_summary": {
             "identity_decision": assessment.get("decision", ""),
             "independent_support_count": support_count,

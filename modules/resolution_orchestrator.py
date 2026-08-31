@@ -35,6 +35,7 @@ def complete_resolution_evidence(
     previous: evidence_acquisition.EvidenceState | None = None
     rounds: list[dict] = []
     attempted_scopes_by_domain: dict[str, set[str]] = {}
+    attempted_queries: set[str] = set()
     for round_number in range(1, config.MAX_AUTONOMOUS_RESOLUTION_ROUNDS + 1):
         if not evidence_acquisition.should_continue(
             previous,
@@ -49,7 +50,9 @@ def complete_resolution_evidence(
             metadata,
             current.search_queries,
             limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
+            already_run=attempted_queries,
         )
+        attempted_queries.update(current.search_queries)
         known_domains = {
             scorer.normalize_domain(item.get("url", "")) for item in candidates
         }
