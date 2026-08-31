@@ -4,8 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 
+from modules import publication_policy
 
-def test_manual_tex_zuchex_fixture_is_hash_manifested_and_zero_false_publications():
+
+def test_manual_fixture_integrity_and_hash_manifest():
     fixture = Path(__file__).parent / "fixtures" / "manual_verified_tex_zuchex_fixture.json"
     manifest = json.loads((fixture.parent / "manual_fixture_manifest.json").read_text(encoding="utf-8"))
     assert manifest["files"][fixture.name]["bytes"] == fixture.stat().st_size
@@ -18,3 +20,18 @@ def test_manual_tex_zuchex_fixture_is_hash_manifested_and_zero_false_publication
     assert sum(bool(row.get("expected_publication_eligible")) for row in payload["records"]) == 0
     digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
     assert len(digest) == 64
+
+
+def test_manual_fixture_integrity_is_separate_from_actual_publication_gate():
+    fixture = Path(__file__).parent / "fixtures" / "manual_verified_tex_zuchex_fixture.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    actual = []
+    for row in payload["records"]:
+        evaluated = publication_policy.decide_row({
+            **row,
+            "publication_eligible": row.get("expected_publication_eligible"),
+        })
+        actual.append(evaluated)
+    assert len(actual) == len(payload["records"])
+    assert all(item["publishable"] is False for item in actual)
+    assert all(item["blockers"] for item in actual)

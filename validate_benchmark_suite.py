@@ -127,6 +127,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=BASE_DIR / "data" / "benchmark_splits.json")
     parser.add_argument("--actual", action="append", default=[], help="role=contacts.xlsx")
+    parser.add_argument(
+        "--require-actual", action="store_true",
+        help="Fail unless every manifest role with expected labels has an evaluated actual output.",
+    )
     parser.add_argument("--private-seen-workbook", type=Path, default=None, help="Path to private seen firms workbook")
     args = parser.parse_args()
 
@@ -134,11 +138,46 @@ def main() -> None:
         args.manifest,
         private_seen_workbook=args.private_seen_workbook,
     )
-    actuals = dict(value.split("=", 1) for value in args.actual)
+    actuals = {}
+    for value in args.actual:
+        if "=" not in value:
+            issues.append(f"invalid --actual value: {value}")
+            continue
+        role, actual_path = value.split("=", 1)
+        actuals[role] = actual_path
+    if args.require_actual:
+        for item in sets:
+            role = item.get("role", "")
+            if not item.get("expected", ""):
+                continue
+            actual_path = actuals.get(role)
+            if not actual_path:
+                issues.append(f"{role}: actual output required (--require-actual)")
+                continue
+            actual_file = Path(actual_path)
+            if not actual_file.exists():
+                issues.append(f"{role}: actual output not found: {actual_file}")
+                continue
+            try:
+                expected_companies = _companies(expected)
+                actual_rows = _sheet_rows(actual_file)
+                if not actual_rows:
+                    issues.append(f"{role}: actual output has no evaluated rows")
+                    continue
+                actual_companies = {
+                    scorer.normalize_text(str(row.get("company") or row.get("Company") or "")).strip()
+                    for row in actual_rows
+                    if str(row.get("company") or row.get("Company") or "").strip()
+                }
+                missing = expected_companies - actual_companies
+                if missing:
+                    issues.append(f"{role}: actual output does not evaluate {len(missing)} expected records")
+            except Exception as exc:
+                issues.append(f"{role}: actual output unreadable: {exc.__class__.__name__}")
     for item in sets:
         role = item.get("role", "")
         expected_text = item.get("expected", "")
-        if role not in actuals or not expected_text:
+        if role not in actuals or not expected_text or not Path(actuals[role]).exists():
             continue
         manifest_base = args.manifest.resolve().parent.parent if args.manifest.resolve().name == "benchmark_splits.json" else BASE_DIR
         expected = (manifest_base / expected_text).resolve()
@@ -153,6 +192,10 @@ def main() -> None:
             print(f"- {issue}")
         raise SystemExit(2)
     print("Benchmark suite manifest: OK")
+    if args.require_actual:
+        print("quality_status: actual_evaluated")
+    else:
+        print("quality_status: schema_only; quality_not_evaluated")
     if args.private_seen_workbook is not None:
         print("private_seen_gate: OK")
     else:

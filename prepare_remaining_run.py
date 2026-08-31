@@ -108,14 +108,24 @@ def _read_source(path: Path) -> tuple[list[str], list[list[Any]]]:
     return headers, values[1:]
 
 
-def _load_selection() -> tuple[dict, dict[str, Any], str, str]:
-    manifest = json.loads(PARENT_MANIFEST.read_text(encoding="utf-8"))
-    if manifest.get("run_id") != PARENT_MANIFEST.parent.name:
+def _load_selection(
+    *,
+    original_input: Path | None = None,
+    recovery_db: Path | None = None,
+    parent_manifest: Path | None = None,
+    source_mapping: Path | None = None,
+) -> tuple[dict, dict[str, Any], str, str]:
+    original_input = Path(original_input or ORIGINAL_INPUT).resolve()
+    recovery_db = Path(recovery_db or RECOVERY_DB).resolve()
+    parent_manifest = Path(parent_manifest or PARENT_MANIFEST).resolve()
+    source_mapping = Path(source_mapping or SOURCE_MAPPING).resolve()
+    manifest = json.loads(parent_manifest.read_text(encoding="utf-8"))
+    if manifest.get("run_id") != parent_manifest.parent.name:
         raise ValueError("parent manifest is not the expected final10-r2 manifest")
-    if _sha256(ORIGINAL_INPUT) != str(manifest.get("input_sha256", "")):
+    if _sha256(original_input) != str(manifest.get("input_sha256", "")):
         raise ValueError("original input hash does not match parent manifest")
-    mapping = json.loads(SOURCE_MAPPING.read_text(encoding="utf-8"))
-    if _sha256(RECOVERY_DB) != str(manifest.get("checkpoint_sha256", "")):
+    mapping = json.loads(source_mapping.read_text(encoding="utf-8"))
+    if _sha256(recovery_db) != str(manifest.get("checkpoint_sha256", "")):
         raise ValueError("recovery database hash does not match parent manifest checkpoint")
     mapping_without_digest = {key: value for key, value in mapping.items() if key != "mapping_sha256"}
     if hashlib.sha256(_canonical(mapping_without_digest).encode("utf-8")).hexdigest() != str(mapping.get("mapping_sha256", "")):
@@ -123,11 +133,11 @@ def _load_selection() -> tuple[dict, dict[str, Any], str, str]:
     mappings = {int(row["legacy_index"]): row for row in mapping.get("mappings", [])}
     if len(mappings) != len(mapping.get("mappings", [])):
         raise ValueError("duplicate legacy index in source mapping")
-    headers, source_rows = _read_source(ORIGINAL_INPUT)
-    input_records = excel.read_company_records(ORIGINAL_INPUT)
+    headers, source_rows = _read_source(original_input)
+    input_records = excel.read_company_records(original_input)
     if len(source_rows) != len(mappings):
         raise ValueError("source workbook and mapping row counts differ")
-    db_uri = f"file:{RECOVERY_DB.as_posix()}?mode=ro&immutable=1"
+    db_uri = f"file:{recovery_db.as_posix()}?mode=ro&immutable=1"
     connection = sqlite3.connect(db_uri, uri=True)
     try:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -172,7 +182,7 @@ def _load_selection() -> tuple[dict, dict[str, Any], str, str]:
     if leaked - {"website", "email", "phone"}:
         raise ValueError(f"result fields leaked into source package: {sorted(leaked)}")
     runtime_tree_hash = run_context.source_tree_sha256()
-    return manifest, {"headers": output_headers, "rows": output_rows, "mapping_rows": mapping_rows, "id_index": id_index}, runtime_tree_hash, _sha256(SOURCE_MAPPING)
+    return manifest, {"headers": output_headers, "rows": output_rows, "mapping_rows": mapping_rows, "id_index": id_index}, runtime_tree_hash, _sha256(source_mapping)
 
 
 def _command_tokens(*, input_path: Path, run_root: Path) -> list[str]:
@@ -259,11 +269,27 @@ def validate_remaining_plan(workbook_path: Path, plan_path: Path) -> dict[str, A
     return plan
 
 
-def prepare_remaining_run(destination: Path) -> dict[str, Any]:
+def prepare_remaining_run(
+    destination: Path,
+    *,
+    original_input: Path | None = None,
+    recovery_db: Path | None = None,
+    parent_manifest: Path | None = None,
+    source_mapping: Path | None = None,
+) -> dict[str, Any]:
     destination = Path(destination).resolve()
+    original_input = Path(original_input or ORIGINAL_INPUT).resolve()
+    recovery_db = Path(recovery_db or RECOVERY_DB).resolve()
+    parent_manifest = Path(parent_manifest or PARENT_MANIFEST).resolve()
+    source_mapping = Path(source_mapping or SOURCE_MAPPING).resolve()
     output_dir = destination / "input"
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest, bundle, runtime_tree_hash, mapping_hash = _load_selection()
+    manifest, bundle, runtime_tree_hash, mapping_hash = _load_selection(
+        original_input=original_input,
+        recovery_db=recovery_db,
+        parent_manifest=parent_manifest,
+        source_mapping=source_mapping,
+    )
     workbook_temp = output_dir / f".remaining_159_fresh.{os.getpid()}.xlsx"
     plan_temp = output_dir / f".remaining_159_plan.{os.getpid()}.json"
     workbook_path = output_dir / "remaining_159_fresh.xlsx"
@@ -298,8 +324,8 @@ def prepare_remaining_run(destination: Path) -> dict[str, Any]:
         plan = {
             "schema_version": 1,
             "predicate": "free_state='PENDING' OR (paid_required=1 AND paid_state='PENDING')",
-            "parent": {"manifest": str(PARENT_MANIFEST), "manifest_sha256": _sha256(PARENT_MANIFEST), "run_id": manifest["run_id"], "artifact_set_sha256": manifest["artifact_set_sha256"], "recovery_db_sha256": _sha256(RECOVERY_DB)},
-            "sources": {"original_input_sha256": _sha256(ORIGINAL_INPUT), "source_mapping_sha256": mapping_hash, "recovery_db_sha256": _sha256(RECOVERY_DB)},
+            "parent": {"manifest": str(parent_manifest), "manifest_sha256": _sha256(parent_manifest), "run_id": manifest["run_id"], "artifact_set_sha256": manifest["artifact_set_sha256"], "recovery_db_sha256": _sha256(recovery_db)},
+            "sources": {"original_input": str(original_input), "original_input_sha256": _sha256(original_input), "source_mapping": str(source_mapping), "source_mapping_sha256": mapping_hash, "recovery_db": str(recovery_db), "recovery_db_sha256": _sha256(recovery_db)},
             "selection": {"count": len(bundle["id_index"]), "free_count": sum(1 for row in bundle["mapping_rows"] if row["free_state"] == "PENDING"), "paid_count": sum(1 for row in bundle["mapping_rows"] if row["paid_required"] == 1 and row["paid_state"] == "PENDING"), "ordered_index_id": bundle["id_index"], "ordered_index_id_sha256": selected_digest, "row_sha256": row_hashes},
             "workbook": {"relative_path": "input/remaining_159_fresh.xlsx", "bytes": workbook_temp.stat().st_size, "sha256": workbook_hash, "row_count": len(bundle["rows"]), "column_count": len(bundle["headers"])},
             "effective_config": effective_config,
@@ -334,8 +360,18 @@ def prepare_remaining_run(destination: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--original-input", type=Path, default=None)
+    parser.add_argument("--recovery-db", type=Path, default=None)
+    parser.add_argument("--parent-manifest", type=Path, default=None)
+    parser.add_argument("--source-mapping", type=Path, default=None)
     args = parser.parse_args(argv)
-    print(json.dumps(prepare_remaining_run(args.destination), ensure_ascii=False, indent=2))
+    print(json.dumps(prepare_remaining_run(
+        args.destination,
+        original_input=args.original_input,
+        recovery_db=args.recovery_db,
+        parent_manifest=args.parent_manifest,
+        source_mapping=args.source_mapping,
+    ), ensure_ascii=False, indent=2))
     return 0
 
 

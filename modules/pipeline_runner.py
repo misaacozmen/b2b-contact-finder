@@ -4,10 +4,12 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import sqlite3
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,6 +40,19 @@ PAID_ATTEMPT_RESULTS = frozenset({"COMPLETED", "NO_CALL_NEEDED", "BLOCKED_BUDGET
 _SUCCESSFUL_PROVIDER_STATES = {"COMPLETED", "EMPTY", "CACHE_HIT", "DONE"}
 _NONTERMINAL_PROVIDER_STATES = {"RESERVED", "RUNNING"}
 FREE_FAILURE_STATUSES = frozenset({"SEARCH_FAILED", "PROCESSING_FAILED"})
+SAFE_SQLITE_MINIMUM = (3, 51, 3)
+PATCHED_SAFE_SQLITE_BUILDS = frozenset({(3, 50, 7), (3, 44, 6)})
+
+
+def require_safe_sqlite_for_live() -> None:
+    """Reject live runs on SQLite builds without the required handoff fixes."""
+    version = tuple(int(part) for part in sqlite3.sqlite_version.split(".")[:3])
+    if version >= SAFE_SQLITE_MINIMUM or version in PATCHED_SAFE_SQLITE_BUILDS:
+        return
+    raise RuntimeError(
+        "live run requires SQLite >= 3.51.3 or patched 3.50.7/3.44.6; "
+        f"runtime is {sqlite3.sqlite_version}"
+    )
 
 
 def require_complete_manifest_phase(manifest: dict) -> None:
@@ -192,7 +207,7 @@ def _validate_resume_identity(*, run_root: Path, manifest: dict, input_hash: str
     db_path = run_root / "state" / "progress.sqlite3"
     resume_phase = None
     if db_path.exists():
-        with sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)) as connection:
             phase_row = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_root.name,)).fetchone()
             resume_phase = str(phase_row[0]) if phase_row else None
     validation_profile = "COMPLETE" if manifest.get("complete") and resume_phase != "FINALIZING" else "FINALIZING" if resume_phase == "FINALIZING" else "ACTIVE_RESUME"
@@ -209,7 +224,7 @@ def _validate_resume_identity(*, run_root: Path, manifest: dict, input_hash: str
     if not db_path.exists():
         raise RuntimeError("resume SQLite is missing")
     uri = f"file:{db_path.resolve()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as connection:
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
         row = connection.execute("SELECT run_id,input_hash FROM runs WHERE run_id=?", (run_root.name,)).fetchone()
         if not row or row[0] != run_root.name or row[1] != input_hash:
             raise RuntimeError("resume SQLite identity mismatch")
@@ -342,6 +357,7 @@ def _durable_output_rows(run_id: str, fallback: dict[int, dict] | None = None) -
     rows = []
     for index in sorted(persisted):
         row = dict(persisted[index])
+        row.setdefault("run_id", run_id)
         state = item_state.get(index)
         if state:
             row.update({
@@ -461,6 +477,8 @@ def _run_pipeline_impl_body(
     _owned_lease: dict[str, Any] | None = None,
 ) -> str:
     previous_paid_enabled = bool(getattr(config, "PAID_ENABLED", True))
+    if os.getenv("B2B_TEST_OFFLINE") != "1":
+        require_safe_sqlite_for_live()
     if resume_run_dir:
         run_dir = Path(resume_run_dir)
     runtime.reset()
@@ -472,12 +490,20 @@ def _run_pipeline_impl_body(
     google_places.reset()
     start_time = time.monotonic()
     company_records = excel.read_company_records(input_file)
+    for original_index, record in enumerate(company_records):
+        record.setdefault("original_index", original_index)
     company_records, duplicate_count = deduplicate_company_records(company_records)
     for record in company_records:
         if not record.get("source_record_id"):
             source_id, quality = run_context.source_record_identity(record)
             record["source_record_id"] = source_id
             record["source_record_id_quality"] = quality
+        discovery_coverage.register_source(
+            record["source_record_id"],
+            company=record.get("company", ""),
+            original_index=record.get("original_index"),
+            stage="input",
+        )
     if duplicate_count:
         runtime.record("input.duplicates_removed", duplicate_count)
         logger.info("Removed %s duplicate company rows before processing", duplicate_count)
@@ -874,6 +900,7 @@ def _run_pipeline_impl_body(
                         row["attempt_number"] = 2
                 row["__index"] = idx
                 row.setdefault("source_record_id", company_records[idx].get("source_record_id", ""))
+                row.setdefault("original_index", company_records[idx].get("original_index", idx))
                 if company_records[idx].get("_id"):
                     row.setdefault("_id", company_records[idx]["_id"])
                 existing_item = item_states.get(idx, {})
@@ -1003,10 +1030,17 @@ def _run_pipeline_impl_body(
         if escalation and not allow_paid:
             if resume_phase == "FREE":
                 checkpoint.transition_phase(context.run_id, "PAID", expected_count=len(company_records))
-            # Freeze the exact SQLite snapshot before requesting approval.  No
-            # provider or preflight work is allowed after this boundary.
+            # Derive the last mutable telemetry view before sealing.  From this
+            # point through manifest publication no application-level reads or
+            # writes are allowed to alter the handoff state.
+            handoff_telemetry = checkpoint.derive_telemetry(context.run_id)
             checkpoint_path = run_root / "state" / "progress.sqlite3"
-            artifact_dir = run_root / "output" / "artifacts" / checkpoint.file_hash(checkpoint_path)
+            sealed = checkpoint.seal_checkpoint_for_handoff(
+                checkpoint_path,
+                run_id=context.run_id,
+                expected_count=len(company_records),
+            )
+            artifact_dir = run_root / "output" / "artifacts" / sealed["sha256"]
             artifact_dir.mkdir(parents=True, exist_ok=True)
             frozen_checkpoint = artifact_dir / "recovery_state.sqlite3"
             handoff_snapshot = checkpoint.create_handoff_snapshot(
@@ -1048,7 +1082,7 @@ def _run_pipeline_impl_body(
                     "files": files,
                     "checkpoint_sha256": frozen_hash,
                     "handoff": True,
-                    "telemetry": checkpoint.derive_telemetry(context.run_id),
+                    "telemetry": handoff_telemetry,
                 },
             )
             lease.release()

@@ -23,7 +23,7 @@ def _pct(count: int, total: int) -> str:
     return f"{(count / total * 100):.1f}%" if total else "0.0%"
 
 
-def build_report(rows: list[dict], elapsed_seconds: float, *, runtime_snapshot: dict | None = None) -> str:
+def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_snapshot: dict | None = None) -> str:
     total = len(rows)
     website_count = sum(1 for row in rows if row.get("website"))
     email_count = sum(1 for row in rows if row.get("email"))
@@ -49,7 +49,7 @@ def build_report(rows: list[dict], elapsed_seconds: float, *, runtime_snapshot: 
     ambiguous_count = sum(1 for row in rows if row.get("status") == "WEBSITE_AMBIGUOUS")
     scores = [int(row.get("score") or 0) for row in rows]
     average_score = mean(scores) if scores else 0
-    elapsed = str(timedelta(seconds=int(elapsed_seconds)))
+    elapsed = "unknown" if elapsed_seconds is None else str(timedelta(seconds=int(elapsed_seconds)))
     counters = (runtime_snapshot or {}).get("counters", {})
     brightdata_requests = int(counters.get("api.brightdata.requests", 0))
     linkedin_company_requests = int(counters.get("api.linkedin_company.requests", 0))
@@ -164,6 +164,8 @@ def build_report(rows: list[dict], elapsed_seconds: float, *, runtime_snapshot: 
                 "P6 discovery kapsami: "
                 f"cozulen={coverage['resolved_companies']}; "
                 f"acik={coverage['unresolved_companies']}; "
+                f"kaynak={coverage.get('source_count', 0)}; "
+                f"islenmemis={sum(1 for row in coverage.get('source_coverage', []) if row.get('status') == 'unprocessed')}; "
                 f"replay-eksigi={coverage['replay_miss_count']}; "
                 f"edinim-plani={len(coverage['acquisition_plan'])}"
             ),

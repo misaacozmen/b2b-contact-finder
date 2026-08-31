@@ -26,7 +26,8 @@ _DURABLE_BUDGETS: dict[str, int] = {}
 _CURRENT_ITEM_INDEX: ContextVar[int] = ContextVar("current_item_index", default=-1)
 _CURRENT_OPERATION: ContextVar[str] = ContextVar("current_operation", default="")
 _CURRENT_PROVIDER_OUTCOMES: ContextVar[tuple[dict, ...] | None] = ContextVar("current_provider_outcomes", default=None)
-_FREE_QUERY_COUNTS: dict[tuple[str, int], int] = {}
+_FREE_QUERY_COUNTS: dict[tuple[str, int, str], int] = {}
+_CURRENT_SEARCH_BUCKET: ContextVar[str] = ContextVar("current_search_bucket", default="")
 
 _PROVIDER_ALIASES = {
     "brightdata": "brightdata", "google_places": "google_places",
@@ -174,6 +175,7 @@ def reset() -> None:
         _FREE_QUERY_COUNTS = {}
     _CURRENT_ITEM_INDEX.set(-1)
     _CURRENT_OPERATION.set("")
+    _CURRENT_SEARCH_BUCKET.set("")
     _CURRENT_PROVIDER_OUTCOMES.set(None)
 
 
@@ -204,6 +206,15 @@ def paid_access_allowed(provider: str) -> bool:
 def set_item_context(item_index: int, operation: str = "") -> None:
     _CURRENT_ITEM_INDEX.set(int(item_index))
     _CURRENT_OPERATION.set(str(operation))
+
+
+def set_search_bucket(bucket: str = "") -> None:
+    value = str(bucket or "").casefold()
+    _CURRENT_SEARCH_BUCKET.set(value if value in {"discovery", "targeted"} else "")
+
+
+def search_bucket() -> str:
+    return _CURRENT_SEARCH_BUCKET.get()
 
 
 def request_fingerprint(provider: str, operation: str, request: object) -> str:
@@ -365,15 +376,18 @@ def reserve_crawler_http(budget: int) -> bool:
         return True
 
 
-def reserve_search_query(budget: int) -> bool:
+def reserve_search_query(budget: int, *, bucket: str | None = None) -> bool:
     """Atomically reserve one free query per durable (run,item), max ten."""
     item_index = _CURRENT_ITEM_INDEX.get()
     run_id = _DURABLE_RUN_ID or "volatile"
     limit = 10 if int(budget) <= 0 else min(10, int(budget))
+    bucket = str(bucket if bucket is not None else _CURRENT_SEARCH_BUCKET.get()).casefold()
+    if bucket not in {"discovery", "targeted"}:
+        bucket = ""
     if item_index >= 0 and _DURABLE_RUN_ID:
         checkpoint = importlib.import_module("modules.checkpoint")
         accepted = checkpoint.reserve_free_search_query(
-            run_id=_DURABLE_RUN_ID, item_index=item_index, limit=limit,
+            run_id=_DURABLE_RUN_ID, item_index=item_index, limit=limit, bucket=bucket,
         )
         if not accepted:
             record("http.search.budget_blocked")
@@ -381,8 +395,9 @@ def reserve_search_query(budget: int) -> bool:
         record("http.search.requests")
         return True
     with _LOCK:
-        key = (run_id, int(item_index))
-        if _FREE_QUERY_COUNTS.get(key, 0) >= limit:
+        key = (run_id, int(item_index), bucket)
+        bucket_limit = {"discovery": 6, "targeted": 4}.get(bucket, limit)
+        if _FREE_QUERY_COUNTS.get(key, 0) >= min(limit, bucket_limit):
             _COUNTERS["http.search.budget_blocked"] += 1
             return False
         _FREE_QUERY_COUNTS[key] = _FREE_QUERY_COUNTS.get(key, 0) + 1

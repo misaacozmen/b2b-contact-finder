@@ -395,6 +395,16 @@ def reconcile(*, original_input: Path, legacy_db: Path, recovery_run: Path, rema
         rows.append(row)
     if len(rows) != 893 or len({str(row.get("source_record_id")) for row in rows}) != 893:
         raise ValueError("reconciliation row identity coverage mismatch")
+    reconciliation_run_id = hashlib.sha256(
+        _canonical({
+            "original_input_sha256": _sha256(original_input),
+            "recovery_run_id": recovery_run.name,
+            "remaining_run_id": remaining_run.name,
+        }).encode()
+    ).hexdigest()
+    for index, row in enumerate(rows):
+        row["run_id"] = reconciliation_run_id
+        row["original_index"] = index
     output_artifacts.apply_global_identity_collision_gate(rows)
     for row in rows:
         if row.get("delivery_state") != "REMEDIATION_PENDING" and not output_artifacts.is_publishable_row(row):
@@ -402,7 +412,7 @@ def reconcile(*, original_input: Path, legacy_db: Path, recovery_run: Path, rema
     destination.mkdir(parents=True, exist_ok=False)
     _configure_output(destination)
     with _network_block():
-        result = output_artifacts.write_outputs(rows, 0.0, telemetry_snapshot={"generated_at": "2000-01-01T00:00:00+00:00", "counters": {}})
+        result = output_artifacts.write_outputs(rows, None, telemetry_snapshot={"generated_at": "unknown", "counters": {}})
     published = len(result.entity_memory_rows)
     counts = {"total": len(rows), "published": published, "review": len(rows) - published}
     lineage = {
@@ -413,6 +423,7 @@ def reconcile(*, original_input: Path, legacy_db: Path, recovery_run: Path, rema
         "remaining_run": {"path": str(remaining_run), "run_id": remaining_run.name, "manifest_sha256": _sha256(remaining_run / "manifest.json"), "config_sha256": remaining_manifest.get("config_sha256"), "source_tree_sha256": remaining_manifest.get("runtime_source_tree_sha256")},
     }
     manifest = _artifact_manifest(destination, result, lineage=lineage, counts=counts, pending=actual_pending)
+    manifest["reconciliation_run_id"] = reconciliation_run_id
     manifest_path = destination / "delivery_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     if actual_pending:

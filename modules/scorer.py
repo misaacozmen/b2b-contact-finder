@@ -508,8 +508,14 @@ def metadata_contexts(metadata: dict | None) -> list[str]:
     if not text:
         return []
 
+    source = normalize_text(str(metadata.get("source", "") or metadata.get("source_name", "")))
+    texhibition_context = "texhibition" in source
     contexts = []
     for context, details in config.METADATA_CONTEXTS.items():
+        if context.startswith("textile_") and not texhibition_context:
+            continue
+        if texhibition_context and context in {"baski", "elektronik"}:
+            continue
         aliases = (" ".join(_raw_company_tokens(alias)) for alias in details["aliases"])
         if any(alias and f" {alias} " in f" {text} " for alias in aliases):
             contexts.append(context)

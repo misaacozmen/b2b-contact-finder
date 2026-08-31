@@ -256,7 +256,8 @@ def test_owner_crash_takeover_run_isolation_and_snapshot_hydration(tmp_path: Pat
 
 
 def test_exact_command_config_and_run_id_reconcile_and_negative_tamper_cases(tmp_path: Path):
-    result = __import__("prepare_remaining_run").prepare_remaining_run(tmp_path)
+    from fixture_factory import remaining_run_sources
+    result = __import__("prepare_remaining_run").prepare_remaining_run(tmp_path, **remaining_run_sources())
     plan_path = Path(result["plan"])
     workbook_path = Path(result["workbook"])
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -285,7 +286,8 @@ def test_exact_command_config_and_run_id_reconcile_and_negative_tamper_cases(tmp
 
 @pytest.mark.parametrize("row_count", [158, 160])
 def test_remaining_plan_rejects_158_or_160_rows(tmp_path: Path, row_count: int):
-    result = __import__("prepare_remaining_run").prepare_remaining_run(tmp_path)
+    from fixture_factory import remaining_run_sources
+    result = __import__("prepare_remaining_run").prepare_remaining_run(tmp_path, **remaining_run_sources())
     workbook_path = Path(result["workbook"])
     plan_path = Path(result["plan"])
     workbook = Workbook()

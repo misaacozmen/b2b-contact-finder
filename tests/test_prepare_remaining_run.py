@@ -6,10 +6,12 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 import prepare_remaining_run as builder
+from fixture_factory import remaining_run_sources
 
 
 def test_prepare_remaining_run_exact_159_and_verify_only(tmp_path: Path):
-    first = builder.prepare_remaining_run(tmp_path)
+    sources = remaining_run_sources()
+    first = builder.prepare_remaining_run(tmp_path, **sources)
     workbook = load_workbook(first["workbook"], read_only=True, data_only=True)
     try:
         rows = list(workbook.active.iter_rows(values_only=True))
@@ -22,7 +24,7 @@ def test_prepare_remaining_run_exact_159_and_verify_only(tmp_path: Path):
     assert plan["selection"]["free_count"] == 2
     assert plan["selection"]["paid_count"] == 157
     assert plan["result_field_leakage"] == []
-    second = builder.prepare_remaining_run(tmp_path)
+    second = builder.prepare_remaining_run(tmp_path, **sources)
     assert second["verify_only"] is True
     assert second["workbook_sha256"] == first["workbook_sha256"]
     assert second["plan_sha256"] == first["plan_sha256"]

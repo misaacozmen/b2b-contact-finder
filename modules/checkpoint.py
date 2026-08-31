@@ -139,6 +139,10 @@ def _connect() -> sqlite3.Connection:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS free_query_usage (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, quota INTEGER NOT NULL, PRIMARY KEY(run_id,item_index))"
     )
+    query_columns = {row[1] for row in connection.execute("PRAGMA table_info(free_query_usage)")}
+    for name in ("discovery_used", "targeted_used"):
+        if name not in query_columns:
+            connection.execute(f"ALTER TABLE free_query_usage ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
     probe_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_probes)")}
     if "lease_expires_at" not in probe_columns:
         connection.execute("ALTER TABLE source_probes ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''")
@@ -199,19 +203,34 @@ def finish_source_probe(*, run_id: str, host: str, owner_token: str, snapshot: d
         connection.commit()
 
 
-def reserve_free_search_query(*, run_id: str, item_index: int, limit: int = 10) -> bool:
-    """Reserve one live free query atomically for exactly one item."""
+def reserve_free_search_query(*, run_id: str, item_index: int, limit: int = 10, bucket: str | None = None) -> bool:
+    """Reserve one live free query atomically for exactly one item.
+
+    An explicit intent gets six discovery slots or four targeted slots.  The
+    omitted bucket keeps the legacy ten-query total view for low-level callers.
+    """
     limit = max(1, min(10, int(limit)))
+    bucket = str(bucket or "").casefold()
+    if bucket not in {"discovery", "targeted"}:
+        bucket = ""
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota) VALUES(?,?,0,?)",
-            (run_id, int(item_index), limit),
+            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,discovery_used,targeted_used) VALUES(?,?,0,?,?,?)",
+            (run_id, int(item_index), limit, 0, 0),
         )
-        cursor = connection.execute(
-            "UPDATE free_query_usage SET used=used+1 WHERE run_id=? AND item_index=? AND used < quota",
-            (run_id, int(item_index)),
-        )
+        if bucket:
+            column = "discovery_used" if bucket == "discovery" else "targeted_used"
+            bucket_limit = 6 if bucket == "discovery" else 4
+            cursor = connection.execute(
+                f"UPDATE free_query_usage SET used=used+1,{column}={column}+1 WHERE run_id=? AND item_index=? AND used < quota AND {column} < ?",
+                (run_id, int(item_index), bucket_limit),
+            )
+        else:
+            cursor = connection.execute(
+                "UPDATE free_query_usage SET used=used+1 WHERE run_id=? AND item_index=? AND used < quota",
+                (run_id, int(item_index)),
+            )
         connection.commit()
         return cursor.rowcount == 1
 
@@ -241,6 +260,70 @@ def initialize_schema(path: Path | None = None) -> None:
         connection.close()
     finally:
         config.PROGRESS_DB_FILE = original
+
+
+def seal_checkpoint_for_handoff(
+    active_db: Path,
+    *,
+    run_id: str,
+    expected_count: int,
+) -> dict[str, Any]:
+    """Validate and seal an idle owned checkpoint before taking its snapshot.
+
+    This is the only handoff boundary that changes the live SQLite journal
+    mode.  It uses an explicit read/write connection with a zero busy timeout;
+    an active reader, writer, worker, or provider lease therefore fails closed.
+    No sidecar is removed by this function: SQLite removes its own WAL state
+    when the journal mode transition commits.
+    """
+    active_db = Path(active_db).resolve()
+    if not active_db.is_file():
+        raise FileNotFoundError(active_db)
+    uri = f"{active_db.as_uri()}?mode=rw"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=0)) as connection:
+            connection.execute("PRAGMA busy_timeout=0")
+            row = connection.execute("SELECT run_id,phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            if not row or str(row[0]) != str(run_id):
+                raise RuntimeError("handoff checkpoint run identity mismatch")
+            item_count, source_count = connection.execute(
+                "SELECT COUNT(*),COUNT(DISTINCT source_record_id) FROM run_items WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            result_count = connection.execute(
+                "SELECT COUNT(*) FROM results WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+            if int(item_count) != int(expected_count) or int(source_count) != int(expected_count) or int(result_count) != int(expected_count):
+                raise RuntimeError("handoff checkpoint coverage is not exact")
+            running_items = connection.execute(
+                "SELECT COUNT(*) FROM run_items WHERE run_id=? AND (free_state='RUNNING' OR paid_state='RUNNING')",
+                (run_id,),
+            ).fetchone()[0]
+            unresolved_calls = connection.execute(
+                "SELECT COUNT(*) FROM provider_calls WHERE run_id=? AND state IN ('RESERVED','RUNNING')",
+                (run_id,),
+            ).fetchone()[0]
+            running_probes = connection.execute(
+                "SELECT COUNT(*) FROM source_probes WHERE run_id=? AND state='RUNNING'",
+                (run_id,),
+            ).fetchone()[0]
+            if running_items or unresolved_calls or running_probes:
+                raise RuntimeError("handoff checkpoint is not idle")
+
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint and int(checkpoint[0]) != 0:
+                connection.rollback()
+                raise RuntimeError("handoff WAL checkpoint is busy")
+            journal_mode = str(connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).casefold()
+            if journal_mode != "delete":
+                connection.rollback()
+                raise RuntimeError("handoff checkpoint could not switch to DELETE journal mode")
+            connection.commit()
+    except sqlite3.Error as exc:
+        raise RuntimeError("handoff checkpoint requires an idle owned database") from exc
+    if any(Path(f"{active_db}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")):
+        raise RuntimeError("handoff checkpoint still has SQLite sidecars after sealing")
+    return {"sha256": file_hash(active_db), "bytes": active_db.stat().st_size, "run_id": str(run_id)}
 
 
 def create_handoff_snapshot(
@@ -294,14 +377,17 @@ def create_handoff_snapshot(
             source_items, source_results = snapshot_rows(source, selected_run_id)
             if expected_count is not None and len(source_items) != int(expected_count):
                 raise RuntimeError("handoff expected item count mismatch")
-            destination_tmp = sqlite3.connect(staging)
-            try:
+            with closing(sqlite3.connect(staging)) as destination_tmp:
+                journal_mode = str(destination_tmp.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).casefold()
+                if journal_mode != "delete":
+                    raise RuntimeError("handoff staging must use DELETE journal mode")
                 source.backup(destination_tmp)
                 destination_tmp.commit()
-            finally:
-                destination_tmp.close()
 
         with closing(sqlite3.connect(staging)) as staged:
+            journal_mode = str(staged.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).casefold()
+            if journal_mode != "delete":
+                raise RuntimeError("handoff staging must use DELETE journal mode")
             staged.execute("DELETE FROM replay_entries")
             staged.commit()
             staged.execute("VACUUM")
@@ -313,7 +399,6 @@ def create_handoff_snapshot(
             replay_count = int(staged.execute("SELECT COUNT(*) FROM replay_entries").fetchone()[0])
             if replay_count != 0:
                 raise RuntimeError("handoff staging still contains replay entries")
-            staged.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         os.replace(staging, destination)
     finally:
         for suffix in ("", "-wal", "-shm"):
@@ -828,14 +913,17 @@ def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, in
             evaluation.setdefault("has_contact", bool(payload.get("email") or payload.get("phone")))
             evaluation.setdefault("email", payload.get("email", ""))
             evaluation.setdefault("email_failed", "email_gate_failed" in str(payload.get("reason", "")))
-            decision = publication_policy.evaluate(
-                str(payload.get("company", "")),
-                evaluation,
-                str(payload.get("status", "")),
-                minimum_safety_score=int(getattr(config, "PUBLICATION_POLICY_MIN_SAFETY_SCORE", 75)),
-            )
-            payload["publication_eligible"] = bool(decision.get("eligible"))
-            blockers.extend(str(value) for value in decision.get("hard_blockers", []))
+            decision_input = dict(payload)
+            # HANDOFF_PENDING temporarily overwrote the final boolean; the
+            # release decision must recompute it from the preserved evidence.
+            if "HANDOFF_PENDING" in prior_blockers:
+                decision_input["publication_eligible"] = str(payload.get("status", "")) in publication_policy.OK_STATUSES
+            decision = publication_policy.decide_row(decision_input, evaluation)
+            payload["publication_eligible"] = bool(decision["publishable"])
+            payload["publication_advisory_eligible"] = bool(decision["advisory_eligible"])
+            payload["website_identity_verified"] = bool(decision["website_identity_verified"])
+            payload["allowed_contact_fields"] = "; ".join(decision["allowed_contact_fields"])
+            blockers.extend(str(value) for value in decision["blockers"])
             payload["publication_blockers"] = "; ".join(sorted(set(blockers)))
             safe_payload = json.dumps(_json_safe(redaction.sanitize(payload)), ensure_ascii=False, separators=(",", ":"))
             digest = hashlib.sha256(safe_payload.encode("utf-8")).hexdigest()

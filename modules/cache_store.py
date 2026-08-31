@@ -55,6 +55,7 @@ def load(
     schema_version: int,
     *,
     allow_stale: bool | None = None,
+    empty_ttl_days: float | None = None,
 ) -> Any | None:
     if allow_stale is None:
         allow_stale = (
@@ -154,7 +155,14 @@ def load(
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 age = datetime.now(timezone.utc) - created
-                if ttl_days >= 0 and age.total_seconds() > ttl_days * 86400:
+                value_ttl_days = ttl_days
+                if (
+                    empty_ttl_days is not None
+                    and isinstance(canonical_payload.get("value"), dict)
+                    and str(canonical_payload["value"].get("__search_result_state", "")).upper() == "EMPTY"
+                ):
+                    value_ttl_days = empty_ttl_days
+                if value_ttl_days >= 0 and age.total_seconds() > value_ttl_days * 86400:
                     if not allow_stale:
                         runtime.record(f"cache.{namespace}.expired")
                         return None

@@ -80,12 +80,12 @@ class CandidateList(list):
 
 
 class SearchResults(list):
-    def __init__(self, values=(), cache_status: str = "unknown", provider: str = "", *, result_state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = ()):
+    def __init__(self, values=(), cache_status: str = "unknown", provider: str = "", *, result_state: str = "EMPTY", reason: str = "", result_reason: str | None = None, call_ids: tuple[str, ...] = ()):
         super().__init__(values)
         self.cache_status = cache_status
         self.provider = provider
         self.result_state = str(result_state)
-        self.result_reason = str(reason)
+        self.result_reason = str(result_reason if result_reason is not None else reason)
         self.call_ids = tuple(str(value) for value in call_ids if value)
         runtime.record_provider_outcome(
             state=self.result_state, reason=self.result_reason,
@@ -361,21 +361,24 @@ def _canonical_site_url(raw_url: str) -> str:
     return discovery_rules.canonical_site_url(raw_url)
 
 
-def _ddgs_text(query: str) -> list[dict]:
-    if not runtime.reserve_search_query(config.SEARCH_HTTP_REQUEST_BUDGET):
+def _ddgs_text(query: str) -> SearchResults:
+    if not runtime.reserve_search_query(config.SEARCH_HTTP_REQUEST_BUDGET, bucket=runtime.search_bucket()):
         LOGGER.warning("Free search query budget exhausted: %s", query)
         raise SearchBudgetExhausted("Free search query budget exhausted")
-    runtime.wait_for_request_slot()
     had_non_error_response = False
     last_hard_error: Exception | None = None
 
     for backend in PREFERRED_BACKENDS + FALLBACK_BACKENDS:
         try:
+            # DDGS may make a separate physical request per backend.  Each
+            # attempt gets its own global limiter slot even though it consumes
+            # one logical free query reservation.
+            runtime.wait_for_request_slot()
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
             had_non_error_response = True
             if results:
-                return results
+                return SearchResults(results, "live", "ddgs", result_state="COMPLETED", reason=f"backend:{backend}")
             LOGGER.debug("DDGS backend '%s' returned 0 results for '%s'", backend, query)
         except DDGSException as exc:
             message = str(exc).lower()
@@ -391,7 +394,7 @@ def _ddgs_text(query: str) -> list[dict]:
 
     if last_hard_error and not had_non_error_response:
         raise SearchBackendError(f"All DDGS backends failed for '{query}': {last_hard_error}")
-    return []
+    return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="all_backends_empty")
 
 
 def _decode_brightdata_response(response: requests.Response) -> dict:
@@ -591,7 +594,7 @@ def _brightdata_text(query: str) -> list[dict]:
     return SearchResults(results, "live", "brightdata", result_state="COMPLETED" if results else "EMPTY", reason="results" if results else "empty_response", call_ids=tuple(call_ids))
 
 
-def _search_text_live(query: str) -> list[dict]:
+def _search_text_live(query: str) -> SearchResults:
     if config.SEARCH_PROVIDER == "brightdata":
         with _BRIGHTDATA_INFLIGHT:
             if _brightdata_circuit_open():
@@ -612,13 +615,47 @@ def _search_cache_key(query: str, provider: str | None = None) -> str:
             "gl": config.BRIGHTDATA_GOOGLE_GL if provider == "brightdata" else "",
             "hl": config.BRIGHTDATA_GOOGLE_HL if provider == "brightdata" else "",
             "zone": config.BRIGHTDATA_ZONE if provider == "brightdata" else "",
+            "cache_schema_version": config.CACHE_SCHEMA_VERSION,
         },
         sort_keys=True,
         ensure_ascii=False,
     )
 
 
-def _search_text(query: str) -> list[dict]:
+def _coerce_search_results(value, *, cache_status: str, provider: str) -> SearchResults:
+    if isinstance(value, SearchResults):
+        return SearchResults(
+            value, cache_status, value.provider or provider,
+            result_state=value.result_state,
+            reason=value.result_reason,
+            call_ids=value.call_ids,
+        )
+    if isinstance(value, dict) and value.get("__search_result_state"):
+        return SearchResults(
+            value.get("values", []) or [], cache_status,
+            str(value.get("provider") or provider),
+            result_state=str(value.get("__search_result_state") or "UNKNOWN"),
+            reason=str(value.get("result_reason") or ""),
+            call_ids=tuple(value.get("call_ids") or ()),
+        )
+    return SearchResults(
+        value or [], cache_status, provider,
+        result_state="COMPLETED" if value else "UNKNOWN",
+        reason="legacy_cache_metadata_unavailable" if value else "unknown_legacy_empty",
+    )
+
+
+def _cache_search_value(results: SearchResults) -> dict:
+    return {
+        "__search_result_state": results.result_state,
+        "values": list(results),
+        "provider": results.provider,
+        "result_reason": results.result_reason,
+        "call_ids": list(results.call_ids),
+    }
+
+
+def _search_text(query: str) -> SearchResults:
     """Search live or replay a provider response from the persistent cache."""
     mode = config.SEARCH_CACHE_MODE
     cache_key = _search_cache_key(query)
@@ -629,10 +666,16 @@ def _search_text(query: str) -> list[dict]:
             cache_key,
             config.SEARCH_CACHE_TTL_DAYS,
             config.CACHE_SCHEMA_VERSION,
+            empty_ttl_days=getattr(config, "SEARCH_EMPTY_CACHE_TTL_DAYS", 1 / 24),
         )
         if cached is not None:
             LOGGER.info("Search cache hit: %s", query)
-            return SearchResults(cached, "cache_hit", config.SEARCH_PROVIDER, result_state="CACHE_HIT", reason="cached")
+            if isinstance(cached, list) and not cached:
+                if mode == "replay":
+                    return SearchResults([], "replay_legacy_empty", config.SEARCH_PROVIDER, result_state="UNKNOWN", reason="unknown_legacy_empty")
+                cached = None
+            else:
+                return _coerce_search_results(cached, cache_status="cache_hit", provider=config.SEARCH_PROVIDER)
         if mode == "replay":
             # Offline reranking must not depend on which provider is enabled
             # in the interactive prompt. This fallback never runs in a mode
@@ -646,26 +689,29 @@ def _search_text(query: str) -> list[dict]:
                     _search_cache_key(query, provider),
                     config.SEARCH_CACHE_TTL_DAYS,
                     config.CACHE_SCHEMA_VERSION,
+                    empty_ttl_days=getattr(config, "SEARCH_EMPTY_CACHE_TTL_DAYS", 1 / 24),
                 )
                 if cached is not None:
                     LOGGER.info(
                         "Search replay cache fallback hit: query=%s provider=%s",
                         query, provider,
                     )
-                    return SearchResults(cached, "replay_fallback_hit", provider)
+                    if isinstance(cached, list) and not cached:
+                        return SearchResults([], "replay_legacy_empty", provider, result_state="UNKNOWN", reason="unknown_legacy_empty")
+                    return _coerce_search_results(cached, cache_status="replay_fallback_hit", provider=provider)
             LOGGER.warning("Search replay cache miss: %s", query)
-            return SearchResults([], "replay_miss")
+            return SearchResults([], "replay_miss", config.SEARCH_PROVIDER, result_state="UNKNOWN", reason="replay_miss")
 
-    results = _search_text_live(query)
-    if mode in {"use", "refresh"}:
+    results = _coerce_search_results(_search_text_live(query), cache_status="live", provider=config.SEARCH_PROVIDER)
+    if mode in {"use", "refresh"} and results.result_state in {"COMPLETED", "EMPTY"}:
         cache_store.save(
             config.SEARCH_CACHE_DIR,
             "serp",
             cache_key,
-            results,
+            _cache_search_value(results),
             config.CACHE_SCHEMA_VERSION,
         )
-    return SearchResults(results, "live", config.SEARCH_PROVIDER)
+    return results
 
 
 def _safe_search_text(query: str) -> list[dict]:
@@ -677,16 +723,13 @@ def _safe_search_text(query: str) -> list[dict]:
                 "search.circuit_fallback.success" if fallback
                 else "search.circuit_fallback.empty"
             )
-            return SearchResults(fallback, "circuit_fallback", "ddgs")
+            return _coerce_search_results(fallback, cache_status="circuit_fallback", provider="ddgs")
         except SearchBudgetExhausted:
             runtime.record("search.circuit_fallback.budget_blocked")
             return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="fallback_budget_exhausted")
     try:
         results = _search_text(query)
-        if (
-            config.SEARCH_PROVIDER == "brightdata"
-            and getattr(results, "cache_status", "") == "live"
-        ):
+        if config.SEARCH_PROVIDER == "brightdata" and getattr(results, "provider", "") == "brightdata" and getattr(results, "result_state", "") in {"COMPLETED", "EMPTY"}:
             _record_brightdata_result(True)
         return results
     except Exception as exc:
@@ -702,7 +745,7 @@ def _safe_search_text(query: str) -> list[dict]:
                     "search.fallback.success" if fallback
                     else "search.fallback.empty"
                 )
-                return SearchResults(fallback, "live_fallback", "ddgs")
+                return _coerce_search_results(fallback, cache_status="live_fallback", provider="ddgs")
             except SearchBudgetExhausted as fallback_exc:
                 LOGGER.warning("Free search fallback budget exhausted: %s (%s)", query, fallback_exc)
                 runtime.record("search.fallback.budget_blocked")
@@ -1875,9 +1918,12 @@ def _expand_search_bridge_candidates(
 
 
 def find_candidate_domains(company_name: str, metadata: dict | None = None) -> list[dict]:
+    source_record_id = str((metadata or {}).get("source_record_id", "") or "").strip()
+    original_index = (metadata or {}).get("original_index")
     if aliases.has_no_website(company_name):
         discovery_coverage.finalize_company(
             company_name, resolved=True, candidate_count=0,
+            source_record_id=source_record_id, original_index=original_index,
         )
         return CandidateList([], [{"source": "human_alias", "status": "verified_no_website"}])
     candidates_by_domain: dict[str, dict] = {}
@@ -1912,7 +1958,12 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         if not query or query in executed_queries:
             return []
         executed_queries.add(query)
-        results = _safe_search_text(query)
+        previous_bucket = runtime.search_bucket()
+        runtime.set_search_bucket("targeted" if phase == "evidence_completion" else "discovery")
+        try:
+            results = _safe_search_text(query)
+        finally:
+            runtime.set_search_bucket(previous_bucket)
         observed_gaps = evidence_gaps or _adaptive_discovery_gaps(
             company_name, candidates_by_domain, related_name_hints,
         )
@@ -1923,11 +1974,16 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             getattr(results, "cache_status", "unknown"),
             len(results),
             observed_gaps,
+            source_record_id=source_record_id,
+            original_index=original_index,
         )
         trace.append({
-            "source": config.SEARCH_PROVIDER, "query": query,
+            "source": getattr(results, "provider", "") or config.SEARCH_PROVIDER, "query": query,
             "phase": phase,
             "cache_status": getattr(results, "cache_status", "unknown"),
+            "result_state": getattr(results, "result_state", "UNKNOWN"),
+            "result_reason": getattr(results, "result_reason", ""),
+            "call_ids": list(getattr(results, "call_ids", ())),
             "result_count": len(results), "results": results,
         })
         for result in results:
@@ -2090,6 +2146,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             1 for item in candidates_by_domain.values()
             if item.get("role") not in DISCOVERY_ONLY_ROLES
         ),
+        source_record_id=source_record_id,
+        original_index=original_index,
     )
     return CandidateList(
         sorted(candidates_by_domain.values(), key=_candidate_rank_key, reverse=True),
@@ -2104,12 +2162,22 @@ def find_targeted_candidates(
     queries: list[str] | tuple[str, ...],
     *,
     limit: int = 2,
+    already_run: set[str] | tuple[str, ...] | list[str] = (),
 ) -> CandidateList:
     """Run bounded gap-specific discovery; results still require site proof."""
     candidates_by_domain: dict[str, dict] = {}
     trace: list[dict] = []
-    for query in list(dict.fromkeys(queries))[:max(0, int(limit))]:
-        results = _safe_search_text(query)
+    source_record_id = str((metadata or {}).get("source_record_id", "") or "").strip()
+    original_index = (metadata or {}).get("original_index")
+    attempted = {str(value).strip() for value in already_run if str(value).strip()}
+    planned_queries = [query for query in dict.fromkeys(queries) if query not in attempted]
+    for query in planned_queries[:max(0, int(limit))]:
+        previous_bucket = runtime.search_bucket()
+        runtime.set_search_bucket("targeted")
+        try:
+            results = _safe_search_text(query)
+        finally:
+            runtime.set_search_bucket(previous_bucket)
         discovery_coverage.record_query(
             company_name,
             query,
@@ -2117,6 +2185,8 @@ def find_targeted_candidates(
             getattr(results, "cache_status", "unknown"),
             len(results),
             {"post_crawl_evidence_gap"},
+            source_record_id=source_record_id,
+            original_index=original_index,
         )
         _add_search_results(
             candidates_by_domain, company_name, query, results, metadata,
@@ -2129,10 +2199,13 @@ def find_targeted_candidates(
             candidates_by_domain.pop(domain, None)
             runtime.record("search.candidate.mirror_rejected")
         trace.append({
-            "source": config.SEARCH_PROVIDER,
+            "source": getattr(results, "provider", "") or config.SEARCH_PROVIDER,
             "query": query,
             "phase": "evidence_completion",
             "cache_status": getattr(results, "cache_status", "unknown"),
+            "result_state": getattr(results, "result_state", "UNKNOWN"),
+            "result_reason": getattr(results, "result_reason", ""),
+            "call_ids": list(getattr(results, "call_ids", ())),
             "result_count": len(results),
         })
         runtime.record("autonomy.targeted_queries")

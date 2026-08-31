@@ -58,6 +58,16 @@ def test_negative_or_unavailable_legal_name_tokens_do_not_authorize_short_name()
 
 
 def test_exact_resolved_context_token_is_not_a_conflict():
+    context = {
+        "legal_ownership_verified": True,
+        "candidate_sector_compatible": True,
+        "independent_matches": [{
+            "kind": "phone",
+            "url": "https://example-textiles.example/contact",
+            "content_sha256": "a" * 64,
+            "source_record_id": "source:example",
+        }],
+    }
     for field in ("reason", "publication_blockers", "__evaluation"):
         row = _row()
         if field == "__evaluation":
@@ -65,9 +75,11 @@ def test_exact_resolved_context_token_is_not_a_conflict():
                 "identity_assessment": {"publishable": True, "conflicts": []},
                 "reasons": ["metadata_context_conflict_overridden_by_exact_compound_identity"],
                 "structured_domain_relation": {},
+                "context_resolution": context,
             }
         else:
             row[field] = "metadata_context_conflict_overridden_by_exact_compound_identity"
+            row["__evaluation"]["context_resolution"] = context
         assert is_publishable_row(row)
 
 

@@ -49,6 +49,10 @@ ALL_RESULTS_FILE = OUTPUT_DIR / "all_results.xlsx"
 MANIFEST_FILE = OUTPUT_DIR / "manifest.json"
 RUNS_DIR = BASE_DIR / "runs"
 RUN_SCHEMA_VERSION = 3
+CONFIG_SCHEMA_VERSION = 3
+METADATA_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 1
+CRAWL_CACHE_CAPABILITY_SCHEMA_VERSION = 1
 MAX_ZUCHEX_PAGES = max(1, int(os.getenv("MAX_ZUCHEX_PAGES", "1000")))
 MAX_TEXHIBITION_PAGES = max(1, int(os.getenv("MAX_TEXHIBITION_PAGES", "100")))
 ZUCHEX_VIEW_ID = os.getenv("ZUCHEX_VIEW_ID", "").strip()
@@ -72,8 +76,9 @@ MAX_WORKBOOK_CELL_CHARS = max(
 SEARCH_CACHE_MODE = os.getenv("SEARCH_CACHE_MODE", "off").lower()
 CRAWL_CACHE_MODE = os.getenv("CRAWL_CACHE_MODE", "off").lower()
 SEARCH_CACHE_TTL_DAYS = int(os.getenv("SEARCH_CACHE_TTL_DAYS", "30"))
+SEARCH_EMPTY_CACHE_TTL_DAYS = 1 / 24
 CRAWL_CACHE_TTL_DAYS = int(os.getenv("CRAWL_CACHE_TTL_DAYS", "7"))
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 # Crawl discovery changed independently from SERP/MX caches.  Keeping a
 # separate version refreshes official sites without invalidating paid search
 # results that are still reusable.
@@ -127,6 +132,7 @@ SEARCH_QUERY_TEMPLATES = [
 ]
 TARGET_COUNTRY = "TR"
 TARGET_COUNTRY_QUERY_TERMS = ["Turkiye"]
+LOCALE = os.getenv("B2B_LOCALE", "tr-TR")
 SEARCH_COUNTRY_QUERY_TEMPLATES = [
     "{company} {country} official website",
 ]
@@ -309,7 +315,7 @@ MAX_RETRY_AFTER_SEC = int(os.getenv("MAX_RETRY_AFTER_SEC", "30"))
 ENABLE_JS_FALLBACK = os.getenv("ENABLE_JS_FALLBACK", "0") == "1"
 ENABLE_JS_PROFILE_FALLBACK = os.getenv("ENABLE_JS_PROFILE_FALLBACK", "0") == "1"
 MAX_BROWSER_RENDER_WORKERS = max(
-    1, int(os.getenv("MAX_BROWSER_RENDER_WORKERS", "6"))
+    1, int(os.getenv("MAX_BROWSER_RENDER_WORKERS", "2"))
 )
 JS_RENDER_TIMEOUT_SEC = int(os.getenv("JS_RENDER_TIMEOUT_SEC", "20"))
 ENABLE_PDF_OCR = os.getenv("ENABLE_PDF_OCR", "0") == "1"
@@ -623,7 +629,32 @@ METADATA_CONTEXTS = {
         "query_term": "tekstil",
         "aliases": [
             "tekstil", "giyim", "moda", "fashion", "clothing", "apparel", "garment",
-            "ready to wear", "hazir giyim", "triko",
+            "ready to wear", "ready-to-wear", "hazir giyim", "triko", "textile",
+            "fabric", "fabrics", "kumas", "kumaş", "yarn", "iplik", "knitwear",
+            "woven", "home textile", "ev tekstili", "textile finishing", "terbiye",
+            "dyeing", "boyahane", "denim", "nonwoven", "dokuma", "orme",
+        ],
+    },
+    "textile_accessories": {
+        "query_term": "textile accessories",
+        "aliases": [
+            "textile accessories", "textile accessory", "tekstil aksesuar",
+            "tekstil aksesuarları", "accessories", "trims", "buttons", "zippers",
+            "etiket", "labels", "label", "zipper", "button",
+        ],
+    },
+    "textile_printing": {
+        "query_term": "textile printing",
+        "aliases": [
+            "textile printing", "tekstil baskı", "tekstil baski", "digital printing",
+            "textile print", "screen printing", "rotary printing", "baski",
+        ],
+    },
+    "textile_digital": {
+        "query_term": "digital textile",
+        "aliases": [
+            "digital textile", "digital textiles", "textile digital", "dijital tekstil",
+            "digital", "dijital",
         ],
     },
     "ev_mutfak": {

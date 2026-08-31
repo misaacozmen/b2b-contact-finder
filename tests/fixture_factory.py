@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook
+
+import config
+from modules import checkpoint, run_context
 
 
 def root() -> Path:
@@ -104,3 +110,114 @@ def golden(number: int) -> Path:
     names = {3: ("golden_3_20260715", "golden_3_manual_validation_15.xlsx"), 4: ("golden_4_20260715", "golden_4_manual_validation_15.xlsx"), 5: ("golden_5_20260716", "golden_5_manual_validation_20_ready.xlsx"), 6: ("golden_6_20260718", "golden_6_manual_validation_20_ready.xlsx")}
     directory, filename = names[number]
     return path("outputs", directory, filename)
+
+
+def remaining_run_sources() -> dict[str, Path]:
+    """Create a disposable 893-row parent/recovery package for continuation tests."""
+    base = root() / "remaining_run_sources"
+    original_input = base / "input" / "firms.xlsx"
+    run_id = "synthetic_remaining_run_20260831"
+    run_root = base / "runs" / run_id
+    recovery_db = run_root / "output" / "artifacts" / "fixture" / "recovery_state.sqlite3"
+    parent_manifest = run_root / "manifest.json"
+    source_mapping = recovery_db.with_name("source_id_mapping.json")
+    ready = base / ".ready"
+    if ready.exists():
+        return {
+            "original_input": original_input,
+            "recovery_db": recovery_db,
+            "parent_manifest": parent_manifest,
+            "source_mapping": source_mapping,
+        }
+
+    headers = [
+        "company", "source", "country", "website", "listed_website", "sector",
+        "profile_url", "description", "listing_url", "brands", "representations",
+        "listed_phone", "listed_email", "listed_address", "hall", "stand",
+    ]
+    rows = []
+    mappings = []
+    for index in range(893):
+        source_id = f"synthetic_2026:{index:04d}"
+        rows.append({
+            "company": f"Synthetic Firm {index:04d}",
+            "source": "synthetic_fixture_2026",
+            "country": "Türkiye",
+            "website": "",
+            "listed_website": "",
+            "sector": "textile",
+            "profile_url": f"https://synthetic.example/profile/{index:04d}",
+            "description": "Synthetic continuation fixture",
+            "listing_url": f"https://synthetic.example/listing/{index:04d}",
+            "brands": "",
+            "representations": "",
+            "listed_phone": "",
+            "listed_email": "",
+            "listed_address": "",
+            "hall": "",
+            "stand": "",
+        })
+    _write(original_input, headers, rows)
+    input_records = __import__("modules.excel", fromlist=["read_company_records"]).read_company_records(original_input)
+    for index, record in enumerate(input_records):
+        mappings.append({
+            "legacy_index": index,
+            "canonical_source_record_id": f"synthetic_2026:{index:04d}",
+            "input_row_sha256": hashlib.sha256(run_context.canonical_json(record).encode("utf-8")).hexdigest(),
+        })
+    mapping_payload = {"schema_version": 1, "mappings": mappings}
+    mapping_payload["mapping_sha256"] = hashlib.sha256(
+        run_context.canonical_json(mapping_payload).encode("utf-8")
+    ).hexdigest()
+    source_mapping.parent.mkdir(parents=True, exist_ok=True)
+    source_mapping.write_text(json.dumps(mapping_payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+    items = []
+    results = []
+    for index in range(893):
+        selected_free = index < 2
+        selected_paid = 2 <= index < 159
+        source_id = f"synthetic_2026:{index:04d}"
+        payload = json.dumps({
+            "company": f"Synthetic Firm {index:04d}",
+            "source_record_id": source_id,
+            "publication_eligible": False,
+            "publication_blockers": "synthetic_fixture_pending",
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        items.append({
+            "item_index": index,
+            "source_record_id": source_id,
+            "free_state": "PENDING" if selected_free else "DONE",
+            "paid_required": 1 if selected_paid else 0,
+            "paid_state": "PENDING" if selected_paid else "NOT_REQUIRED",
+            "payload_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            "publication_blockers": "synthetic_fixture_pending",
+        })
+        results.append({"item_index": index, "payload": payload})
+    budgets = {provider: 0 for provider in checkpoint.CANONICAL_PROVIDERS}
+    with patch.object(config, "PROGRESS_DB_FILE", recovery_db):
+        checkpoint.seed_recovered_run(
+            path=recovery_db,
+            run_id=run_id,
+            input_hash=hashlib.sha256(original_input.read_bytes()).hexdigest(),
+            run_signature="synthetic_remaining_fixture",
+            context={"phase": "FREE", "seed_timestamp": "2026-08-31T00:00:00+00:00"},
+            budgets=budgets,
+            items=items,
+            results=results,
+        )
+    manifest = {
+        "version": 1,
+        "run_id": run_id,
+        "input_sha256": hashlib.sha256(original_input.read_bytes()).hexdigest(),
+        "checkpoint_sha256": hashlib.sha256(recovery_db.read_bytes()).hexdigest(),
+        "artifact_set_sha256": "synthetic-artifact-set-sha256",
+    }
+    parent_manifest.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    ready.write_text("ready", encoding="utf-8")
+    return {
+        "original_input": original_input,
+        "recovery_db": recovery_db,
+        "parent_manifest": parent_manifest,
+        "source_mapping": source_mapping,
+    }
