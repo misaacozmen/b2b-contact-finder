@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from openpyxl import Workbook
+import pytest
 
 from tools.assemble_a8_package import PACKAGE_ID_ALGORITHM, canonical_hash, file_spec
 from validate_benchmark_suite import _validate_actual_manifest, validate_package_integrity
@@ -74,13 +75,18 @@ def test_handoff_actual_is_structural_failure(tmp_path: Path):
     assert any("not a finalized" in issue for issue in issues)
 
 
-def test_assembler_requires_clean_worktree():
+def test_assembler_requires_clean_worktree(monkeypatch):
     from tools.assemble_a8_package import _git_identity
     import tools.assemble_a8_package as assembler
+    from types import SimpleNamespace
+
     root = Path(assembler.__file__).resolve().parents[1]
-    try:
+
+    def fake_run(command, **_kwargs):
+        if command[1:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="deadbeef\n")
+        return SimpleNamespace(stdout=" M test-fixture\n")
+
+    monkeypatch.setattr(assembler.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="clean worktree"):
         _git_identity(root)
-    except RuntimeError as exc:
-        assert "clean worktree" in str(exc)
-    else:
-        raise AssertionError("uncommitted worktree was accepted for immutable assembly")
