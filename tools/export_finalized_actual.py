@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import sys
+from openpyxl import load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from modules import excel
+from modules import excel, publication_policy
 
 
 PAID_PROVIDER_BUDGETS = {
@@ -45,6 +46,69 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"JSON object required: {path}")
     return payload
+
+
+def _read_final_decisions(
+    evidence_path: Path,
+    expected_ids: list[str],
+    *,
+    run_id: str,
+) -> dict[str, dict[str, Any]]:
+    decisions: dict[str, dict[str, Any]] = {}
+    with evidence_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise RuntimeError(f"final evidence line {line_number} is not an object")
+            source_id = str(record.get("source_record_id") or "").strip()
+            decision = record.get("publication_decision")
+            if not source_id or not isinstance(decision, dict) or source_id in decisions:
+                raise RuntimeError(f"final evidence decision coverage is invalid at line {line_number}")
+            publication_policy.verify_publication_decision(
+                decision,
+                source_record_id=source_id,
+                run_id=run_id,
+            )
+            decisions[source_id] = decision
+    if list(decisions) != expected_ids:
+        raise RuntimeError("final evidence decision order/set does not match expected workbook")
+    return decisions
+
+
+def _attach_decisions_to_workbook(
+    workbook_path: Path,
+    expected_ids: list[str],
+    decisions: dict[str, dict[str, Any]],
+) -> None:
+    workbook = load_workbook(workbook_path)
+    try:
+        sheet = workbook.active
+        headers = [str(cell.value or "").strip() for cell in sheet[1]]
+        if "source_record_id" not in headers:
+            raise RuntimeError("actual workbook has no source_record_id column")
+        source_index = headers.index("source_record_id") + 1
+        decision_index = headers.index("publication_decision") + 1 if "publication_decision" in headers else sheet.max_column + 1
+        if "publication_decision" not in headers:
+            sheet.cell(row=1, column=decision_index, value="publication_decision")
+        rows_by_id: dict[str, int] = {}
+        for row_number in range(2, sheet.max_row + 1):
+            source_id = str(sheet.cell(row=row_number, column=source_index).value or "").strip()
+            if not source_id or source_id in rows_by_id:
+                raise RuntimeError("actual workbook source ID coverage is invalid")
+            rows_by_id[source_id] = row_number
+        if list(rows_by_id) != expected_ids:
+            raise RuntimeError("actual workbook source ID order/set changed while attaching decisions")
+        for source_id in expected_ids:
+            sheet.cell(
+                row=rows_by_id[source_id],
+                column=decision_index,
+                value=json.dumps(decisions[source_id], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+        workbook.save(workbook_path)
+    finally:
+        workbook.close()
 
 
 def _runtime_snapshot(connection: sqlite3.Connection, run_id: str) -> dict[str, Any]:
@@ -82,8 +146,11 @@ def export_actual(
     artifact_hash = str(manifest.get("artifact_set_sha256") or "")
     artifact_dir = run_dir / "output" / "artifacts" / artifact_hash
     source_workbook = artifact_dir / "all_results.xlsx"
+    evidence_path = artifact_dir / "evidence.jsonl"
     if not artifact_hash or not source_workbook.is_file():
         raise RuntimeError("completed run all_results.xlsx artifact is missing")
+    if not evidence_path.is_file():
+        raise RuntimeError("completed run final evidence.jsonl artifact is missing")
 
     expected_ids = [str(row.get("source_record_id") or "").strip() for row in excel.read_company_records(expected)]
     actual_ids = [str(row.get("source_record_id") or "").strip() for row in excel.read_company_records(source_workbook)]
@@ -133,6 +200,16 @@ def export_actual(
         connection.close()
 
     counters = runtime.get("counters") if isinstance(runtime.get("counters"), dict) else {}
+    run_config_sha256 = str(manifest.get("config_sha256") or "")
+    decisions = _read_final_decisions(
+        evidence_path,
+        expected_ids,
+        run_id=str(manifest["run_id"]),
+    )
+    decision_config_hashes = {str(decision.get("config_sha256") or "") for decision in decisions.values()}
+    if len(decision_config_hashes) != 1 or not next(iter(decision_config_hashes), ""):
+        raise RuntimeError("final evidence decisions do not share one config SHA-256")
+    config_sha256 = next(iter(decision_config_hashes))
     actual_manifest = {
         "schema_version": 3,
         "status": "complete_free_only",
@@ -143,7 +220,8 @@ def export_actual(
         "source_record_ids": expected_ids,
         "source_record_ids_sha256": _canonical_hash(expected_ids),
         "expected_sha256": _sha256(expected),
-        "config_sha256": str(manifest.get("config_sha256") or ""),
+        "config_sha256": config_sha256,
+        "run_config_sha256": run_config_sha256,
         "runtime_source_tree_sha256": runtime_sha256,
         "artifact_set_sha256": artifact_hash,
         "provider_calls": provider_calls,
@@ -166,6 +244,7 @@ def export_actual(
 
     destination.mkdir(parents=True)
     shutil.copy2(source_workbook, destination / "all_results.xlsx")
+    _attach_decisions_to_workbook(destination / "all_results.xlsx", expected_ids, decisions)
     (destination / "checkpoint_results.jsonl").write_text(
         "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in checkpoint_records),
         encoding="utf-8",
