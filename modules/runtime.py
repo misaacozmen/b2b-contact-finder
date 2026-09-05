@@ -24,6 +24,7 @@ _PHASE = "FREE"
 _DURABLE_RUN_ID = ""
 _DURABLE_BUDGETS: dict[str, int] = {}
 _CURRENT_ITEM_INDEX: ContextVar[int] = ContextVar("current_item_index", default=-1)
+_CURRENT_SOURCE_RECORD_ID: ContextVar[str] = ContextVar("current_source_record_id", default="")
 _CURRENT_OPERATION: ContextVar[str] = ContextVar("current_operation", default="")
 _CURRENT_PROVIDER_OUTCOMES: ContextVar[tuple[dict, ...] | None] = ContextVar("current_provider_outcomes", default=None)
 _FREE_QUERY_COUNTS: dict[tuple[str, int, str], int] = {}
@@ -174,6 +175,7 @@ def reset() -> None:
         _DURABLE_BUDGETS = {}
         _FREE_QUERY_COUNTS = {}
     _CURRENT_ITEM_INDEX.set(-1)
+    _CURRENT_SOURCE_RECORD_ID.set("")
     _CURRENT_OPERATION.set("")
     _CURRENT_SEARCH_BUCKET.set("")
     _CURRENT_PROVIDER_OUTCOMES.set(None)
@@ -203,9 +205,10 @@ def paid_access_allowed(provider: str) -> bool:
     return _default_budget(canonical) > 0
 
 
-def set_item_context(item_index: int, operation: str = "") -> None:
+def set_item_context(item_index: int, operation: str = "", source_record_id: str = "") -> None:
     _CURRENT_ITEM_INDEX.set(int(item_index))
     _CURRENT_OPERATION.set(str(operation))
+    _CURRENT_SOURCE_RECORD_ID.set(str(source_record_id or "").strip())
 
 
 def set_search_bucket(bucket: str = "") -> None:
@@ -387,7 +390,8 @@ def reserve_search_query(budget: int, *, bucket: str | None = None) -> bool:
     if item_index >= 0 and _DURABLE_RUN_ID:
         checkpoint = importlib.import_module("modules.checkpoint")
         accepted = checkpoint.reserve_free_search_query(
-            run_id=_DURABLE_RUN_ID, item_index=item_index, limit=limit, bucket=bucket,
+            run_id=_DURABLE_RUN_ID, item_index=item_index,
+            source_record_id=_CURRENT_SOURCE_RECORD_ID.get(), limit=limit, bucket=bucket,
         )
         if not accepted:
             record("http.search.budget_blocked")

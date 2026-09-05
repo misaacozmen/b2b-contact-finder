@@ -9,6 +9,7 @@ import sqlite3
 import os
 import uuid
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -58,9 +59,13 @@ def _run_id(input_hash: str, run_signature: str) -> str:
     return hashlib.sha256(f"{input_hash}\0{run_signature}".encode("utf-8")).hexdigest()
 
 
-def _connect() -> sqlite3.Connection:
+_SCHEMA_CONNECTIONS: dict[int, list[sqlite3.Connection]] = {}
+
+
+def _connect_impl() -> sqlite3.Connection:
     config.PROGRESS_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(config.PROGRESS_DB_FILE, timeout=30)
+    _SCHEMA_CONNECTIONS.setdefault(threading.get_ident(), []).append(connection)
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=FULL")
     connection.execute(
@@ -137,9 +142,41 @@ def _connect() -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS source_probes (run_id TEXT NOT NULL, host TEXT NOT NULL, state TEXT NOT NULL, owner_token TEXT NOT NULL DEFAULT '', snapshot_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, lease_expires_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(run_id,host))"
     )
     connection.execute(
-        "CREATE TABLE IF NOT EXISTS free_query_usage (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, quota INTEGER NOT NULL, PRIMARY KEY(run_id,item_index))"
+        "CREATE TABLE IF NOT EXISTS free_query_usage (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, item_index INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, quota INTEGER NOT NULL, PRIMARY KEY(run_id,source_record_id), UNIQUE(run_id,item_index))"
     )
     query_columns = {row[1] for row in connection.execute("PRAGMA table_info(free_query_usage)")}
+    if "source_record_id" not in query_columns:
+        old_columns = query_columns
+        extra_columns = [name for name in ("discovery_used", "targeted_used") if name in old_columns]
+        select_columns = ",".join(["run_id", "item_index", "used", "quota", *extra_columns])
+        legacy_rows = connection.execute(
+            f"SELECT {select_columns} FROM free_query_usage"
+        ).fetchall()
+        migrated: list[tuple] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for values in legacy_rows:
+            run_id, item_index, used, quota, *extras = values
+            discovery_used = extras[extra_columns.index("discovery_used")] if "discovery_used" in extra_columns else 0
+            targeted_used = extras[extra_columns.index("targeted_used")] if "targeted_used" in extra_columns else 0
+            source_row = connection.execute(
+                "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
+                (run_id, item_index),
+            ).fetchone()
+            source_id = str(source_row[0] if source_row else "").strip()
+            if not source_id or (str(run_id), source_id) in seen_keys:
+                raise RuntimeError("free_query_usage legacy row cannot be mapped to a unique source_record_id")
+            seen_keys.add((str(run_id), source_id))
+            migrated.append((run_id, source_id, item_index, used, quota, discovery_used, targeted_used))
+        connection.execute(
+            "CREATE TABLE free_query_usage_v2 (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, item_index INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, quota INTEGER NOT NULL, discovery_used INTEGER NOT NULL DEFAULT 0, targeted_used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(run_id,source_record_id), UNIQUE(run_id,item_index))"
+        )
+        connection.executemany(
+            "INSERT INTO free_query_usage_v2(run_id,source_record_id,item_index,used,quota,discovery_used,targeted_used) VALUES(?,?,?,?,?,?,?)",
+            migrated,
+        )
+        connection.execute("DROP TABLE free_query_usage")
+        connection.execute("ALTER TABLE free_query_usage_v2 RENAME TO free_query_usage")
+        query_columns = {row[1] for row in connection.execute("PRAGMA table_info(free_query_usage)")}
     for name in ("discovery_used", "targeted_used"):
         if name not in query_columns:
             connection.execute(f"ALTER TABLE free_query_usage ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
@@ -147,7 +184,23 @@ def _connect() -> sqlite3.Connection:
     if "lease_expires_at" not in probe_columns:
         connection.execute("ALTER TABLE source_probes ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''")
     connection.commit()
+    _SCHEMA_CONNECTIONS.get(threading.get_ident(), []).remove(connection)
     return connection
+
+
+def _connect() -> sqlite3.Connection:
+    """Close a partially migrated schema connection on every error path."""
+    thread_id = threading.get_ident()
+    try:
+        return _connect_impl()
+    except BaseException:
+        for connection in _SCHEMA_CONNECTIONS.pop(thread_id, []):
+            try:
+                connection.rollback()
+                connection.close()
+            except sqlite3.Error:
+                pass
+        raise
 
 
 def claim_source_probe(*, run_id: str, host: str) -> dict[str, Any]:
@@ -203,7 +256,7 @@ def finish_source_probe(*, run_id: str, host: str, owner_token: str, snapshot: d
         connection.commit()
 
 
-def reserve_free_search_query(*, run_id: str, item_index: int, limit: int = 10, bucket: str | None = None) -> bool:
+def reserve_free_search_query(*, run_id: str, item_index: int, source_record_id: str = "", limit: int = 10, bucket: str | None = None) -> bool:
     """Reserve one live free query atomically for exactly one item.
 
     An explicit intent gets six discovery slots or four targeted slots.  The
@@ -215,21 +268,51 @@ def reserve_free_search_query(*, run_id: str, item_index: int, limit: int = 10, 
         bucket = ""
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        source_id = str(source_record_id or "").strip()
+        source_row = connection.execute(
+            "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
+            (run_id, int(item_index)),
+        ).fetchone()
+        if source_row and str(source_row[0]) != source_id:
+            connection.rollback()
+            raise RuntimeError("free_query_usage source_record_id/item_index invariant mismatch")
+        if not source_id:
+            source_id = str(source_row[0] if source_row else "").strip()
+        if not source_id:
+            connection.rollback()
+            raise ValueError("free query reservation requires source_record_id")
         connection.execute(
-            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,discovery_used,targeted_used) VALUES(?,?,0,?,?,?)",
-            (run_id, int(item_index), limit, 0, 0),
+            "INSERT OR IGNORE INTO free_query_usage(run_id,source_record_id,item_index,used,quota,discovery_used,targeted_used) VALUES(?,?,?,0,?,?,?)",
+            (run_id, source_id, int(item_index), limit, 0, 0),
         )
+        persisted_by_source = connection.execute(
+            "SELECT source_record_id,item_index FROM free_query_usage WHERE run_id=? AND source_record_id=?",
+            (run_id, source_id),
+        ).fetchone()
+        persisted_by_index = connection.execute(
+            "SELECT source_record_id,item_index FROM free_query_usage WHERE run_id=? AND item_index=?",
+            (run_id, int(item_index)),
+        ).fetchone()
+        if (
+            not persisted_by_source
+            or str(persisted_by_source[0]) != source_id
+            or int(persisted_by_source[1]) != int(item_index)
+            or not persisted_by_index
+            or str(persisted_by_index[0]) != source_id
+        ):
+            connection.rollback()
+            raise RuntimeError("free_query_usage source_record_id/item_index invariant mismatch")
         if bucket:
             column = "discovery_used" if bucket == "discovery" else "targeted_used"
             bucket_limit = 6 if bucket == "discovery" else 4
             cursor = connection.execute(
-                f"UPDATE free_query_usage SET used=used+1,{column}={column}+1 WHERE run_id=? AND item_index=? AND used < quota AND {column} < ?",
-                (run_id, int(item_index), bucket_limit),
+                f"UPDATE free_query_usage SET used=used+1,{column}={column}+1 WHERE run_id=? AND source_record_id=? AND used < quota AND {column} < ?",
+                (run_id, source_id, bucket_limit),
             )
         else:
             cursor = connection.execute(
-                "UPDATE free_query_usage SET used=used+1 WHERE run_id=? AND item_index=? AND used < quota",
-                (run_id, int(item_index)),
+                "UPDATE free_query_usage SET used=used+1 WHERE run_id=? AND source_record_id=? AND used < quota",
+                (run_id, source_id),
             )
         connection.commit()
         return cursor.rowcount == 1
@@ -816,6 +899,57 @@ def freeze_paid_queue(run_id: str, item_indexes: list[int] | None = None) -> lis
     return indexes
 
 
+def finalize_free_only_queue(run_id: str) -> dict[str, int]:
+    """Atomically skip the recommended paid queue without running a provider."""
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        phase_row = connection.execute("SELECT phase,context_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if not phase_row or str(phase_row[0]) != "FREE":
+            connection.rollback()
+            raise RuntimeError("free-only finalization requires FREE phase")
+        context = json.loads(phase_row[1] or "{}")
+        rows = connection.execute(
+            "SELECT item_index,paid_required,paid_state FROM run_items WHERE run_id=? ORDER BY item_index",
+            (run_id,),
+        ).fetchall()
+        recommended = 0
+        for item_index, paid_required, paid_state in rows:
+            if int(paid_required) and str(paid_state) == "PENDING":
+                recommended += 1
+            payload_row = connection.execute(
+                "SELECT payload FROM results WHERE run_id=? AND item_index=?",
+                (run_id, int(item_index)),
+            ).fetchone()
+            if not payload_row:
+                connection.rollback()
+                raise RuntimeError("free-only finalization requires a result for every item")
+            payload = json.loads(str(payload_row[0]))
+            if int(paid_required) and str(paid_state) == "PENDING":
+                payload["paid_recommended"] = True
+                payload["paid_skipped_reason"] = "disabled_by_explicit_free_only_finalization"
+            safe_payload = json.dumps(_json_safe(redaction.sanitize(payload)), ensure_ascii=False, separators=(",", ":"))
+            digest = hashlib.sha256(safe_payload.encode("utf-8")).hexdigest()
+            connection.execute(
+                "UPDATE results SET payload=? WHERE run_id=? AND item_index=?",
+                (safe_payload, run_id, int(item_index)),
+            )
+            connection.execute(
+                "UPDATE run_items SET paid_required=0,paid_state='NOT_REQUIRED',payload_sha256=? WHERE run_id=? AND item_index=?",
+                (digest, run_id, int(item_index)),
+            )
+        context.update({
+            "free_only_finalization": True,
+            "paid_queue_frozen": True,
+            "paid_queue_indexes": [int(item_index) for item_index, paid_required, paid_state in rows if int(paid_required) and str(paid_state) == "PENDING"],
+        })
+        connection.execute(
+            "UPDATE runs SET context_json=?,updated_at=? WHERE run_id=?",
+            (json.dumps(_json_safe(context), ensure_ascii=False), datetime.now(timezone.utc).isoformat(timespec="seconds"), run_id),
+        )
+        connection.commit()
+    return {"paid_recommended": recommended, "paid_provider_calls": 0}
+
+
 def mark_handoff_pending(*, run_id: str, expected_count: int) -> dict[str, int]:
     """Quarantine the complete free snapshot in one durable handoff transaction."""
     with closing(_connect()) as connection:
@@ -902,6 +1036,7 @@ def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, in
                 raise RuntimeError("permanent recovery quarantine cannot be released")
             payload["quarantine_state"] = ""
             payload["quarantine_status"] = ""
+            payload["run_id"] = run_id
             blockers: list[str] = []
             evaluation = dict(payload.get("__evaluation") if isinstance(payload.get("__evaluation"), dict) else {})
             if payload.get("identity_resolution"):
@@ -918,7 +1053,12 @@ def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, in
             # release decision must recompute it from the preserved evidence.
             if "HANDOFF_PENDING" in prior_blockers:
                 decision_input["publication_eligible"] = str(payload.get("status", "")) in publication_policy.OK_STATUSES
-            decision = publication_policy.decide_row(decision_input, evaluation)
+            decision = publication_policy.freeze_publication_decision(
+                decision_input, evaluation,
+                config_sha256=str(payload.get("config_sha256") or payload.get("run_config_sha256") or ""),
+            )
+            payload["publication_decision"] = decision
+            payload["publication_decision_sha256"] = decision["publication_decision_sha256"]
             payload["publication_eligible"] = bool(decision["publishable"])
             payload["publication_advisory_eligible"] = bool(decision["advisory_eligible"])
             payload["website_identity_verified"] = bool(decision["website_identity_verified"])

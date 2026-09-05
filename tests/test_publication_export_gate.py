@@ -18,6 +18,20 @@ from modules import (
     quality_audit,
     report,
 )
+from decision_fixtures import frozen_row
+
+
+def _strong_evaluation(url: str) -> dict:
+    return {
+        "candidate": {"url": url, "role": "company_candidate"},
+        "reasons": ["page_identity_strong:2/2", "legal_name_phrase_match:2", "country_identity_tr_tld", "email_domain_match"],
+        "identity_assessment": {
+            "conflicts": [], "support_count": 2, "publishable": True,
+            "provisionally_publishable": True, "strong_first_party_bundle": True,
+            "first_party_bundle_components": 3, "decision": "verified",
+        },
+        "has_contact": True,
+    }
 
 
 class PublicationExportGateTests(unittest.TestCase):
@@ -96,7 +110,7 @@ class PublicationExportGateTests(unittest.TestCase):
             ):
                 discovery_coverage.reset()
 
-                shadow_row = {
+                shadow_row = frozen_row({
                     "company": "Shadow Corp",
                     "status": "OK_HIGH_CONFIDENCE",
                     "publication_eligible": False,
@@ -109,7 +123,7 @@ class PublicationExportGateTests(unittest.TestCase):
                         "identity_assessment": {"conflicts": []},
                         "crawl": {"pages": ["https://shadow.com"]},
                     },
-                }
+                }, "test:shadow", publishable=False)
 
                 # 1. Candidate stage must not be published
                 candidates = [
@@ -197,7 +211,7 @@ class PublicationExportGateTests(unittest.TestCase):
             ):
                 discovery_coverage.reset()
 
-                valid_row = {
+                valid_row = frozen_row({
                     "company": "Valid Corp",
                     "status": "OK_HIGH_CONFIDENCE",
                     "publication_eligible": True,
@@ -205,12 +219,8 @@ class PublicationExportGateTests(unittest.TestCase):
                     "email": "info@valid.com",
                     "phone": "+902121112233",
                     "score": 90,
-                    "__evaluation": {
-                        "_identity_resolution": "candidate_resolved_exact_name",
-                        "identity_assessment": {"conflicts": []},
-                        "crawl": {"pages": ["https://valid.com"]},
-                    },
-                }
+                    "__evaluation": _strong_evaluation("https://valid.com"),
+                }, "test:valid", publishable=True)
 
                 output_artifacts.write_outputs([valid_row], 1.0)
 

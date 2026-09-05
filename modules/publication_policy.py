@@ -9,6 +9,8 @@ signal for offline risk/coverage analysis, not a probability.
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from typing import Any
 
 import config
@@ -17,6 +19,7 @@ from modules import identity, scorer
 
 
 POLICY_VERSION = "evidence-risk-v1"
+DECISION_SCHEMA_VERSION = 1
 OK_STATUSES = {"OK_HIGH_CONFIDENCE", "OK_MEDIUM_CONFIDENCE"}
 EXCLUDED_ROLES = {
     "directory", "fair_profile", "shared_listing", "marketplace", "news",
@@ -243,8 +246,306 @@ def decide_row(row: dict, evaluation: dict | None = None) -> dict:
     }
 
 
+_DECISION_INPUT_FIELDS = (
+    "source_record_id", "run_id", "free_state", "paid_state", "paid_required",
+    "status", "score", "publication_eligible", "publication_advisory_eligible",
+    "email_publication_status", "phone_publication_status", "website",
+    "identity_resolution", "reason", "publication_blockers", "config_sha256",
+)
+
+
+def _hash_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _safe_decision_input(
+    row: dict,
+    evaluation: dict,
+    evaluation_sha256: str,
+    config_sha256: str,
+) -> dict:
+    """Build the auditable decision input without HTML, secrets, or payload blobs."""
+    assessment = row.get("identity_assessment") or evaluation.get("identity_assessment") or {}
+    context = _context_resolution(row, evaluation)
+    candidate = evaluation.get("candidate") if isinstance(evaluation.get("candidate"), dict) else {}
+    candidate_safe = {
+        key: candidate.get(key, "")
+        for key in ("url", "domain", "role", "query", "rank", "score", "reason", "_identity_company")
+        if key in candidate
+    }
+    assessment_safe = {
+        key: assessment.get(key)
+        for key in (
+            "publishable", "conflicts", "support_count", "first_party_bundle_components",
+            "strong_first_party_bundle", "decision", "support_keys",
+        )
+        if key in assessment
+    }
+    context_safe = {
+        key: context.get(key)
+        for key in (
+            "legal_ownership_verified", "brand_ownership_verified", "target_legal_name_verified",
+            "brand_owner_verified", "legal_name_verified", "ownership_verified",
+            "candidate_sector_compatible", "candidate_product_compatible", "site_sector_product_compatible",
+            "sector_compatible", "conflicts", "independent_matches", "independent_identity_matches",
+        )
+        if key in context
+    }
+    payload = {key: row.get(key) for key in _DECISION_INPUT_FIELDS if key in row}
+    payload["config_sha256"] = config_sha256
+    payload.update({
+        "reason_tokens": sorted(_reason_values(row, evaluation)),
+        "evaluation_sha256": evaluation_sha256,
+        "identity_assessment": assessment_safe,
+        "context_resolution": context_safe,
+        "candidate": candidate_safe,
+        "allowed_contact_fields": [
+            field for field in ("email", "phone")
+            if row.get(field) and str(row.get(f"{field}_publication_status", "")).casefold() == "allowed"
+        ],
+    })
+    return payload
+
+
+def _evaluation_sha256(evaluation: dict) -> str:
+    # Import lazily to keep publication_policy independent of the redaction
+    # module's import order. The hash is over sanitized structured evidence;
+    # raw HTML is never included in the decision input.
+    from modules import redaction
+    return _hash_json(redaction.sanitize(evaluation))
+
+
+def _default_config_sha256(row: dict) -> str:
+    value = str(row.get("config_sha256") or row.get("run_config_sha256") or "").strip()
+    if value:
+        return value
+    try:
+        import importlib
+        run_context = importlib.import_module("modules.run_context")
+        return run_context.RunConfig.from_config(
+            paid_enabled=bool(row.get("paid_enabled", getattr(config, "PAID_ENABLED", False)))
+        ).sha256
+    except Exception:
+        return ""
+
+
+def freeze_publication_decision(
+    row: dict,
+    evaluation: dict | None = None,
+    *,
+    config_sha256: str | None = None,
+) -> dict:
+    """Compute and persist exactly one immutable final decision envelope."""
+    existing = row.get("publication_decision")
+    if isinstance(existing, dict):
+        expected_config = str(config_sha256 or row.get("config_sha256") or row.get("run_config_sha256") or "")
+        verify_publication_decision(
+            existing,
+            source_record_id=str(row.get("source_record_id", "") or "") or None,
+            run_id=str(row.get("run_id", "") or "") or None,
+            config_sha256=expected_config or None,
+        )
+        return existing
+    source_record_id = str(row.get("source_record_id", "") or "").strip()
+    if not source_record_id:
+        raise RuntimeError("cannot freeze publication decision without source_record_id")
+    run_id = str(row.get("run_id", "") or "")
+    resolved_config_sha256 = str(config_sha256 or _default_config_sha256(row) or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", resolved_config_sha256):
+        raise RuntimeError("cannot freeze publication decision without a valid config_sha256")
+    evaluation = evaluation if isinstance(evaluation, dict) else (
+        row.get("__evaluation") if isinstance(row.get("__evaluation"), dict) else {}
+    )
+    evaluation_hash = _evaluation_sha256(evaluation)
+    decision = decide_row(row, evaluation)
+    if not decision["publishable"]:
+        existing_blockers = [
+            value.strip()
+            for value in str(row.get("publication_blockers", "") or "").replace(",", ";").split(";")
+            if value.strip()
+        ]
+        decision["blockers"] = list(dict.fromkeys([*existing_blockers, *decision["blockers"]]))
+    decision_input = _safe_decision_input(row, evaluation, evaluation_hash, resolved_config_sha256)
+    envelope = {
+        "schema_version": DECISION_SCHEMA_VERSION,
+        "policy_version": decision["policy_version"],
+        "source_record_id": source_record_id,
+        "run_id": run_id,
+        "publishable": bool(decision["publishable"]),
+        "blockers": list(dict.fromkeys(str(value) for value in decision.get("blockers", []) if str(value))),
+        "advisory_eligible": bool(decision.get("advisory_eligible", False)),
+        "website_identity_verified": bool(decision.get("website_identity_verified", False)),
+        "allowed_contact_fields": list(decision.get("allowed_contact_fields", [])),
+        "decision_input_sha256": _hash_json(decision_input),
+        "evaluation_sha256": evaluation_hash,
+        "config_sha256": resolved_config_sha256,
+        "action": str((evaluation.get("publication_policy") or {}).get("action", "")),
+        "decision_input": decision_input,
+    }
+    envelope["publication_decision_sha256"] = _hash_json(envelope)
+    row["publication_decision"] = envelope
+    row["publication_decision_sha256"] = envelope["publication_decision_sha256"]
+    return envelope
+
+
+def verify_publication_decision(
+    envelope: dict,
+    *,
+    source_record_id: str | None = None,
+    run_id: str | None = None,
+    config_sha256: str | None = None,
+) -> dict:
+    """Verify an immutable decision and, when supplied, bind it to its row."""
+    required = {
+        "schema_version", "policy_version", "source_record_id", "run_id", "publishable",
+        "blockers", "advisory_eligible", "website_identity_verified", "allowed_contact_fields",
+        "decision_input_sha256", "evaluation_sha256", "config_sha256", "decision_input",
+        "publication_decision_sha256",
+    }
+    if not isinstance(envelope, dict) or not required.issubset(envelope):
+        raise RuntimeError("publication_decision envelope is incomplete")
+    if type(envelope["schema_version"]) is not int or envelope["schema_version"] != DECISION_SCHEMA_VERSION:
+        raise RuntimeError("publication_decision schema_version is invalid")
+    if not isinstance(envelope["policy_version"], str) or not envelope["policy_version"].strip():
+        raise RuntimeError("publication_decision policy_version is invalid")
+    if not isinstance(envelope["source_record_id"], str) or not envelope["source_record_id"].strip():
+        raise RuntimeError("publication_decision source_record_id is invalid")
+    if not isinstance(envelope["run_id"], str):
+        raise RuntimeError("publication_decision run_id is invalid")
+    for field in ("publishable", "advisory_eligible", "website_identity_verified"):
+        if type(envelope[field]) is not bool:
+            raise RuntimeError(f"publication_decision {field} is invalid")
+    if not isinstance(envelope["blockers"], list) or any(
+        not isinstance(value, str) or not value.strip() for value in envelope["blockers"]
+    ) or len(envelope["blockers"]) != len(set(envelope["blockers"])):
+        raise RuntimeError("publication_decision blockers are invalid")
+    if not isinstance(envelope["allowed_contact_fields"], list) or any(
+        value not in {"email", "phone"} for value in envelope["allowed_contact_fields"]
+    ) or len(envelope["allowed_contact_fields"]) != len(set(envelope["allowed_contact_fields"])):
+        raise RuntimeError("publication_decision allowed_contact_fields are invalid")
+    for field in ("decision_input_sha256", "evaluation_sha256", "config_sha256", "publication_decision_sha256"):
+        if not isinstance(envelope[field], str) or not re.fullmatch(r"[0-9a-fA-F]{64}", envelope[field]):
+            raise RuntimeError(f"publication_decision {field} is invalid")
+    if not isinstance(envelope["decision_input"], dict):
+        raise RuntimeError("publication_decision decision_input is invalid")
+    if envelope["decision_input"].get("source_record_id") != envelope["source_record_id"]:
+        raise RuntimeError("publication_decision source_record_id binding mismatch")
+    if envelope["decision_input"].get("run_id", "") != envelope["run_id"]:
+        raise RuntimeError("publication_decision run_id binding mismatch")
+    if envelope["decision_input"].get("config_sha256") != envelope["config_sha256"]:
+        raise RuntimeError("publication_decision config_sha256 binding mismatch")
+    input_hash = _hash_json(envelope["decision_input"])
+    if input_hash != str(envelope["decision_input_sha256"]):
+        raise RuntimeError("publication_decision decision_input hash mismatch")
+    unsigned = {key: value for key, value in envelope.items() if key != "publication_decision_sha256"}
+    if _hash_json(unsigned) != str(envelope["publication_decision_sha256"]):
+        raise RuntimeError("publication_decision envelope hash mismatch")
+    for field, expected in (
+        ("source_record_id", source_record_id),
+        ("run_id", run_id),
+        ("config_sha256", config_sha256),
+    ):
+        if expected is not None and str(envelope[field]) != str(expected):
+            raise RuntimeError(f"publication_decision {field} does not match row")
+    return envelope
+
+
+def apply_frozen_decision_fields(row: dict, envelope: dict) -> dict:
+    """Project an already-verified envelope onto flat output fields."""
+    verify_publication_decision(
+        envelope,
+        source_record_id=str(row.get("source_record_id", "") or "") or None,
+        run_id=str(row.get("run_id", "") or "") or None,
+    )
+    if "publication_eligible" in row and type(row["publication_eligible"]) is bool and row["publication_eligible"] != envelope["publishable"]:
+        raise RuntimeError("flat publication_eligible conflicts with frozen decision")
+    if "allowed_contact_fields" in row:
+        current = row["allowed_contact_fields"]
+        if isinstance(current, str):
+            current = [value.strip() for value in current.replace(",", ";").split(";") if value.strip()]
+        if current not in (None, "", []) and set(current) != set(envelope["allowed_contact_fields"]):
+            raise RuntimeError("flat allowed_contact_fields conflicts with frozen decision")
+    for field in ("publication_decision_sha256", "decision_input_sha256", "evaluation_sha256", "config_sha256"):
+        if field in row and row[field] not in (None, "") and str(row[field]) != str(envelope[field]):
+            raise RuntimeError(f"flat {field} conflicts with frozen decision")
+    if "publication_blockers" in row:
+        current_blockers = {
+            value.strip() for value in str(row.get("publication_blockers") or "").replace(",", ";").split(";") if value.strip()
+        }
+        if current_blockers and current_blockers != set(envelope["blockers"]):
+            raise RuntimeError("flat publication_blockers conflicts with frozen decision")
+    row["publication_decision"] = envelope
+    row["publication_decision_sha256"] = envelope["publication_decision_sha256"]
+    row["publication_eligible"] = bool(envelope["publishable"])
+    row["publication_policy_version"] = envelope["policy_version"]
+    row["publication_advisory_eligible"] = bool(envelope["advisory_eligible"])
+    row["advisory_eligible"] = bool(envelope["advisory_eligible"])
+    row["website_identity_verified"] = bool(envelope["website_identity_verified"])
+    row["allowed_contact_fields"] = "; ".join(envelope["allowed_contact_fields"])
+    row["decision_input_sha256"] = envelope["decision_input_sha256"]
+    row["evaluation_sha256"] = envelope["evaluation_sha256"]
+    row["config_sha256"] = envelope["config_sha256"]
+    if not envelope["publishable"]:
+        row["publication_blockers"] = "; ".join(dict.fromkeys(
+            value for value in [str(row.get("publication_blockers", "")), *envelope["blockers"]] if value
+        ))
+    return row
+
+
+def with_blocker(envelope: dict, blocker: str) -> dict:
+    """Derive a new deterministic review envelope without re-running policy."""
+    verify_publication_decision(envelope)
+    derived = dict(envelope)
+    derived["blockers"] = list(dict.fromkeys([*envelope["blockers"], str(blocker)]))
+    derived["publishable"] = False
+    derived["decision_input"] = dict(envelope["decision_input"], reconciliation_blocker=str(blocker))
+    derived["decision_input_sha256"] = _hash_json(derived["decision_input"])
+    derived.pop("publication_decision_sha256", None)
+    derived["publication_decision_sha256"] = _hash_json(derived)
+    return derived
+
+
+def rebind_publication_decision(
+    envelope: dict,
+    *,
+    run_id: str,
+    config_sha256: str,
+) -> dict:
+    """Rebind an already-frozen decision to a continuation run without policy recomputation."""
+    verify_publication_decision(envelope)
+    if not isinstance(run_id, str):
+        raise RuntimeError("publication_decision continuation run_id is invalid")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(config_sha256)):
+        raise RuntimeError("publication_decision continuation config_sha256 is invalid")
+    derived = dict(envelope)
+    derived["run_id"] = run_id
+    derived["config_sha256"] = str(config_sha256)
+    derived["decision_input"] = dict(
+        envelope["decision_input"], run_id=run_id, config_sha256=str(config_sha256)
+    )
+    derived["decision_input_sha256"] = _hash_json(derived["decision_input"])
+    derived.pop("publication_decision_sha256", None)
+    derived["publication_decision_sha256"] = _hash_json(derived)
+    verify_publication_decision(derived, run_id=run_id, config_sha256=str(config_sha256))
+    return derived
+
+
+def frozen_publishable(row: dict, *, require: bool = False) -> bool:
+    envelope = row.get("publication_decision")
+    if isinstance(envelope, dict):
+        verify_publication_decision(envelope)
+        return bool(envelope["publishable"])
+    if require:
+        raise RuntimeError(f"frozen publication_decision missing for {row.get('source_record_id', '')}")
+    return is_publishable_row(row)
+
+
 def is_publishable_row(row: dict) -> bool:
     """Boolean compatibility wrapper around :func:`decide_row`."""
+    if isinstance(row.get("publication_decision"), dict):
+        return frozen_publishable(row, require=True)
     decision = decide_row(row)
     if all(key in row for key in ("source_record_id", "free_state", "paid_state", "paid_required")):
         row["publication_eligible"] = decision["publishable"]
@@ -397,30 +698,19 @@ def evaluate(
     else:
         risk_tier = "elevated"
 
-    policy_row = {
-        "company": company,
-        "website": candidate.get("url", ""),
-        "status": proposed_status,
-        "publication_eligible": eligible,
-        "score": safety_score,
-        "identity_assessment": assessment,
-        "email": evaluation.get("email", ""),
-        "phone": evaluation.get("phone", ""),
-        "email_publication_status": evaluation.get("email_publication_status", "suppressed"),
-        "phone_publication_status": evaluation.get("phone_publication_status", "suppressed"),
-        "__evaluation": evaluation,
-    }
-    final_decision = decide_row(policy_row, evaluation)
     return {
         "policy_version": POLICY_VERSION,
         "mode": "downgrade_only",
         "proposed_status": proposed_status,
         "action": action,
         "eligible": eligible,
-        "publishable": bool(eligible and final_decision["publishable"]),
-        "blockers": list(dict.fromkeys([*blockers, *final_decision["blockers"]])) if not (eligible and final_decision["publishable"]) else [],
-        "website_identity_verified": final_decision["website_identity_verified"],
-        "allowed_contact_fields": final_decision["allowed_contact_fields"],
+        "publishable": bool(eligible),
+        "blockers": list(dict.fromkeys(blockers)),
+        "website_identity_verified": _website_identity_verified({"website": candidate.get("url", ""), "identity_assessment": assessment}, evaluation),
+        "allowed_contact_fields": [
+            field for field in ("email", "phone")
+            if evaluation.get(field) and str(evaluation.get(f"{field}_publication_status", "")).casefold() == "allowed"
+        ],
         "advisory_eligible": eligible,
         "risk_eligible": risk_eligible,
         "safety_score": safety_score,
@@ -429,7 +719,6 @@ def evaluate(
         "minimum_safety_score": minimum_safety_score,
         "hard_blockers": list(dict.fromkeys([
             *blockers,
-            *(final_decision["blockers"] if not (eligible and final_decision["publishable"]) else []),
         ])),
         "evidence_summary": {
             "identity_decision": assessment.get("decision", ""),

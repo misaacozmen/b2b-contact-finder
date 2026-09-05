@@ -16,6 +16,7 @@ from modules import (
     report,
     risk_calibration,
 )
+from decision_fixtures import frozen_row
 
 
 def _safe_evaluation(**overrides):
@@ -75,7 +76,7 @@ class PublicationPolicyTests(unittest.TestCase):
 
     def test_report_separates_complete_review_rows_from_publications(self):
         rows = [
-            {
+            frozen_row({
                 "company": "PUBLISHED",
                 "website": "https://published.example",
                 "email": "info@published.example",
@@ -83,8 +84,9 @@ class PublicationPolicyTests(unittest.TestCase):
                 "status": "OK_HIGH_CONFIDENCE",
                 "publication_eligible": True,
                 "email_verification": "verified",
-            },
-            {
+                "__evaluation": _safe_evaluation(),
+            }, "test:p3-published", publishable=True),
+            frozen_row({
                 "company": "HELD",
                 "website": "https://held.example",
                 "email": "info@held.example",
@@ -93,7 +95,8 @@ class PublicationPolicyTests(unittest.TestCase):
                 "publication_eligible": False,
                 "publication_blockers": "no_candidate_proved_target_fingerprint",
                 "email_verification": "verified",
-            },
+                "__evaluation": _safe_evaluation(),
+            }, "test:p3-held", publishable=False),
         ]
         with patch("modules.report.runtime.snapshot", return_value={"counters": {}}), patch(
             "modules.report.discovery_coverage.payload",
@@ -355,7 +358,7 @@ class RiskCoverageCalibrationTests(unittest.TestCase):
 
 class PublicationAuditOutputTests(unittest.TestCase):
     def test_excel_and_evidence_keep_policy_provenance(self):
-        row = {
+        row = frozen_row({
             "company": "ACME MAKINA",
             "website": "https://acme.com.tr",
             "status": "OK_HIGH_CONFIDENCE",
@@ -369,7 +372,8 @@ class PublicationAuditOutputTests(unittest.TestCase):
             "__search_trace": [{
                 "url": "https://search.example/?token=evidence-secret",
             }],
-        }
+            "__evaluation": _safe_evaluation(),
+        }, "test:p3-evidence", publishable=True)
         with tempfile.TemporaryDirectory() as directory:
             workbook_path = Path(directory) / "contacts.xlsx"
             evidence_path = Path(directory) / "evidence.jsonl"

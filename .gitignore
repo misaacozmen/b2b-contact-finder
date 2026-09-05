@@ -1,4 +1,5 @@
 .venv/
+.runtime/
 __pycache__/
 *.py[cod]
 
@@ -23,6 +24,7 @@ artifact_work/
 # under outputs/ must be added explicitly only when they are intentional,
 # sanitized regression fixtures.
 prepare_final*.txt
+runtime_report.json
 
 .env
 .env.*

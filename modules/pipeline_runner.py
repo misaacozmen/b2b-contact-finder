@@ -180,14 +180,23 @@ def _verify_artifact_metadata(run_root: Path, artifacts: dict) -> None:
 
 
 def _call_writer(writer: Callable[..., Any], rows: list[dict], elapsed: float,
-                 telemetry_snapshot: dict[str, Any]) -> Any:
+                 telemetry_snapshot: dict[str, Any], config_sha256: str = "") -> Any:
     parameters = inspect.signature(writer).parameters
     accepts_snapshot = "telemetry_snapshot" in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     )
+    accepts_config = "config_sha256" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    kwargs = {}
     if accepts_snapshot:
-        return writer(rows, elapsed, telemetry_snapshot=telemetry_snapshot)
+        kwargs["telemetry_snapshot"] = telemetry_snapshot
+    if accepts_config:
+        kwargs["config_sha256"] = config_sha256
+    if kwargs:
+        return writer(rows, elapsed, **kwargs)
     return writer(rows, elapsed)
 
 
@@ -238,12 +247,18 @@ def _validate_resume_identity(*, run_root: Path, manifest: dict, input_hash: str
 def resolve_run_config(manifest: dict | None = None, *, allow_paid: bool | None = None,
                        search_cache: str | None = None, crawl_cache: str | None = None,
                        brightdata_budget: int | None = None, google_places_budget: int | None = None,
-                       linkedin_budget: int | None = None, rerank_cache: bool = False) -> run_context.RunConfig:
+                       linkedin_budget: int | None = None, rerank_cache: bool = False,
+                       finalize_without_paid: bool | None = None) -> run_context.RunConfig:
     if manifest is None:
-        return run_context.RunConfig.from_config(paid_enabled=bool(allow_paid))
+        return run_context.RunConfig.from_config(
+            paid_enabled=bool(allow_paid),
+            free_only_finalization=bool(finalize_without_paid),
+        )
     recorded = run_context.RunConfig.from_dict(manifest.get("run_config", {}))
     if allow_paid is not None and bool(allow_paid) != recorded.paid_enabled:
         raise ValueError("resume rejects behavioral paid-mode override")
+    if finalize_without_paid is not None and bool(finalize_without_paid) != recorded.free_only_finalization:
+        raise ValueError("resume rejects behavioral free-only-finalization override")
     if search_cache is not None and search_cache != recorded.search_cache_mode:
         raise ValueError("resume rejects behavioral search-cache override")
     if crawl_cache is not None and crawl_cache != recorded.crawl_cache_mode:
@@ -267,7 +282,8 @@ def validate_resume_before_credentials(input_file: Path, resume_run_dir: Path, *
                                        from_run_manifest: Path | None = None, search_cache: str | None = None,
                                        crawl_cache: str | None = None, brightdata_budget: int | None = None,
                                        google_places_budget: int | None = None, linkedin_budget: int | None = None,
-                                       rerank_cache: bool = False) -> None:
+                                       rerank_cache: bool = False,
+                                       finalize_without_paid: bool | None = None) -> None:
     """Read-only identity gate used before any credential setup or provider code."""
     run_root = Path(resume_run_dir).resolve()
     manifest_path = run_root / "manifest.json"
@@ -278,7 +294,7 @@ def validate_resume_before_credentials(input_file: Path, resume_run_dir: Path, *
         manifest, allow_paid=allow_paid, search_cache=search_cache,
         crawl_cache=crawl_cache, brightdata_budget=brightdata_budget,
         google_places_budget=google_places_budget, linkedin_budget=linkedin_budget,
-        rerank_cache=rerank_cache,
+        rerank_cache=rerank_cache, finalize_without_paid=finalize_without_paid,
     )
     if manifest.get("paid_enabled") is False and bool(allow_paid):
         raise PermissionError("paid-disabled parent requires prepare_paid_continuation.py")
@@ -404,6 +420,7 @@ def run_pipeline(
     run_dir: Path | None = None,
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
+    finalize_without_paid: bool = False,
 ) -> str:
     previous_paid_limit = search._RUN_PAID_QUERY_LIMIT
     try:
@@ -420,6 +437,7 @@ def run_pipeline(
             run_dir=run_dir,
             resume_run_dir=resume_run_dir,
             from_run_manifest=from_run_manifest,
+            finalize_without_paid=finalize_without_paid,
         )
     finally:
         search._RUN_PAID_QUERY_LIMIT = previous_paid_limit
@@ -439,6 +457,7 @@ def _run_pipeline_impl(
     run_dir: Path | None = None,
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
+    finalize_without_paid: bool = False,
 ) -> str:
     owned_lease: dict[str, Any] = {}
     try:
@@ -452,6 +471,7 @@ def _run_pipeline_impl(
             allow_paid=allow_paid, run_dir=run_dir,
             resume_run_dir=resume_run_dir,
             from_run_manifest=from_run_manifest,
+            finalize_without_paid=finalize_without_paid,
             _owned_lease=owned_lease,
         )
     finally:
@@ -474,6 +494,7 @@ def _run_pipeline_impl_body(
     run_dir: Path | None = None,
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
+    finalize_without_paid: bool = False,
     _owned_lease: dict[str, Any] | None = None,
 ) -> str:
     previous_paid_enabled = bool(getattr(config, "PAID_ENABLED", True))
@@ -543,11 +564,17 @@ def _run_pipeline_impl_body(
         resume_manifest = json.loads(resume_manifest_path.read_text(encoding="utf-8"))
         if resume_manifest.get("paid_enabled") is False and bool(allow_paid):
             raise PermissionError("complete paid-disabled runs require prepare_paid_continuation.py")
-        run_config = resolve_run_config(resume_manifest, allow_paid=allow_paid)
+        run_config = resolve_run_config(
+            resume_manifest, allow_paid=allow_paid,
+            finalize_without_paid=finalize_without_paid,
+        )
         allow_paid = run_config.paid_enabled
     else:
         allow_paid = bool(allow_paid)
-        run_config = resolve_run_config(None, allow_paid=allow_paid)
+        run_config = resolve_run_config(
+            None, allow_paid=allow_paid,
+            finalize_without_paid=finalize_without_paid,
+        )
     paid_query_limit = search.configure_run_budget(len(company_records))
     paid_settings = {
         "search_provider": config.SEARCH_PROVIDER,
@@ -591,6 +618,7 @@ def _run_pipeline_impl_body(
             "replay_snapshot": str(config.REPLAY_SNAPSHOT_INPUT or ""),
             "two_pass_paid_escalation": paid_escalation_enabled,
             "allow_paid": bool(allow_paid),
+            "finalize_without_paid": bool(finalize_without_paid),
             "run_config_sha256": run_config.sha256,
         },
         ensure_ascii=False,
@@ -794,6 +822,7 @@ def _run_pipeline_impl_body(
             "lineage": (resume_manifest or {}).get("lineage", {"type": "fresh"}),
             "phase": context.phase,
             "paid_enabled": run_config.paid_enabled,
+            "finalization_mode": "free_only" if finalize_without_paid else "normal",
         },
     )
     if prior_state and prior_state.get("runtime_snapshot"):
@@ -819,7 +848,7 @@ def _run_pipeline_impl_body(
         else:
             runtime.record("pipeline.free_total", len(items))
         def process_one(idx: int, record: dict):
-            runtime.set_item_context(idx, phase_name.lower())
+            runtime.set_item_context(idx, phase_name.lower(), record.get("source_record_id", ""))
             return process_company_fn(idx, record["company"], logger, record.get("website", ""), record)
         def run_one(idx: int, record: dict):
             if not checkpoint.claim_item(run_id=context.run_id, item_index=idx, phase=phase_name):
@@ -1014,7 +1043,12 @@ def _run_pipeline_impl_body(
         config.LINKEDIN_COMPANY_REQUEST_BUDGET = paid_settings["linkedin_budget"] if allow_paid else 0
         config.LLM_ARBITER_BUDGET = paid_settings["llm_budget"] if allow_paid else 0
         paid_indexes = checkpoint.freeze_paid_queue(context.run_id)
-        if resume_phase == "FREE" and not allow_paid and paid_indexes:
+        if finalize_without_paid and resume_phase == "FREE":
+            if allow_paid:
+                raise RuntimeError("free-only finalization cannot enable paid providers")
+            checkpoint.finalize_free_only_queue(context.run_id)
+            paid_indexes = []
+        if resume_phase == "FREE" and not allow_paid and paid_indexes and not finalize_without_paid:
             telemetry = checkpoint.derive_telemetry(context.run_id)
             expected = len(company_records)
             if not (
@@ -1027,7 +1061,7 @@ def _run_pipeline_impl_body(
                 run_id=context.run_id, expected_count=expected,
             )
         escalation = [(idx, company_records[idx]) for idx in paid_indexes if idx < len(company_records)]
-        if escalation and not allow_paid:
+        if escalation and not allow_paid and not finalize_without_paid:
             if resume_phase == "FREE":
                 checkpoint.transition_phase(context.run_id, "PAID", expected_count=len(company_records))
             # Derive the last mutable telemetry view before sealing.  From this
@@ -1167,6 +1201,7 @@ def _run_pipeline_impl_body(
         write_outputs_fn, rows,
         float(output_context.get("elapsed_seconds", finalization_elapsed)),
         frozen_telemetry,
+        run_config.sha256,
     )
     artifact_result = report_text
     artifacts = getattr(artifact_result, "artifacts", None)

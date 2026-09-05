@@ -130,7 +130,9 @@ class PipelineIntegrationGuardrailTests(unittest.TestCase):
             "modules.search._search_text",
             side_effect=RuntimeError("bad provider payload"),
         ) as paid, patch(
-            "modules.search._ddgs_text", return_value=[{"href": "https://fallback.example"}],
+            "modules.search._ddgs_text", return_value=search.SearchResults(
+                [{"href": "https://fallback.example"}], "live", "ddgs", result_state="COMPLETED"
+            ),
         ):
             search._safe_search_text("first")
             search._safe_search_text("second")

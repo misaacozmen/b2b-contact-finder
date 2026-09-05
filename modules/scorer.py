@@ -504,7 +504,9 @@ def explicit_activity_qualifiers(name: str) -> list[str]:
 def metadata_contexts(metadata: dict | None) -> list[str]:
     if not metadata:
         return []
-    text = " ".join(_raw_company_tokens(f"{metadata.get('sector', '')} {metadata.get('description', '')}"))
+    sector_text = " ".join(_raw_company_tokens(str(metadata.get("sector", "") or "")))
+    description_text = " ".join(_raw_company_tokens(str(metadata.get("description", "") or "")))
+    text = " ".join(value for value in (sector_text, description_text) if value)
     if not text:
         return []
 
@@ -516,10 +518,70 @@ def metadata_contexts(metadata: dict | None) -> list[str]:
             continue
         if texhibition_context and context in {"baski", "elektronik"}:
             continue
+        # Texhibition's accessory/printing/digital labels are source-sector
+        # evidence. A generic word in an exhibitor description must not mint a
+        # textile context, especially for non-Texhibition sources.
+        context_text = sector_text if texhibition_context and context in {
+            "textile_accessories", "textile_printing", "textile_digital",
+        } else text
         aliases = (" ".join(_raw_company_tokens(alias)) for alias in details["aliases"])
-        if any(alias and f" {alias} " in f" {text} " for alias in aliases):
+        if any(alias and f" {alias} " in f" {context_text} " for alias in aliases):
             contexts.append(context)
     return contexts
+
+
+def metadata_context_status(metadata: dict | None) -> tuple[str, str]:
+    """Return explicit source-sector state for audit and target profiles."""
+    metadata = metadata or {}
+    sector = str(metadata.get("sector", "") or "").strip()
+    if not sector:
+        return "unknown", "source_sector_blank"
+    if metadata_contexts(metadata):
+        return "mapped", ""
+    return "unknown", f"unknown_unmapped_label:{normalize_text(sector)}"
+
+
+def metadata_source_fields_sha256(metadata: dict | None) -> str:
+    import hashlib
+    import json
+    metadata = metadata or {}
+    payload = {
+        key: str(metadata.get(key, "") or "")
+        for key in ("source", "sector", "description", "brands", "representations", "listed_legal_name")
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def metadata_context_evidence(metadata: dict | None) -> list[dict]:
+    """Return one auditable context observation per source provenance."""
+    metadata = dict(metadata or {})
+    raw_source = str(metadata.get("source", "") or metadata.get("source_name", "") or "").strip()
+    sources = [value.strip() for value in raw_source.split(";") if value.strip()] or [raw_source or "unknown_source"]
+    combined_source = len(sources) > 1
+    result: list[dict] = []
+    for source in sources:
+        source_metadata = dict(metadata)
+        source_metadata["source"] = source
+        field = "sector" if str(source_metadata.get("sector", "") or "").strip() else "description"
+        normalized_label = normalize_text(str(source_metadata.get(field, "") or "")).strip()
+        if "zuchex" in normalize_text(source) and combined_source and not any(
+            key.casefold().startswith("zuchex_") for key in metadata
+        ):
+            contexts: list[str] = []
+            status, reason = "unknown", "source_specific_metadata_unavailable_after_legacy_merge"
+        else:
+            contexts = metadata_contexts(source_metadata)
+            status, reason = metadata_context_status(source_metadata)
+        result.append({
+            "source": source,
+            "source_field": field,
+            "normalized_label": normalized_label,
+            "contexts": contexts,
+            "status": status,
+            "reason": reason,
+            "source_fields_sha256": metadata_source_fields_sha256(source_metadata),
+        })
+    return result
 
 
 def page_matches_metadata_context(page_text: str, context: str) -> bool:

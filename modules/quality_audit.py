@@ -37,7 +37,7 @@ def payload(rows: list[dict], *, runtime_snapshot: dict | None = None) -> dict:
             if isinstance(evaluation, dict) else []
         ):
             gap_counts[str(gap)] += 1
-        if not publication_policy.is_publishable_row(row):
+        if not publication_policy.frozen_publishable(row, require=True):
             continue
         website_domain = scorer.normalize_domain(row.get("website", ""))
         if scorer.is_excluded_domain(website_domain):
@@ -68,7 +68,7 @@ def payload(rows: list[dict], *, runtime_snapshot: dict | None = None) -> dict:
                 "reason": "published_with_identity_conflict",
             })
     published = sum(
-        1 for row in rows if publication_policy.is_publishable_row(row)
+        1 for row in rows if publication_policy.frozen_publishable(row, require=True)
     )
     return {
         "policy_version": POLICY_VERSION,

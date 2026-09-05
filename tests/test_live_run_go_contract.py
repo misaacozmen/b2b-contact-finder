@@ -101,10 +101,10 @@ def test_free_query_quota_is_scoped_to_run_and_item(tmp_path: Path):
             items=[{"item_index": 0, "source_record_id": "a"}, {"item_index": 1, "source_record_id": "b"}],
         )
         runtime.configure_durable_run("run-a", {})
-        runtime.set_item_context(0, "free")
+        runtime.set_item_context(0, "free", "a")
         assert sum(runtime.reserve_search_query(0) for _ in range(10)) == 10
         assert not runtime.reserve_search_query(0)
-        runtime.set_item_context(1, "free")
+        runtime.set_item_context(1, "free", "b")
         assert runtime.reserve_search_query(0)
 
 

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from modules import evidence_ledger, redaction
+from modules import publication_policy
 
 
 def _json_safe(value):
@@ -31,19 +32,23 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
                         value.strip() for value in allowed_fields.replace(",", ";").split(";")
                         if value.strip()
                     ]
+                decision_envelope = row.get("publication_decision")
+                if not isinstance(decision_envelope, dict):
+                    raise RuntimeError(
+                        f"final evidence requires frozen publication_decision: {row.get('source_record_id', '')}"
+                    )
+                publication_policy.verify_publication_decision(
+                    decision_envelope,
+                    source_record_id=str(row.get("source_record_id", "") or "") or None,
+                    run_id=str(row.get("run_id", "") or "") or None,
+                    config_sha256=str(row.get("config_sha256", "") or "") or None,
+                )
                 record = {
                     "run_id": row.get("run_id", ""),
                     "company": row.get("company", ""),
                     "source_record_id": row.get("source_record_id", ""),
                     "original_index": row.get("original_index", row.get("__index")),
-                    "publication_decision": {
-                        "publishable": bool(row.get("publication_eligible", False)),
-                        "advisory_eligible": bool(row.get("publication_advisory_eligible", False)),
-                        "website_identity_verified": bool(row.get("website_identity_verified", False)),
-                        "allowed_contact_fields": allowed_fields,
-                        "blockers": row.get("publication_blockers", ""),
-                        "policy_version": row.get("publication_policy_version", ""),
-                    },
+                    "publication_decision": publication_policy.verify_publication_decision(decision_envelope),
                     "source_detail": {
                         "listed_legal_name": row.get("listed_legal_name", ""),
                         "source_detail_status": row.get("source_detail_status", ""),
@@ -77,6 +82,11 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
                     "search_trace": row.get("__search_trace", []),
                     "source_health": row.get("__source_health", {}),
                     "evaluation": row.get("__evaluation", {}),
+                    "metadata_context_evidence": row.get(
+                        "metadata_context_evidence",
+                        (row.get("__evaluation") or {}).get("metadata_context_evidence", [])
+                        if isinstance(row.get("__evaluation"), dict) else [],
+                    ),
                     "candidate_evaluations": row.get("__candidate_evaluations", []),
                     "field_evidence": evidence_ledger.evaluation_claims(row.get("__evaluation", {})),
                 }

@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from modules import checkpoint, run_context
+from modules import checkpoint, publication_policy, run_context
 
 
 PROVIDERS = tuple(sorted(checkpoint.CANONICAL_PROVIDERS))
@@ -159,6 +159,24 @@ def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destina
         effective_config=effective.as_dict(), runtime_source_tree_hash=run_context.source_tree_sha256(),
         lineage=lineage,
     )
+    rebound_results = []
+    for result in results:
+        payload = json.loads(str(result["payload"]))
+        envelope = payload.get("publication_decision")
+        if isinstance(envelope, dict):
+            payload["run_id"] = run_id
+            payload["config_sha256"] = effective.sha256
+            for field in ("publication_decision_sha256", "decision_input_sha256", "evaluation_sha256"):
+                payload.pop(field, None)
+            rebound = publication_policy.rebind_publication_decision(
+                envelope, run_id=run_id, config_sha256=effective.sha256,
+            )
+            payload = publication_policy.apply_frozen_decision_fields(payload, rebound)
+        rebound_results.append({
+            "item_index": int(result["item_index"]),
+            "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        })
+    results = rebound_results
     final_root = Path(destination).resolve() / "runs" / run_id
     target_dir = str(Path(destination).resolve())
     authorization_state = _claim_authorization(
@@ -196,10 +214,12 @@ def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destina
     output_dir.mkdir()
     artifact_stage.mkdir()
     items = []
+    rebound_hashes = {int(result["item_index"]): _sha256_bytes(result["payload"]) for result in results}
     for item in parent_items:
         copied = dict(item)
         if copied["paid_required"] and copied["paid_state"] == "PENDING":
             copied["paid_state"] = "PENDING"
+        copied["payload_sha256"] = rebound_hashes[int(copied["item_index"])]
         items.append(copied)
     checkpoint.seed_recovered_run(
         path=state_dir / "progress.sqlite3", run_id=run_id,

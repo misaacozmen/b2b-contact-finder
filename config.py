@@ -76,7 +76,7 @@ MAX_WORKBOOK_CELL_CHARS = max(
 SEARCH_CACHE_MODE = os.getenv("SEARCH_CACHE_MODE", "off").lower()
 CRAWL_CACHE_MODE = os.getenv("CRAWL_CACHE_MODE", "off").lower()
 SEARCH_CACHE_TTL_DAYS = int(os.getenv("SEARCH_CACHE_TTL_DAYS", "30"))
-SEARCH_EMPTY_CACHE_TTL_DAYS = 1 / 24
+SEARCH_EMPTY_CACHE_TTL_DAYS = 1.0
 CRAWL_CACHE_TTL_DAYS = int(os.getenv("CRAWL_CACHE_TTL_DAYS", "7"))
 CACHE_SCHEMA_VERSION = 2
 # Crawl discovery changed independently from SERP/MX caches.  Keeping a
@@ -84,7 +84,7 @@ CACHE_SCHEMA_VERSION = 2
 # results that are still reusable.
 CRAWL_CACHE_SCHEMA_VERSION = 7
 
-MAX_WORKERS = max(1, int(os.getenv("MAX_WORKERS", "3")))
+MAX_WORKERS = max(1, int(os.getenv("MAX_WORKERS", "2")))
 MIN_DELAY_SEC = 1.0
 MAX_DELAY_SEC = 3.0
 GLOBAL_REQUESTS_PER_SECOND = float(os.getenv("GLOBAL_REQUESTS_PER_SECOND", "3"))
@@ -266,7 +266,7 @@ CONTACT_PAGE_PATHS = [
     "/tr/iletisim", "/tr/iletisim/", "/tr/contact", "/en/contact",
     "/pages/iletisim-bilgileri", "/hakkimizda", "/kurumsal",
 ]
-MAX_CONTACT_PAGES = 6
+MAX_CONTACT_PAGES = max(1, int(os.getenv("MAX_CONTACT_PAGES", "6")))
 # A site with many dead legacy routes must not turn the successful-page limit
 # into an unbounded sequence of 404 requests.  This cap counts attempted
 # contact URLs (homepage/identity/document fetches are tracked separately).
@@ -621,8 +621,9 @@ METADATA_CONTEXTS = {
     "ambalaj": {
         "query_term": "ambalaj",
         "aliases": [
-            "ambalaj", "packaging", "label", "shrink sleeve", "carton", "box",
-            "etiket", "matbaa", "printing",
+            "ambalaj", "packaging", "shrink sleeve", "carton", "box",
+            "label", "labels", "etiket",
+            "matbaa", "printing",
         ],
     },
     "tekstil": {
@@ -633,6 +634,8 @@ METADATA_CONTEXTS = {
             "fabric", "fabrics", "kumas", "kumaş", "yarn", "iplik", "knitwear",
             "woven", "home textile", "ev tekstili", "textile finishing", "terbiye",
             "dyeing", "boyahane", "denim", "nonwoven", "dokuma", "orme",
+            "knitting", "cotton", "polyester", "polyviscone", "polyviscose",
+            "shirting", "viscose", "embroidery", "wool", "linen", "artificial leather",
         ],
     },
     "textile_accessories": {
@@ -640,14 +643,14 @@ METADATA_CONTEXTS = {
         "aliases": [
             "textile accessories", "textile accessory", "tekstil aksesuar",
             "tekstil aksesuarları", "accessories", "trims", "buttons", "zippers",
-            "etiket", "labels", "label", "zipper", "button",
+            "accessory", "aksesuar", "zipper", "button",
         ],
     },
     "textile_printing": {
         "query_term": "textile printing",
         "aliases": [
             "textile printing", "tekstil baskı", "tekstil baski", "digital printing",
-            "textile print", "screen printing", "rotary printing", "baski",
+            "textile print", "screen printing", "rotary printing", "printing", "baski",
         ],
     },
     "textile_digital": {

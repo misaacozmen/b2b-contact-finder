@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "registry_name": "invalid_benchmark_packages",
+  "packages": [
+    {
+      "package_id": "a8_benchmark_882b613292f9feac7b1abb5c2e57598ef404b036ac105f8a2b4e35b6d5606786",
+      "package_id_sha256": "882b613292f9feac7b1abb5c2e57598ef404b036ac105f8a2b4e35b6d5606786",
+      "benchmark_manifest_file_sha256": "6dc32d84332afcf90e39db46a68dc6cb0abb67e44187891112e935e9ce14ec44",
+      "expected_sha256": [
+        "faf3cb601a1bbfe758b466375eb4330ff9c4807d31271957499dd2c7ce2fc39d",
+        "9f07f57fb202da60642cb053d074debbe4a1defcd5db5f7351f7d00960593f8a"
+      ],
+      "invalid_reason_codes": [
+        "actual_input_profile_url_misclassified_as_company_website",
+        "ground_truth_non_company_links_labeled_as_website",
+        "review_passes_not_independent",
+        "actual_not_finalized",
+        "package_integrity_not_verified"
+      ],
+      "instruction_file": "MIMAR_A8_D8_KOK_NEDEN_DUZELTME_TALIMATI_2026-09-01.md"
+    }
+  ]
+}

@@ -13,6 +13,7 @@ from openpyxl import Workbook
 import config
 from modules import checkpoint, output_artifacts, run_context, runtime
 from prepare_paid_continuation import prepare_paid_continuation
+from decision_fixtures import frozen_row
 
 
 PROVIDERS = {name: 0 for name in checkpoint.CANONICAL_PROVIDERS}
@@ -294,7 +295,7 @@ def test_provider_ledger_mismatch_stops_before_new_reservation(tmp_path: Path):
 
 
 def test_publication_policy_blocks_failed_paid_state_even_with_good_old_payload():
-    row = _payload("input:0", status="OK_HIGH_CONFIDENCE", publication_eligible=True, website="https://acme.example", email="good@example", free_state="DONE", paid_state="FAILED")
+    row = frozen_row(_payload("input:0", status="OK_HIGH_CONFIDENCE", publication_eligible=True, website="https://acme.example", email="good@example", free_state="DONE", paid_state="FAILED", paid_required=False), "input:0", publishable=False)
     assert not output_artifacts.is_publishable_row(row)
     assert output_artifacts.partition_output_rows([row])[0] == []
 
@@ -460,7 +461,7 @@ def test_entity_memory_receipt_is_idempotent_and_preserves_observation(tmp_path:
     from modules import entity_memory
 
     path = tmp_path / "memory.jsonl"
-    row = {
+    row = frozen_row({
         "company": "Receipt Corp", "source_record_id": "input:0",
         "status": "OK_MEDIUM_CONFIDENCE", "publication_eligible": True,
         "free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False,
@@ -471,7 +472,7 @@ def test_entity_memory_receipt_is_idempotent_and_preserves_observation(tmp_path:
             "identity_assessment": {"conflicts": []},
             "crawl": {"pages": ["https://receipt.example/contact"]},
         },
-    }
+    }, "input:0", publishable=True)
     with patch.object(config, "VERIFIED_ENTITY_MEMORY_FILE", path):
         assert entity_memory.remember([row]) == 1
         before = path.read_bytes()

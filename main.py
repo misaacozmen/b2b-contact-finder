@@ -51,6 +51,29 @@ def _empty_result(company: str, status: str, reason: str = "", score: int = 0) -
     return result_factory.empty_result(company, status, reason=reason, score=score)
 
 
+def _attach_metadata_context(row: dict, metadata: dict | None) -> dict:
+    """Persist source-specific metadata context evidence on every final row."""
+    metadata = dict(metadata or {})
+    contexts = scorer.metadata_contexts(metadata)
+    status, reason = scorer.metadata_context_status(metadata)
+    evidence_items = scorer.metadata_context_evidence(metadata)
+    row["metadata_contexts"] = "; ".join(contexts)
+    row["metadata_context_status"] = status
+    row["metadata_context_reason"] = reason
+    row["metadata_source_fields_sha256"] = scorer.metadata_source_fields_sha256(metadata)
+    row["metadata_context_evidence"] = evidence_items
+    evaluation = row.get("__evaluation")
+    if not isinstance(evaluation, dict):
+        evaluation = {}
+        row["__evaluation"] = evaluation
+    evaluation["metadata_contexts"] = contexts
+    evaluation["metadata_context_status"] = status
+    evaluation["metadata_context_reason"] = reason
+    evaluation["metadata_source_fields_sha256"] = row["metadata_source_fields_sha256"]
+    evaluation["metadata_context_evidence"] = evidence_items
+    return row
+
+
 def _attach_candidates(row: dict, candidates: list[dict]) -> dict:
     return output_artifacts.attach_candidates(row, candidates)
 
@@ -1984,7 +2007,7 @@ def _finalize_selected_evaluation(
     return row
 
 
-def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None) -> tuple[int, dict]:
+def _process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None) -> tuple[int, dict]:
     runtime.record("pipeline.companies")
     logger.info("Processing %s: %s", index + 1, company)
     if known_website:
@@ -2444,6 +2467,11 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     return index, _attach_candidates(row, candidates)
 
 
+def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None) -> tuple[int, dict]:
+    result_index, row = _process_company(index, company, logger, known_website, metadata)
+    return result_index, _attach_metadata_context(row, metadata)
+
+
 def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
     return output_artifacts.write_outputs(rows, elapsed_seconds)
 
@@ -2570,6 +2598,7 @@ def run(
     run_dir: Path | None = None,
     resume_run: Path | None = None,
     from_run_manifest: Path | None = None,
+    finalize_without_paid: bool = False,
 ) -> str:
     """Run the pipeline without leaking per-run config into later calls."""
     with _RUN_LOCK:
@@ -2577,7 +2606,7 @@ def run(
             name: getattr(config, name) for name in _RUN_SCOPED_CONFIG_NAMES
         }
         try:
-            return _run(input_file, output_dir, companies, only_statuses, allow_paid=allow_paid, run_dir=run_dir, resume_run=resume_run, from_run_manifest=from_run_manifest)
+            return _run(input_file, output_dir, companies, only_statuses, allow_paid=allow_paid, run_dir=run_dir, resume_run=resume_run, from_run_manifest=from_run_manifest, finalize_without_paid=finalize_without_paid)
         finally:
             try:
                 close_logging()
@@ -2596,6 +2625,7 @@ def _run(
     run_dir: Path | None = None,
     resume_run: Path | None = None,
     from_run_manifest: Path | None = None,
+    finalize_without_paid: bool = False,
 ) -> str:
     return pipeline_runner.run_pipeline(
         input_file,
@@ -2610,6 +2640,7 @@ def _run(
         run_dir=run_dir,
         resume_run_dir=resume_run,
         from_run_manifest=from_run_manifest,
+        finalize_without_paid=finalize_without_paid,
     )
 
 
@@ -2645,6 +2676,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     paid_group = parser.add_mutually_exclusive_group()
     paid_group.add_argument("--allow-paid", dest="allow_paid", action="store_true", default=None, help="Enable paid providers for this run and persist their budgets in the manifest")
     paid_group.add_argument("--no-allow-paid", dest="allow_paid", action="store_false", help="Explicitly disable paid providers")
+    parser.add_argument(
+        "--finalize-without-paid", action="store_true",
+        help="Finalize a free-only run atomically without handoff or paid provider calls",
+    )
     parser.add_argument("--replay-manifest", type=Path, default=None, help="Validated sharded replay manifest")
     parser.add_argument(
         "--non-interactive",
@@ -2657,6 +2692,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 def resolve_cli_run_config(argv=None):
     """Resolve effective run config through the CLI option/resolver path only."""
     args = parse_args(argv)
+    if args.finalize_without_paid and args.allow_paid is True:
+        raise SystemExit("--finalize-without-paid is mutually exclusive with --allow-paid")
     if args.search_cache is not None:
         config.SEARCH_CACHE_MODE = args.search_cache
     if args.crawl_cache is not None:
@@ -2675,11 +2712,16 @@ def resolve_cli_run_config(argv=None):
             setattr(config, config_name, max(0, int(value)))
     if args.non_interactive:
         _apply_saved_resolver_configuration()
-    return run_context.RunConfig.from_config(paid_enabled=bool(args.allow_paid))
+    return run_context.RunConfig.from_config(
+        paid_enabled=False if args.finalize_without_paid else bool(args.allow_paid),
+        free_only_finalization=args.finalize_without_paid,
+    )
 
 
 def cli(argv=None) -> int:
     args = parse_args(argv)
+    if args.finalize_without_paid and args.allow_paid is True:
+        raise SystemExit("--finalize-without-paid is mutually exclusive with --allow-paid")
     if args.search_cache is not None:
         config.SEARCH_CACHE_MODE = args.search_cache
     if args.crawl_cache is not None:
@@ -2721,12 +2763,13 @@ def cli(argv=None) -> int:
             crawl_cache=args.crawl_cache, brightdata_budget=args.brightdata_budget,
             google_places_budget=args.google_places_budget,
             linkedin_budget=args.linkedin_company_budget, rerank_cache=args.rerank_cache,
+            finalize_without_paid=args.finalize_without_paid,
         )
     if args.non_interactive:
         _apply_saved_resolver_configuration()
     else:
         configure_apis_interactively()
-    print(run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest))
+    print(run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=False if args.finalize_without_paid else args.allow_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest, finalize_without_paid=args.finalize_without_paid))
     return 0
 
 

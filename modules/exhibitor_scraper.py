@@ -559,6 +559,38 @@ def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> l
     return dedupe_rows(rows)
 
 
+def _zuchex_node_details(node: dict, *, listing_url: str = "") -> dict:
+    """Separate observed GraphQL identity fields; never promote display name to legal name."""
+    if not isinstance(node, dict):
+        raise ValueError("zuchex_invalid_node")
+    source_id = str(node.get("_id") or node.get("id") or "").strip()
+    if not source_id:
+        raise ValueError("zuchex_missing_source_id")
+    event_data = node.get("withEvent") if isinstance(node.get("withEvent"), dict) else {}
+    profile_url = next(
+        (str(node.get(key)).strip() for key in ("profileUrl", "profile_url", "url") if node.get(key)),
+        "",
+    )
+    legal_name = next(
+        (str(node.get(key)).strip() for key in ("legalName", "legal_name", "companyName", "company_name") if node.get(key)),
+        "",
+    )
+    first_party_fields = {
+        key: node.get(key)
+        for key in ("website", "address", "sector", "description", "phone", "email")
+        if node.get(key) not in (None, "")
+    }
+    return {
+        "source_id": source_id,
+        "display_name": _clean(str(node.get("name") or node.get("displayName") or "")),
+        "legal_name": _clean(legal_name),
+        "booth": _clean(str(event_data.get("booth", ""))),
+        "profile_url": profile_url,
+        "listing_url": listing_url,
+        "first_party_fields": first_party_fields,
+    }
+
+
 def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
     view_id = config.ZUCHEX_VIEW_ID
     event_id = config.ZUCHEX_EVENT_ID
@@ -627,34 +659,28 @@ def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[d
         elif expected_total != total_count:
             raise ValueError("zuchex_total_count_changed")
         for item in nodes:
-            if not isinstance(item, dict):
-                raise ValueError("zuchex_invalid_node")
-            source_id = str(item.get("_id") or item.get("id") or "").strip()
-            if not source_id:
-                raise ValueError("zuchex_missing_source_id")
+            details = _zuchex_node_details(item, listing_url="https://www.zuchex.com/tr/ziyaretci/Katilimci-Listesi-2026.html")
+            source_id = details["source_id"]
             if source_id in unique_ids:
                 continue
             unique_ids.add(source_id)
-            event_data = item.get("withEvent") or {}
-            profile_url = next(
-                (str(item.get(key)).strip() for key in ("profileUrl", "profile_url", "url") if item.get(key)),
-                "",
-            )
             rows.append({
-                "company": _clean(item.get("name", "")),
+                "company": details["display_name"],
+                "listed_legal_name": details["legal_name"],
                 "website": "",
                 "listed_website": "",
                 "source": "zuchex_2026",
                 "country": "Türkiye",
-                "profile_url": profile_url,
-                "listing_url": listing_url,
+                "profile_url": details["profile_url"],
+                "listing_url": details["listing_url"],
                 "source_detail_status": "NOT_REQUESTED",
                 "hall": "",
-                "stand": _clean(event_data.get("booth", "")),
+                "stand": details["booth"],
                 "sector": "ev ve mutfak esyalari",
                 "description": "",
                 "_id": source_id,
                 "source_record_id": f"zuchex_2026:{source_id}",
+                "first_party_fields": details["first_party_fields"],
             })
         if not page_info.get("hasNextPage"):
             break

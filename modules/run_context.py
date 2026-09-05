@@ -197,6 +197,7 @@ class RunConfig:
     thresholds: tuple[tuple[str, int], ...]
     policy_versions: tuple[tuple[str, str], ...]
     effective_settings: tuple[tuple[str, object], ...] = ()
+    free_only_finalization: bool = False
 
     @staticmethod
     def _semantic_settings() -> tuple[tuple[str, object], ...]:
@@ -219,8 +220,11 @@ class RunConfig:
         return tuple(sorted(result))
 
     @classmethod
-    def from_config(cls, *, paid_enabled: bool) -> "RunConfig":
+    def from_config(cls, *, paid_enabled: bool, free_only_finalization: bool = False) -> "RunConfig":
         import modules.publication_policy as publication_policy
+
+        if free_only_finalization and paid_enabled:
+            raise ValueError("free-only finalization is mutually exclusive with paid_enabled")
 
         thresholds = tuple(sorted(
             (name, int(getattr(config, name)))
@@ -246,6 +250,7 @@ class RunConfig:
                 ("cache", str(config.CACHE_SCHEMA_VERSION)),
             ),
             effective_settings=cls._semantic_settings(),
+            free_only_finalization=bool(free_only_finalization),
         )
 
     def as_dict(self) -> dict:
@@ -254,6 +259,7 @@ class RunConfig:
             "search_cache_mode": self.search_cache_mode,
             "crawl_cache_mode": self.crawl_cache_mode,
             "paid_enabled": self.paid_enabled,
+            "free_only_finalization": self.free_only_finalization,
             "budgets": {
                 "brightdata": self.brightdata_budget,
                 "google_places": self.google_places_budget,
@@ -289,6 +295,7 @@ class RunConfig:
             llm_budget=int(budgets["llm"]),
             model=str(payload["model"]), thresholds=thresholds,
             policy_versions=policies, effective_settings=settings,
+            free_only_finalization=bool(payload.get("free_only_finalization", False)),
         )
 
     def apply_effective_settings(self) -> None:

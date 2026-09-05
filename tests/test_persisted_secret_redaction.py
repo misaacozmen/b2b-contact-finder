@@ -31,6 +31,7 @@ from modules import (
     runtime,
     utils,
 )
+from decision_fixtures import frozen_row
 
 
 class PersistedSecretRedactionTests(unittest.TestCase):
@@ -484,14 +485,14 @@ class PersistedSecretRedactionTests(unittest.TestCase):
             coverage_file = Path(tmpdir) / "discovery_coverage.json"
 
             rows = [
-                {
+                frozen_row({
                     "company": "Audit Corp",
                     "status": "OK_HIGH_CONFIDENCE",
                     "publication_eligible": True,
                     "independence_key": "valid_indep",
                     "api_key": "SECRET_AUDIT_KEY",
                     "email_source_url": "https://audit.com?token=SECRET_AUDIT_TOKEN",
-                }
+                }, "test:entity-secret", publishable=True)
             ]
             quality_audit.write(audit_file, rows)
             audit_text = audit_file.read_text(encoding="utf-8")
@@ -548,7 +549,7 @@ class PersistedSecretRedactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "contacts.xlsx"
             rows = [
-                {
+                frozen_row({
                     "company": "Secret Corp",
                     "status": "OK_HIGH_CONFIDENCE",
                     "publication_eligible": True,
@@ -557,7 +558,7 @@ class PersistedSecretRedactionTests(unittest.TestCase):
                     "email_source_url": "https://secretcorp.com/contact?token=VERYSECRET_EMAIL_TOKEN",
                     "phone": "+902123334455",
                     "phone_source_url": "https://secretcorp.com/phone%3Fapi_key%3DVERYSECRET_API_KEY",
-                }
+                }, "test:audit-secret", publishable=True)
             ]
             excel.write_contacts(file_path, rows)
             read_back = excel._read_rows(file_path)
@@ -570,7 +571,7 @@ class PersistedSecretRedactionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "entity_relationships.jsonl"
             rows = [
-                {
+                frozen_row({
                     "company": "Entity Corp",
                     "status": "OK_HIGH_CONFIDENCE",
                     "publication_eligible": True,
@@ -581,7 +582,7 @@ class PersistedSecretRedactionTests(unittest.TestCase):
                             "_profile_url": "https://profile.com%3Faccess_token%3DVERYSECRET_PROFILE_TOKEN",
                         }
                     },
-                }
+                }, "test:entity-registry-secret", publishable=True)
             ]
             entity_registry.write_observations(file_path, rows)
             raw_text = file_path.read_text(encoding="utf-8")

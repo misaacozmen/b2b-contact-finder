@@ -57,7 +57,7 @@ def remember(rows: list[dict]) -> int:
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for row in rows:
         if (
-            not publication_policy.is_publishable_row(row)
+            not publication_policy.frozen_publishable(row, require=True)
             or row.get("quarantine_state")
             or row.get("quarantine_status")
             or "legacy_recovery_provisional" in str(row.get("publication_blockers", ""))

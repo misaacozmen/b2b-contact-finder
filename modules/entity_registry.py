@@ -94,7 +94,7 @@ def write_observations(path: Path, rows: list[dict], *, observed_at: str | None 
                     "structured_urls": structured.get("urls", []),
                     "structured_same_as": structured.get("same_as", []),
                     "first_party_relationships": relationship_graph.observation_payload(structured),
-                    "confidence": "observed_high" if publication_policy.is_publishable_row(row) else "observed_review",
+                    "confidence": "observed_high" if publication_policy.frozen_publishable(row, require=True) else "observed_review",
                     "observed_at": observed_at,
                 }
                 handle.write(json.dumps(redaction.sanitize(record), ensure_ascii=False) + "\n")

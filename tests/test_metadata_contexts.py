@@ -1,7 +1,8 @@
 import unittest
+from pathlib import Path
 
 import main
-from modules import scorer, search
+from modules import entity_resolution, exhibitor_scraper, scorer, search
 
 
 class MetadataContextTests(unittest.TestCase):
@@ -64,6 +65,68 @@ class MetadataContextTests(unittest.TestCase):
         metadata = {"sector": "", "description": "BEAUTYEURASIA.COM"}
         self.assertEqual(scorer.metadata_contexts(metadata), [])
         self.assertEqual(search._metadata_query_terms(metadata), [])
+
+    def test_texhibition_source_sector_maps_accessory_and_digital_contexts(self) -> None:
+        self.assertEqual(
+            scorer.metadata_contexts({"source": "texhibition_2026", "sector": "Accessory"}),
+            ["textile_accessories"],
+        )
+        self.assertEqual(
+            scorer.metadata_contexts({"source": "texhibition_2026", "sector": "Digital"}),
+            ["textile_digital"],
+        )
+
+    def test_non_texhibition_generic_terms_do_not_create_textile_context(self) -> None:
+        self.assertEqual(
+            scorer.metadata_contexts({"source": "other_source", "sector": "Accessory", "description": "Digital Agency"}),
+            [],
+        )
+
+    def test_texhibition_non_textile_labels_keep_required_contexts(self) -> None:
+        self.assertEqual(scorer.metadata_contexts({"source": "other_source", "sector": "Digital Agency"}), [])
+        self.assertEqual(scorer.metadata_contexts({"source": "other_source", "sector": "Accessory Store"}), [])
+        self.assertEqual(scorer.metadata_contexts({"source": "other_source", "sector": "Label Manufacturer"}), ["ambalaj"])
+
+    def test_combined_source_context_evidence_keeps_provenance_separate(self) -> None:
+        evidence = scorer.metadata_context_evidence({
+            "source": "texhibition_2026;zuchex_2026",
+            "sector": "Label Manufacturer",
+            "listed_legal_name": "AKEL",
+        })
+        assert [item["source"] for item in evidence] == ["texhibition_2026", "zuchex_2026"]
+        assert evidence[0]["contexts"] == ["ambalaj"]
+        assert evidence[1]["status"] == "unknown"
+        assert evidence[1]["reason"] == "source_specific_metadata_unavailable_after_legacy_merge"
+
+    def test_zuchex_graphql_fixture_preserves_display_legal_and_profile_fields(self) -> None:
+        import json
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "zuchex_public_detail.json").read_text(encoding="utf-8"))
+        node = fixture["data"]["view"]["exhibitors"]["nodes"][0]
+        details = exhibitor_scraper._zuchex_node_details(node, listing_url="https://www.zuchex.com/list")
+        assert details["source_id"] == "zuchex-public-001"
+        assert details["display_name"] == "AKEL"
+        assert details["legal_name"] == ""
+        assert details["profile_url"].endswith("zuchex-public-001")
+        assert details["first_party_fields"]["website"] == "https://akel.com.tr"
+
+    def test_blank_and_unmapped_source_sectors_are_explicit(self) -> None:
+        assert scorer.metadata_context_status({"source": "texhibition_2026", "sector": ""}) == ("unknown", "source_sector_blank")
+        assert scorer.metadata_context_status({"source": "texhibition_2026", "sector": "Unmapped sector"}) == ("unknown", "unknown_unmapped_label:unmapped sector")
+        profile = entity_resolution.build_target_profile("Example", {"source": "texhibition_2026", "sector": ""})
+        assert profile.metadata_context_status == "unknown"
+        assert profile.metadata_context_reason == "source_sector_blank"
+        assert profile.metadata_source_fields_sha256
+
+    def test_clean_texhibition_detail_fixture_excludes_footer_and_keeps_fields(self) -> None:
+        fixture_root = Path(__file__).parent / "fixtures"
+        adenza = exhibitor_scraper._texhibition_profile_details(
+            (fixture_root / "texhibitionist_adenza_profile.html").read_text(encoding="utf-8"),
+            "https://www.texhibitionist.com/en/exhibitors/adenza",
+        )
+        assert adenza["listed_legal_name"].startswith("ADENZA")
+        assert "Merter" in adenza["listed_address"]
+        assert adenza["listed_website"] == "https://adenza.com.tr"
+        assert "organizer" not in adenza["description"].casefold()
 
     def test_missing_discovery_context_is_never_a_hard_failure(self) -> None:
         evaluation = {

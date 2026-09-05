@@ -15,12 +15,19 @@ from modules import (
     identity,
     official_registry,
     quality_audit,
+    publication_policy,
     replay_snapshot,
     relationship_graph,
     search,
     site_mapper,
     site_recovery,
 )
+
+
+def _frozen_row(row: dict, source_id: str) -> dict:
+    row["source_record_id"] = source_id
+    publication_policy.freeze_publication_decision(row, row.get("__evaluation", {}))
+    return row
 
 
 def _evaluation(
@@ -265,7 +272,7 @@ class DiscoveryAndMemoryTests(unittest.TestCase):
     def test_memory_requires_published_same_site_contact_and_revalidates(self):
         with TemporaryDirectory() as root:
             path = Path(root) / "memory.jsonl"
-            row = {
+            row = _frozen_row({
                 "company": "ORNEK METAL",
                 "status": "OK_MEDIUM_CONFIDENCE",
                 "publication_eligible": True,
@@ -279,7 +286,7 @@ class DiscoveryAndMemoryTests(unittest.TestCase):
                         "pages": ["https://ornek.example/legal"],
                     },
                 },
-            }
+            }, "test:memory")
             with patch.object(config, "VERIFIED_ENTITY_MEMORY_FILE", path):
                 self.assertEqual(entity_memory.remember([row]), 1)
                 found = entity_memory.candidates("ORNEK METAL")
@@ -543,7 +550,7 @@ class AutonomousOrchestrationTests(unittest.TestCase):
         self.assertEqual(len(evaluations[0]["_automation"]["rounds"]), 1)
 
     def test_quality_audit_flags_no_valid_publication(self):
-        rows = [{
+        rows = [_frozen_row({
             "company": "ORNEK",
             "status": "OK_MEDIUM_CONFIDENCE",
             "publication_eligible": True,
@@ -551,13 +558,13 @@ class AutonomousOrchestrationTests(unittest.TestCase):
             "email_source_url": "https://directory.example/profile",
             "phone_source_url": "",
             "__evaluation": {"identity_assessment": {"conflicts": []}},
-        }]
+        }, "test:quality-no-valid")]
         audit = quality_audit.payload(rows)
         self.assertEqual(audit["invalid_publication_count"], 1)
         self.assertEqual(audit["published_count"], 1)
 
     def test_quality_audit_flags_excluded_third_party_website(self):
-        rows = [{
+        rows = [_frozen_row({
             "company": "ORNEK",
             "status": "OK_MEDIUM_CONFIDENCE",
             "publication_eligible": True,
@@ -565,7 +572,7 @@ class AutonomousOrchestrationTests(unittest.TestCase):
             "email_source_url": "https://tradeatlas.com/company/ornek",
             "phone_source_url": "https://tradeatlas.com/company/ornek",
             "__evaluation": {"identity_assessment": {"conflicts": []}},
-        }]
+        }, "test:quality-third-party")]
         audit = quality_audit.payload(rows)
         self.assertEqual(audit["invalid_publication_count"], 1)
         self.assertEqual(
@@ -574,13 +581,13 @@ class AutonomousOrchestrationTests(unittest.TestCase):
         )
 
     def test_quality_audit_accepts_compact_resolution_string(self):
-        audit = quality_audit.payload([{
+        audit = quality_audit.payload([_frozen_row({
             "company": "ORNEK",
             "status": "REVIEW_NEEDED",
             "__evaluation": {
                 "identity_resolution": "no_candidate_proved_target_fingerprint",
             },
-        }])
+        }, "test:quality-compact")])
         self.assertEqual(
             audit["terminal_reason_counts"],
             {"no_candidate_proved_target_fingerprint": 1},

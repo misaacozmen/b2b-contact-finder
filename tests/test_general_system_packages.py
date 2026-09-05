@@ -5,7 +5,13 @@ from openpyxl import load_workbook
 
 import main
 import config
-from modules import crawler, extractor, identity, output_artifacts, query_planner, relationship_graph, site_mapper
+from modules import crawler, extractor, identity, output_artifacts, publication_policy, query_planner, relationship_graph, site_mapper
+
+
+def _frozen_row(row: dict, source_id: str) -> dict:
+    row["source_record_id"] = source_id
+    publication_policy.freeze_publication_decision(row, row.get("__evaluation", {}))
+    return row
 
 
 class AdaptiveQueryPlannerTests(unittest.TestCase):
@@ -187,8 +193,8 @@ class SmartOfficialSiteMappingTests(unittest.TestCase):
 
     def test_primary_contacts_output_receives_only_publishable_rows(self):
         rows = [
-            {"company": "Verified", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://verified.example"},
-            {"company": "Review", "status": "REVIEW_NEEDED", "website": "https://review.example"},
+            _frozen_row({"company": "Verified", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://verified.example"}, "test:verified"),
+            _frozen_row({"company": "Review", "status": "REVIEW_NEEDED", "website": "https://review.example"}, "test:review"),
         ]
         published, review = output_artifacts.partition_output_rows(rows)
         self.assertEqual([row["company"] for row in published], ["Verified"])

@@ -1,13 +1,13 @@
 from datetime import timedelta
 from statistics import mean
 from modules import discovery_coverage, runtime
-from modules.publication_policy import OK_STATUSES, is_publishable_row
+from modules.publication_policy import OK_STATUSES, frozen_publishable
 
 
-def failed_rows(rows: list[dict]) -> list[dict]:
+def failed_rows(rows: list[dict], *, require_frozen_decisions: bool = True) -> list[dict]:
     failed: list[dict] = []
     for row in rows:
-        if is_publishable_row(row):
+        if frozen_publishable(row, require=require_frozen_decisions):
             continue
         failed.append(
             {
@@ -23,21 +23,27 @@ def _pct(count: int, total: int) -> str:
     return f"{(count / total * 100):.1f}%" if total else "0.0%"
 
 
-def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_snapshot: dict | None = None) -> str:
+def build_report(
+    rows: list[dict],
+    elapsed_seconds: float | None,
+    *,
+    runtime_snapshot: dict | None = None,
+    require_frozen_decisions: bool = True,
+) -> str:
     total = len(rows)
     website_count = sum(1 for row in rows if row.get("website"))
     email_count = sum(1 for row in rows if row.get("email"))
     verified_email_count = sum(1 for row in rows if row.get("email_verification") == "verified")
     phone_count = sum(1 for row in rows if row.get("phone"))
     complete_count = sum(1 for row in rows if row.get("website") and row.get("email") and row.get("phone"))
-    verified_rows = [row for row in rows if is_publishable_row(row)]
+    verified_rows = [row for row in rows if frozen_publishable(row, require=require_frozen_decisions)]
     publication_eligible_count = sum(
-        1 for row in rows if is_publishable_row(row)
+        1 for row in rows if frozen_publishable(row, require=require_frozen_decisions)
     )
     complete_held_count = sum(
         1 for row in rows
         if row.get("website") and row.get("email") and row.get("phone")
-        and not is_publishable_row(row)
+        and not frozen_publishable(row, require=require_frozen_decisions)
     )
     verified_website_count = sum(1 for row in verified_rows if row.get("website"))
     verified_complete_count = sum(

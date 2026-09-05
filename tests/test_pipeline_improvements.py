@@ -8,7 +8,14 @@ from openpyxl import load_workbook
 
 import config
 import main
-from modules import cache_store, checkpoint, crawler, email_verifier, evidence, extractor, google_places, search
+from modules import cache_store, checkpoint, crawler, email_verifier, evidence, extractor, google_places, publication_policy, search
+
+
+def _live_results(provider: str = "test"):
+    return search.SearchResults(
+        [{"href": "https://example.com", "title": "Example", "body": ""}],
+        "live", provider, result_state="COMPLETED",
+    )
 
 
 class PipelineImprovementTests(unittest.TestCase):
@@ -23,7 +30,7 @@ class PipelineImprovementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(config, "SEARCH_CACHE_DIR", Path(directory)):
             with patch.object(config, "SEARCH_CACHE_MODE", "use"), patch(
                 "modules.search._search_text_live",
-                return_value=[{"href": "https://example.com", "title": "Example", "body": ""}],
+                return_value=_live_results("brightdata"),
             ) as live:
                 first = search._search_text("Example official website")
                 second = search._search_text("Example official website")
@@ -48,7 +55,7 @@ class PipelineImprovementTests(unittest.TestCase):
                 config, "SEARCH_PROVIDER", "brightdata"
             ), patch.object(config, "SEARCH_CACHE_MODE", "use"), patch(
                 "modules.search._search_text_live",
-                return_value=[{"href": "https://example.com", "title": "Example", "body": ""}],
+                return_value=_live_results("ddgs"),
             ):
                 expected = search._search_text("Provider-neutral replay")
 
@@ -211,7 +218,7 @@ class PipelineImprovementTests(unittest.TestCase):
     def test_evidence_jsonl_contains_field_source_urls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "evidence.jsonl"
-            evidence.write_jsonl(path, [{
+            row = {
                 "company": "Example",
                 "website": "https://example.com",
                 "email": "info@example.com",
@@ -237,7 +244,10 @@ class PipelineImprovementTests(unittest.TestCase):
                         "independence_key": "first_party_domain:example.com",
                     }]},
                 },
-            }])
+            }
+            row["source_record_id"] = "test:evidence"
+            publication_policy.freeze_publication_decision(row, row["__evaluation"])
+            evidence.write_jsonl(path, [row])
             payload = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(payload["selected"]["email_source_url"], "https://example.com/contact")
         self.assertEqual(payload["candidates"][0]["_evidence_queries"], ["q1", "q2"])
@@ -254,7 +264,7 @@ class PipelineImprovementTests(unittest.TestCase):
             try:
                 main._set_output_dir(root)
                 main._write_outputs([{
-                    "company": "Example", "website": "https://example.com", "website_source": "official",
+                    "company": "Example", "source_record_id": "test:output", "website": "https://example.com", "website_source": "official",
                     "email": "info@example.com", "email_source_url": "https://example.com/contact",
                     "phone": "02125550000", "phone_source_url": "https://example.com/contact",
                     "phone_label": "headquarters", "status": "OK_HIGH_CONFIDENCE", "confidence": "high",

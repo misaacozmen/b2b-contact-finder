@@ -19,6 +19,11 @@ class TargetProfile:
     legal_tokens: tuple[str, ...]
     brand_tokens: tuple[str, ...]
     context_tokens: tuple[str, ...]
+    metadata_contexts: tuple[str, ...] = ()
+    metadata_context_status: str = "unknown"
+    metadata_context_reason: str = "source_sector_blank"
+    metadata_source_fields_sha256: str = ""
+    metadata_context_evidence: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -398,11 +403,18 @@ def build_target_profile(company: str, metadata: dict | None = None) -> TargetPr
         scorer.context_tokens(f"{company} {context_source}")
         + scorer.metadata_contexts(metadata)
     ))
+    metadata_context_values = tuple(scorer.metadata_contexts(metadata))
+    metadata_status, metadata_reason = scorer.metadata_context_status(metadata)
     return TargetProfile(
         company=company,
         legal_tokens=legal_tokens,
         brand_tokens=brand_tokens,
         context_tokens=context_tokens,
+        metadata_contexts=metadata_context_values,
+        metadata_context_status=metadata_status,
+        metadata_context_reason=metadata_reason,
+        metadata_source_fields_sha256=scorer.metadata_source_fields_sha256(metadata),
+        metadata_context_evidence=tuple(scorer.metadata_context_evidence(metadata)),
     )
 
 

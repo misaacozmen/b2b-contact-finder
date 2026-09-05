@@ -61,6 +61,10 @@ def apply_quarantine(row: dict, *, state: str, status: str = "", blockers: str =
 
 
 def is_publishable_row(row: dict) -> bool:
+    if isinstance(row.get("publication_decision"), dict):
+        return publication_policy.frozen_publishable(row, require=True)
+    # Compatibility predicate for pre-envelope callers. Final publication
+    # surfaces use ``frozen_publishable(..., require=True)`` below.
     return publication_policy.is_publishable_row(row)
 
 
@@ -155,7 +159,7 @@ def attach_candidates(row: dict, candidates: list[dict]) -> dict:
             })
         candidate_domain = scorer.normalize_domain(candidate.get("url", ""))
         if selected_domain and candidate_domain == selected_domain:
-            final_stage = "published" if publication_policy.is_publishable_row(row) else "selected_for_review"
+            final_stage = "published" if bool(row.get("publication_advisory_eligible", row.get("publication_eligible", False))) else "selected_for_review"
             if not any(item.get("stage") == final_stage for item in history):
                 history.append({"stage": final_stage, "status": status})
         elif not any(item.get("stage") in {"rejected", "not_evaluated"} for item in history):
@@ -309,10 +313,10 @@ def clear_unpublished_contacts(row: dict) -> None:
     suppress_all_contacts(row, "website_not_published")
 
 
-def partition_output_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Return publishable and review rows without changing the input list."""
-    published = [row for row in rows if is_publishable_row(row)]
-    review = [row for row in rows if not is_publishable_row(row)]
+def partition_output_rows(rows: list[dict], *, require_frozen_decisions: bool = True) -> tuple[list[dict], list[dict]]:
+    """Partition by the frozen decision; legacy callers may use persisted booleans."""
+    published = [row for row in rows if publication_policy.frozen_publishable(row, require=require_frozen_decisions)]
+    review = [row for row in rows if not publication_policy.frozen_publishable(row, require=require_frozen_decisions)]
     return published, review
 
 
@@ -364,7 +368,13 @@ def confidence_status(score: int, has_contact: bool, reasons: list[str], identit
     return "REVIEW_NEEDED", "review"
 
 
-def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapshot: dict | None = None) -> ArtifactResult:
+def write_outputs(
+    rows: list[dict],
+    elapsed_seconds: float,
+    *,
+    telemetry_snapshot: dict | None = None,
+    config_sha256: str | None = None,
+) -> ArtifactResult:
     frozen_snapshot = dict(telemetry_snapshot) if telemetry_snapshot is not None else runtime.snapshot()
     frozen_timestamp = str(frozen_snapshot.get("generated_at", "2000-01-01T00:00:00+00:00"))
     apply_global_identity_collision_gate(rows)
@@ -376,8 +386,18 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
 
     all_results_path = staged(output_root / "all_results.xlsx")
     for row in rows:
-        decision = publication_policy.decide_row(row)
+        evaluation = row.get("__evaluation") if isinstance(row.get("__evaluation"), dict) else {}
+        decision = publication_policy.freeze_publication_decision(
+            row, evaluation, config_sha256=config_sha256,
+        )
         row["publication_eligible"] = decision["publishable"]
+        row["publication_policy_version"] = decision["policy_version"]
+        row["publication_policy_action"] = decision.get("action", row.get("publication_policy_action", ""))
+        row["publication_decision_sha256"] = decision["publication_decision_sha256"]
+        row["decision_input_sha256"] = decision["decision_input_sha256"]
+        row["evaluation_sha256"] = decision["evaluation_sha256"]
+        row["config_sha256"] = decision["config_sha256"]
+        row["advisory_eligible"] = decision["advisory_eligible"]
         row["publication_advisory_eligible"] = decision["advisory_eligible"]
         row["website_identity_verified"] = decision["website_identity_verified"]
         row["allowed_contact_fields"] = "; ".join(decision["allowed_contact_fields"])
@@ -397,7 +417,7 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
                 "advisory_eligible": decision["advisory_eligible"],
             })
         row["website_status"] = (
-            "verified" if row.get("website") and is_publishable_row(row)
+            "verified" if row.get("website") and decision["publishable"]
             else "review" if row.get("website") or row.get("status") == "WEBSITE_AMBIGUOUS"
             else "not_found"
         )
@@ -406,7 +426,7 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
             else "partial" if row.get("email") or row.get("phone")
             else "missing"
         )
-        if is_publishable_row(row):
+        if decision["publishable"]:
             discovery_coverage.mark_published(
                 row.get("company", ""),
                 row.get("source_record_id", ""),
@@ -415,9 +435,12 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
     evidence.write_jsonl(staged(config.EVIDENCE_FILE), rows)
     entity_registry.write_observations(staged(config.ENTITY_RELATIONSHIPS_FILE), rows, observed_at=frozen_timestamp)
     quality_audit.write(staged(config.QUALITY_AUDIT_FILE), rows, runtime_snapshot=frozen_snapshot)
-    published_rows, review_rows = partition_output_rows(rows)
-    failed_output_rows = report.failed_rows(rows)
-    report_text = redaction.redact_text(report.build_report(rows, elapsed_seconds, runtime_snapshot=frozen_snapshot))
+    published_rows, review_rows = partition_output_rows(rows, require_frozen_decisions=True)
+    failed_output_rows = report.failed_rows(rows, require_frozen_decisions=True)
+    report_text = redaction.redact_text(report.build_report(
+        rows, elapsed_seconds, runtime_snapshot=frozen_snapshot,
+        require_frozen_decisions=True,
+    ))
     memory_rows = [dict(row) for row in published_rows]
     for row in rows:
         row.pop("__index", None)

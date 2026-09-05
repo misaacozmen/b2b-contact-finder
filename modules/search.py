@@ -32,6 +32,7 @@ from modules import (
     runtime,
     scorer,
     site_mapper,
+    source_adapters,
 )
 
 DISCOVERY_ONLY_ROLES = discovery_rules.DISCOVERY_ONLY_ROLES
@@ -374,6 +375,7 @@ def _ddgs_text(query: str) -> SearchResults:
             # attempt gets its own global limiter slot even though it consumes
             # one logical free query reservation.
             runtime.wait_for_request_slot()
+            runtime.record("http.search.physical_http_requests")
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
             had_non_error_response = True
@@ -599,8 +601,12 @@ def _search_text_live(query: str) -> SearchResults:
         with _BRIGHTDATA_INFLIGHT:
             if _brightdata_circuit_open():
                 raise BrightDataSearchError("Bright Data circuit is open")
-            return _brightdata_text(query)
-    return _ddgs_text(query)
+            value = _brightdata_text(query)
+    else:
+        value = _ddgs_text(query)
+    if not isinstance(value, SearchResults):
+        raise SearchBackendError("live search adapter contract requires SearchResults")
+    return value
 
 
 def _search_cache_key(query: str, provider: str | None = None) -> str:
@@ -638,6 +644,8 @@ def _coerce_search_results(value, *, cache_status: str, provider: str) -> Search
             reason=str(value.get("result_reason") or ""),
             call_ids=tuple(value.get("call_ids") or ()),
         )
+    if str(cache_status).casefold() in {"live", "live_fallback", "circuit_fallback"}:
+        raise SearchBackendError("live search adapter contract requires SearchResults")
     return SearchResults(
         value or [], cache_status, provider,
         result_state="COMPLETED" if value else "UNKNOWN",
@@ -702,7 +710,9 @@ def _search_text(query: str) -> SearchResults:
             LOGGER.warning("Search replay cache miss: %s", query)
             return SearchResults([], "replay_miss", config.SEARCH_PROVIDER, result_state="UNKNOWN", reason="replay_miss")
 
-    results = _coerce_search_results(_search_text_live(query), cache_status="live", provider=config.SEARCH_PROVIDER)
+    results = _search_text_live(query)
+    if not isinstance(results, SearchResults):
+        raise SearchBackendError("live search adapter contract requires SearchResults")
     if mode in {"use", "refresh"} and results.result_state in {"COMPLETED", "EMPTY"}:
         cache_store.save(
             config.SEARCH_CACHE_DIR,
@@ -723,7 +733,9 @@ def _safe_search_text(query: str) -> list[dict]:
                 "search.circuit_fallback.success" if fallback
                 else "search.circuit_fallback.empty"
             )
-            return _coerce_search_results(fallback, cache_status="circuit_fallback", provider="ddgs")
+            if not isinstance(fallback, SearchResults):
+                raise SearchBackendError("live search adapter contract requires SearchResults")
+            return fallback
         except SearchBudgetExhausted:
             runtime.record("search.circuit_fallback.budget_blocked")
             return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="fallback_budget_exhausted")
@@ -745,7 +757,9 @@ def _safe_search_text(query: str) -> list[dict]:
                     "search.fallback.success" if fallback
                     else "search.fallback.empty"
                 )
-                return _coerce_search_results(fallback, cache_status="live_fallback", provider="ddgs")
+                if not isinstance(fallback, SearchResults):
+                    raise SearchBackendError("live search adapter contract requires SearchResults")
+                return fallback
             except SearchBudgetExhausted as fallback_exc:
                 LOGGER.warning("Free search fallback budget exhausted: %s (%s)", query, fallback_exc)
                 runtime.record("search.fallback.budget_blocked")
@@ -1705,7 +1719,12 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
     listed_website = str((metadata or {}).get("listed_website", "") or "").strip()
     listing_url = str((metadata or {}).get("listing_url", "") or "").strip()
     listed_domain = scorer.normalize_domain(listed_website)
-    if listed_domain and not scorer.is_excluded_domain(listed_domain):
+    listed_link = source_adapters.classify_link(
+        listed_website,
+        label=str((metadata or {}).get("listed_website_label", "Website") or "Website"),
+        company_name=company_name,
+    ) if listed_website else {"role": "unknown"}
+    if listed_domain and listed_link["role"] == "company_candidate" and not scorer.is_excluded_domain(listed_domain):
         brand_tokens = scorer.domain_identity_tokens(company_name)
         candidates_by_domain[listed_domain] = {
             "domain": listed_domain,
@@ -1758,8 +1777,13 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
         if not domain or scorer.is_excluded_domain(domain):
             continue
         candidate_role = _candidate_role(company_name, website, label, "")
-        if candidate_role in {"unknown", "company_candidate"}:
-            candidate_role = "company_candidate"
+        # An unlabeled external link is evidence that a profile links out, not
+        # evidence that the target is the company's first-party website.
+        if candidate_role == "unknown":
+            # Keep generic profile links as low-priority discovery bridges so
+            # they remain inspectable, but never let them become authoritative
+            # company candidates or publication websites.
+            candidate_role = "company_candidate" if explicit_website else "discovery_bridge"
         candidate = {
             "domain": domain,
             "url": website,

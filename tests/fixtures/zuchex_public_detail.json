@@ -1,0 +1,21 @@
+{
+  "data": {
+    "view": {
+      "id": "public-view-2026",
+      "exhibitors": {
+        "nodes": [
+          {
+            "_id": "zuchex-public-001",
+            "name": "AKEL",
+            "withEvent": {"booth": "Hall 3 / A01"},
+            "profileUrl": "https://visit.zuchex.com/exhibitor/zuchex-public-001",
+            "website": "https://akel.com.tr",
+            "description": "Publicly observed exhibitor description"
+          }
+        ],
+        "pageInfo": {"hasNextPage": false, "endCursor": null},
+        "totalCount": 1
+      }
+    }
+  }
+}

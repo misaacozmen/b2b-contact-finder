@@ -19,11 +19,13 @@ import config
 from modules import excel, run_context, scorer
 
 
-RESULT_ONLY_FIELDS = frozenset({
-    "email", "phone", "website", "website_source", "selected_website",
-    "email_source", "email_source_url", "phone_source", "phone_source_url",
-    "publication_eligible", "publication_blockers", "status", "confidence",
-})
+SOURCE_ONLY_FIELDS = (
+    "company", "source_record_id", "original_index", "source", "country",
+    "profile_url", "listing_url", "listed_website", "listed_phone", "listed_email",
+    "listed_address", "listed_legal_name", "source_detail_status", "source_detail_url",
+    "source_detail_content_sha256", "hall", "stand", "brands", "representations",
+    "sector", "description",
+)
 CONFLICT_MARKERS = (
     "collision", "conflict", "cross_entity", "homonym", "wrong_owner",
     "different_owner", "identity_conflict",
@@ -51,6 +53,9 @@ def _read_table(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
     if not rows:
         raise ValueError(f"empty workbook: {path}")
     headers = [str(value or "").strip() for value in rows[0]]
+    folded_headers = [header.casefold() for header in headers]
+    if len(folded_headers) != len(set(folded_headers)):
+        raise ValueError(f"case-insensitive duplicate headers: {path}")
     return headers, [
         {headers[index]: row[index] if index < len(row) else "" for index in range(len(headers))}
         for row in rows[1:]
@@ -60,6 +65,8 @@ def _read_table(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
 
 def _read_records(path: Path) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     headers, raw_rows = _read_table(path)
+    if len({header.casefold() for header in headers}) != len(headers):
+        raise ValueError("case-insensitive duplicate input headers")
     records = excel.read_company_records(path)
     if len(records) != len(raw_rows):
         raise ValueError("input workbook row parsing mismatch")
@@ -67,9 +74,7 @@ def _read_records(path: Path) -> tuple[list[str], list[dict[str, Any]], list[dic
         record["original_index"] = index
         source_id = str(record.get("source_record_id", "") or "").strip()
         if not source_id:
-            source_id, quality = run_context.source_record_identity(record)
-            record["source_record_id_quality"] = quality
-            record["source_record_id"] = source_id
+            raise ValueError(f"input source_record_id is empty at row {index + 2}")
         raw["source_record_id"] = source_id
     ids = [str(record["source_record_id"]) for record in records]
     if len(ids) != len(set(ids)):
@@ -77,9 +82,7 @@ def _read_records(path: Path) -> tuple[list[str], list[dict[str, Any]], list[dic
     return headers, records, raw_rows
 
 
-def _load_result_rows(path: Path | None) -> dict[str, dict[str, Any]]:
-    if path is None:
-        return {}
+def _load_result_rows(path: Path) -> tuple[list[str], dict[str, dict[str, Any]]]:
     path = Path(path)
     if path.suffix.casefold() == ".xlsx":
         _headers, rows = _read_table(path)
@@ -89,16 +92,79 @@ def _load_result_rows(path: Path | None) -> dict[str, dict[str, Any]]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         rows = payload if isinstance(payload, list) else payload.get("records", payload.get("rows", []))
     result: dict[str, dict[str, Any]] = {}
+    ordered: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
-            continue
+            raise ValueError(f"baseline result row is not an object: {path}")
         source_id = str(row.get("source_record_id", "") or "").strip()
         if not source_id:
-            continue
+            raise ValueError(f"baseline result source_record_id is empty: {path}")
         if source_id in result:
             raise ValueError(f"duplicate baseline source_record_id: {source_id}")
         result[source_id] = row
-    return result
+        ordered.append(source_id)
+    return ordered, result
+
+
+def _load_frozen_evidence(path: Path) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    from modules import publication_policy
+
+    result: dict[str, dict[str, Any]] = {}
+    ordered: list[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError(f"baseline evidence row is not an object: {path}")
+        source_id = str(row.get("source_record_id", "") or "").strip()
+        if not source_id or source_id in result:
+            raise ValueError(f"baseline evidence has empty or duplicate source_record_id: {path}")
+        decision = row.get("publication_decision")
+        if not isinstance(decision, dict):
+            raise ValueError(f"baseline evidence has no frozen publication_decision: {source_id}")
+        publication_policy.verify_publication_decision(decision, source_record_id=source_id)
+        result[source_id] = row
+        ordered.append(source_id)
+    return ordered, result
+
+
+def _manifest_file_hash(manifest: dict[str, Any], path: Path) -> str:
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("baseline manifest has no file hash map")
+    for key in (path.name, str(path), str(path.resolve())):
+        entry = files.get(key)
+        if isinstance(entry, dict) and entry.get("sha256"):
+            return str(entry["sha256"])
+    raise ValueError(f"baseline manifest has no hash for {path.name}")
+
+
+def _validate_baseline_bundle(
+    *, input_ids: list[str], results_path: Path, evidence_path: Path, manifest_path: Path,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    result_order, results = _load_result_rows(results_path)
+    evidence_order, evidence = _load_frozen_evidence(evidence_path)
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("baseline manifest must be an object")
+    manifest_ids = list(manifest.get("source_record_ids") or manifest.get("ordered_source_record_ids") or [])
+    if manifest_ids != input_ids:
+        raise ValueError("baseline manifest must contain the original ordered source IDs")
+    if result_order != input_ids or evidence_order != input_ids:
+        raise ValueError("baseline results/evidence must cover all original IDs in the same order")
+    for path in (results_path, evidence_path):
+        if _manifest_file_hash(manifest, path) != _sha256(path):
+            raise ValueError(f"baseline bundle hash mismatch: {path.name}")
+    from modules import publication_policy
+    for source_id in input_ids:
+        decision = evidence[source_id]["publication_decision"]
+        result_decision = results[source_id].get("publication_decision")
+        if isinstance(result_decision, dict):
+            publication_policy.verify_publication_decision(result_decision, source_record_id=source_id)
+            if result_decision["publication_decision_sha256"] != decision["publication_decision_sha256"]:
+                raise ValueError(f"baseline result/evidence decision mismatch: {source_id}")
+    return manifest, results, evidence
 
 
 def _split_reasons(row: dict[str, Any]) -> list[str]:
@@ -184,16 +250,16 @@ def _task(record: dict[str, Any], baseline: dict[str, Any] | None) -> dict[str, 
 
 
 def _write_child_input(path: Path, headers: list[str], rows: list[dict[str, Any]]) -> None:
-    output_headers = list(headers)
-    source_header = next((header for header in output_headers if header.casefold() == "source_record_id"), None)
-    if source_header is None:
-        output_headers.append("source_record_id")
-        source_header = "source_record_id"
+    del headers
+    output_headers = list(SOURCE_ONLY_FIELDS)
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(output_headers)
     for row in rows:
-        sheet.append([row.get(header, row.get(source_header, "")) for header in output_headers])
+        source_id = str(row.get("source_record_id", "") or "").strip()
+        if not source_id:
+            raise ValueError("child input source_record_id is empty")
+        sheet.append([row.get(header, "") for header in output_headers])
     workbook.save(path)
     workbook.close()
 
@@ -202,21 +268,37 @@ def prepare_remediation_run(
     *,
     input_path: Path,
     destination: Path,
-    baseline_results: Path | None = None,
+    baseline_results: Path,
+    baseline_evidence: Path,
+    baseline_manifest: Path,
     parent_manifest: Path | None = None,
 ) -> dict[str, Any]:
     input_path, destination = Path(input_path).resolve(), Path(destination).resolve()
     headers, records, raw_rows = _read_records(input_path)
-    baseline = _load_result_rows(baseline_results)
+    input_ids = [str(record["source_record_id"]) for record in records]
+    if len(input_ids) != 893:
+        raise ValueError("original input must contain exactly 893 source_record_id values")
+    _baseline_manifest_payload, baseline, baseline_evidence_rows = _validate_baseline_bundle(
+        input_ids=input_ids,
+        results_path=Path(baseline_results).resolve(),
+        evidence_path=Path(baseline_evidence).resolve(),
+        manifest_path=Path(baseline_manifest).resolve(),
+    )
     tasks = [
-        _task(record, baseline.get(str(record["source_record_id"])))
+        _task(record, {
+            **baseline.get(str(record["source_record_id"]), {}),
+            "publication_eligible": baseline_evidence_rows[str(record["source_record_id"])]["publication_decision"]["publishable"],
+            "publication_blockers": "; ".join(baseline_evidence_rows[str(record["source_record_id"])]["publication_decision"]["blockers"]),
+        })
         for record in records
-        if baseline_results is None or baseline.get(str(record["source_record_id"]), {}).get("publication_eligible") is not True
+        if not baseline_evidence_rows[str(record["source_record_id"])]["publication_decision"]["publishable"]
     ]
     if not tasks:
         raise ValueError("baseline contains no remediation rows")
     task_ids = {task["source_record_id"] for task in tasks}
-    child_rows = [row for row in raw_rows if str(row["source_record_id"]) in task_ids]
+    child_rows = [record for record in records if str(record["source_record_id"]) in task_ids]
+    if len(child_rows) != len(tasks):
+        raise ValueError("remediation task/source input coverage mismatch")
     destination.mkdir(parents=True, exist_ok=False)
     child_input = destination / "remediation_input.xlsx"
     plan_path = destination / "remediation_plan.json"
@@ -244,7 +326,7 @@ def prepare_remediation_run(
     plan = {
         "schema_version": 1,
         "plan_kind": "remediation",
-        "coverage": {"input_count": len(records), "task_count": len(tasks), "review_source_ids": len(tasks)},
+        "coverage": {"input_count": len(records), "baseline_count": len(baseline), "task_count": len(tasks), "review_source_ids": len(tasks)},
         "tasks": tasks,
         "child": {
             "input": str(child_input), "input_sha256": child_input_hash,
@@ -255,8 +337,18 @@ def prepare_remediation_run(
         "parent": parent,
         "source": {
             "original_input": str(input_path), "original_input_sha256": _sha256(input_path),
-            "baseline_results": str(baseline_results) if baseline_results else None,
-            "baseline_results_sha256": _sha256(baseline_results) if baseline_results else None,
+            "baseline_results": str(baseline_results),
+            "baseline_results_sha256": _sha256(baseline_results),
+            "baseline_evidence": str(baseline_evidence),
+            "baseline_evidence_sha256": _sha256(baseline_evidence),
+            "baseline_manifest": str(baseline_manifest),
+            "baseline_manifest_sha256": _sha256(baseline_manifest),
+        },
+        "baseline_bundle": {
+            "source_record_ids": input_ids,
+            "results_sha256": _sha256(baseline_results),
+            "evidence_sha256": _sha256(baseline_evidence),
+            "manifest_sha256": _sha256(baseline_manifest),
         },
     }
     plan["plan_payload_sha256"] = hashlib.sha256(_canonical(plan).encode("utf-8")).hexdigest()
@@ -267,7 +359,9 @@ def prepare_remediation_run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", "--original-input", dest="input_path", type=Path, required=True)
-    parser.add_argument("--baseline", "--baseline-results", dest="baseline_results", type=Path)
+    parser.add_argument("--baseline", "--baseline-results", dest="baseline_results", type=Path, required=True)
+    parser.add_argument("--baseline-evidence", type=Path, required=True)
+    parser.add_argument("--baseline-manifest", type=Path, required=True)
     parser.add_argument("--parent-manifest", type=Path)
     parser.add_argument("--destination", type=Path, required=True)
     args = parser.parse_args(argv)
