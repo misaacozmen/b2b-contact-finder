@@ -1,5 +1,6 @@
 from copy import deepcopy
 
+from modules import entity_resolution, identity, publication_policy
 from modules.publication_policy import is_publishable_row
 
 
@@ -45,6 +46,89 @@ def test_positive_legal_name_token_is_whitespace_position_independent():
                 reason=f"{reason}; country_identity_tr_tld; context_match:1/1",
             )
             assert is_publishable_row(row)
+
+
+def test_single_token_page_identity_gate_matches_advisory_policy():
+    row = _row(
+        company="ERBEY",
+        website="https://erbeyiplik.com.tr",
+        reason=(
+            "page_identity_strong:1/1; legal_name_phrase_match:1; "
+            "country_identity_tr_tld"
+        ),
+    )
+    assert is_publishable_row(row)
+
+
+def test_bare_brand_plus_generic_group_name_needs_legal_proof():
+    row = _row(
+        company="ALPHA",
+        website="https://alpha.example",
+        reason=(
+            "page_identity_strong:1/1; legal_name_phrase_match:1; "
+            "country_identity_tr_tld"
+        ),
+        __evaluation={
+            "identity_assessment": {"publishable": True, "conflicts": []},
+            "reasons": [],
+            "structured_identity": {
+                "names": ["Alpha Group"],
+                "legal_names": [],
+                "addresses": [],
+                "identifiers": [],
+                "ownership_statements": [],
+            },
+            "structured_domain_relation": {},
+        },
+    )
+    assert not is_publishable_row(row)
+
+
+def test_explicit_profile_site_with_first_party_contact_can_pass_generic_route():
+    company = "LAGOM KUMAS"
+    reasons = [
+        "page_identity_medium:1/2",
+        "no_context_tokens",
+        "email_domain_match",
+        "structured_identity_strong:2/2",
+        "legal_name_phrase_missing:0/2",
+        "country_identity_tr_phone",
+        "ambiguous_name_risk_resolved_by_source_profile_first_party_contact",
+    ]
+    candidate = {
+        "url": "https://lagomfabric.com",
+        "query": "source_profile",
+        "role": "company_candidate",
+        "_source_profile_evidence": 1,
+        "_source_profile_contact_anchor": 1,
+        "_identity_company": company,
+    }
+    structured_identity = {"names": ["Lagom Fabric"], "brand_names": []}
+    evaluation = {
+        "candidate": candidate,
+        "reasons": reasons,
+        "structured_identity": structured_identity,
+        "crawl_result": {
+            "url": candidate["url"],
+            "pages": [{"url": candidate["url"], "html": ""}],
+        },
+        "email": "info@lagomfabric.com",
+        "phone": "05303116682",
+        "email_source_url": "https://lagomfabric.com/contact",
+        "phone_source_url": "https://lagomfabric.com/contact",
+        "has_contact": True,
+        "_identity_resolution": "candidate_resolved_by_target_fingerprint",
+        "identity_assessment": identity.assess(
+            company, candidate, reasons, structured_identity,
+        ),
+    }
+    fingerprint = entity_resolution.fingerprint(
+        entity_resolution.build_target_profile(company), evaluation,
+    )
+    assert fingerprint.safe_source_profile_contact_route
+    assert publication_policy.evaluate(
+        company, evaluation, "OK_HIGH_CONFIDENCE", minimum_safety_score=75,
+    )["publishable"]
 
 
 def test_negative_or_unavailable_legal_name_tokens_do_not_authorize_short_name():

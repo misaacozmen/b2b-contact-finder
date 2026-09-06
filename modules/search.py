@@ -26,6 +26,8 @@ from modules import (
     discovery_coverage,
     discovery_rules,
     entity_memory,
+    exhibitor_scraper,
+    extractor,
     google_places,
     query_planner,
     run_budget,
@@ -43,11 +45,16 @@ PREFERRED_BACKENDS = ["duckduckgo", "google", "brave", "yahoo", "yandex"]
 FALLBACK_BACKENDS = ["mojeek", "grokipedia"]
 _SOURCE_HEALTH_LOCK = threading.Lock()
 _SOURCE_HEALTH: dict[str, dict] = {}
+_SOURCE_PROFILE_HTTP_LOCKS_LOCK = threading.Lock()
+_SOURCE_PROFILE_HTTP_LOCKS: dict[str, threading.Lock] = {}
 _BRIGHTDATA_RATE_LOCK = threading.Lock()
 _BRIGHTDATA_NEXT_REQUEST_AT = 0.0
 _BRIGHTDATA_CIRCUIT_LOCK = threading.Lock()
 _BRIGHTDATA_CONSECUTIVE_FAILURES = 0
 _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
+_DDGS_FAILURE_LOCK = threading.Lock()
+_DDGS_CONSECUTIVE_FAILURES: dict[str, int] = {}
+_DDGS_CIRCUIT_OPEN: set[str] = set()
 _BRIGHTDATA_INFLIGHT = threading.BoundedSemaphore(
     config.BRIGHTDATA_MAX_INFLIGHT_QUERIES
 )
@@ -104,6 +111,9 @@ def reset_source_health() -> None:
     with _BRIGHTDATA_CIRCUIT_LOCK:
         _BRIGHTDATA_CONSECUTIVE_FAILURES = 0
         _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
+    with _DDGS_FAILURE_LOCK:
+        _DDGS_CONSECUTIVE_FAILURES.clear()
+        _DDGS_CIRCUIT_OPEN.clear()
 
 
 def reset_candidate_host_observations() -> None:
@@ -161,6 +171,18 @@ def _strongest_candidate_role(*roles: str) -> str:
 
 def _source_health_key(url: str) -> str:
     return scorer.normalize_domain(url)
+
+
+def _source_profile_http_lock(url: str) -> threading.Lock:
+    """Serialize first-party profile requests per host.
+
+    A source profile host is shared by every exhibitor record in that source.
+    Keeping its low-rate HTTP calls ordered avoids turning ordinary host
+    throttling into false source-profile misses when company workers overlap.
+    """
+    key = _source_health_key(url)
+    with _SOURCE_PROFILE_HTTP_LOCKS_LOCK:
+        return _SOURCE_PROFILE_HTTP_LOCKS.setdefault(key, threading.Lock())
 
 
 def _source_health_storage_key(url: str) -> tuple[str, str]:
@@ -366,37 +388,70 @@ def _ddgs_text(query: str) -> SearchResults:
     if not runtime.reserve_search_query(config.SEARCH_HTTP_REQUEST_BUDGET, bucket=runtime.search_bucket()):
         LOGGER.warning("Free search query budget exhausted: %s", query)
         raise SearchBudgetExhausted("Free search query budget exhausted")
-    had_non_error_response = False
-    last_hard_error: Exception | None = None
-
-    for backend in PREFERRED_BACKENDS + FALLBACK_BACKENDS:
+    empty_attempts = 0
+    transport_errors: list[str] = []
+    call_ids: list[str] = []
+    physical_attempts = 0
+    backends = [*PREFERRED_BACKENDS, *FALLBACK_BACKENDS]
+    for backend in backends:
+        with _DDGS_FAILURE_LOCK:
+            if backend in _DDGS_CIRCUIT_OPEN:
+                continue
+        if physical_attempts >= 3:
+            break
+        physical_attempts += 1
+        call_id = f"ddgs:{backend}:{physical_attempts}"
+        call_ids.append(call_id)
         try:
             # DDGS may make a separate physical request per backend.  Each
             # attempt gets its own global limiter slot even though it consumes
             # one logical free query reservation.
             runtime.wait_for_request_slot()
             runtime.record("http.search.physical_http_requests")
-            with DDGS() as ddgs:
+            with DDGS(timeout=config.REQUEST_TIMEOUT_SEC) as ddgs:
                 results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
-            had_non_error_response = True
             if results:
-                return SearchResults(results, "live", "ddgs", result_state="COMPLETED", reason=f"backend:{backend}")
+                with _DDGS_FAILURE_LOCK:
+                    _DDGS_CONSECUTIVE_FAILURES[backend] = 0
+                return SearchResults(results, "live", "ddgs", result_state="COMPLETED", reason=f"backend:{backend}", call_ids=tuple(call_ids))
+            with _DDGS_FAILURE_LOCK:
+                _DDGS_CONSECUTIVE_FAILURES[backend] = 0
+            empty_attempts += 1
             LOGGER.debug("DDGS backend '%s' returned 0 results for '%s'", backend, query)
+            if empty_attempts >= 2 and not transport_errors:
+                return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="two_typed_empty_backends", call_ids=tuple(call_ids))
         except DDGSException as exc:
             message = str(exc).lower()
             if "no results" in message:
-                had_non_error_response = True
+                empty_attempts += 1
                 LOGGER.debug("DDGS backend '%s' no results for '%s'", backend, query)
+                with _DDGS_FAILURE_LOCK:
+                    _DDGS_CONSECUTIVE_FAILURES[backend] = 0
+                if empty_attempts >= 2 and not transport_errors:
+                    return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="two_typed_empty_backends", call_ids=tuple(call_ids))
                 continue
             LOGGER.debug("DDGS backend '%s' error for '%s': %s", backend, query, exc)
-            last_hard_error = exc
+            transport_errors.append(f"{backend}:{type(exc).__name__}:{exc}")
+            with _DDGS_FAILURE_LOCK:
+                failures = _DDGS_CONSECUTIVE_FAILURES.get(backend, 0) + 1
+                _DDGS_CONSECUTIVE_FAILURES[backend] = failures
+                if failures >= 3:
+                    _DDGS_CIRCUIT_OPEN.add(backend)
+                    runtime.record("search.ddgs_backend_circuit_opened")
         except Exception as exc:
             LOGGER.debug("DDGS backend '%s' failed for '%s': %s", backend, query, exc)
-            last_hard_error = exc
-
-    if last_hard_error and not had_non_error_response:
-        raise SearchBackendError(f"All DDGS backends failed for '{query}': {last_hard_error}")
-    return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="all_backends_empty")
+            transport_errors.append(f"{backend}:{type(exc).__name__}:{exc}")
+            with _DDGS_FAILURE_LOCK:
+                failures = _DDGS_CONSECUTIVE_FAILURES.get(backend, 0) + 1
+                _DDGS_CONSECUTIVE_FAILURES[backend] = failures
+                if failures >= 3:
+                    _DDGS_CIRCUIT_OPEN.add(backend)
+                    runtime.record("search.ddgs_backend_circuit_opened")
+    if empty_attempts >= 2 and not transport_errors:
+        return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="two_typed_empty_backends", call_ids=tuple(call_ids))
+    if transport_errors:
+        return SearchResults([], "live", "ddgs", result_state="FAILED", reason=";".join(transport_errors[:3]), call_ids=tuple(call_ids))
+    return SearchResults([], "live", "ddgs", result_state="UNKNOWN", reason="ddgs_no_healthy_backend", call_ids=tuple(call_ids))
 
 
 def _decode_brightdata_response(response: requests.Response) -> dict:
@@ -1528,6 +1583,19 @@ def _profile_render_fallback(url: str, html: str = "", force: bool = False) -> t
     return html, False
 
 
+def _source_profile_requires_render(profile_url: str) -> bool:
+    """Render the official Texhibition detail surface before contact parsing.
+
+    The static response can expose the outbound website while leaving the
+    visible exhibitor contact fields in the browser-rendered surface.  This is
+    a source-level acquisition rule, not a company-specific exception.
+    """
+    return bool(
+        config.ENABLE_JS_PROFILE_FALLBACK
+        and scorer.normalize_domain(profile_url) == "texhibitionist.com"
+    )
+
+
 def _profile_external_websites(
     profile_url: str,
     *,
@@ -1586,9 +1654,16 @@ def _profile_external_websites(
     pages: list[tuple[str, str, bool]] = []
     try:
         _record_source_health(profile_url, "direct_probe_attempted")
-        response = crawler._request_with_safe_redirects(profile_url, verify=True)
+        with _source_profile_http_lock(profile_url):
+            response = crawler._request_with_safe_redirects(
+                profile_url, verify=True, bucket="source_profile_http",
+            )
         response_url = getattr(response, "_b2b_final_url", getattr(response, "url", profile_url))
-        profile_html, rendered = _profile_render_fallback(response_url, response.text)
+        profile_html, rendered = _profile_render_fallback(
+            response_url,
+            response.text,
+            force=_source_profile_requires_render(response_url),
+        )
         pages.append((response_url, profile_html, rendered))
         runtime.record("source_profile.successes")
         _record_source_health(profile_url, "available", getattr(response, "status_code", 200))
@@ -1636,7 +1711,10 @@ def _profile_external_websites(
         if detail_url.rstrip("/") == first_page_url.rstrip("/"):
             continue
         try:
-            detail_response = crawler._request_with_safe_redirects(detail_url, verify=True)
+            with _source_profile_http_lock(detail_url):
+                detail_response = crawler._request_with_safe_redirects(
+                    detail_url, verify=True, bucket="source_profile_http",
+                )
             final_detail_url = getattr(detail_response, "_b2b_final_url", getattr(detail_response, "url", detail_url))
             detail_html, rendered = _profile_render_fallback(final_detail_url, detail_response.text)
             pages.append((final_detail_url, detail_html, rendered))
@@ -1675,6 +1753,58 @@ def _profile_external_websites(
                 page_url,
                 rendered,
             ))
+    profile_contact_evidence: list[dict] = []
+    for page_url, page_html, rendered in pages:
+        profile_host = scorer.normalize_domain(page_url)
+        if profile_host in {"texhibitionist.com", "www.texhibitionist.com"}:
+            details = exhibitor_scraper._texhibition_profile_details(page_html, page_url)
+            contacts = {
+                "emails": ([{
+                    "value": details.get("listed_email", ""),
+                    "retrieval_method": "browser_render" if rendered else "http",
+                }] if details.get("listed_email") else []),
+                "phones": ([{
+                    "value": details.get("listed_phone", ""),
+                    "retrieval_method": "browser_render" if rendered else "http",
+                }] if details.get("listed_phone") else []),
+            }
+            # The rendered detail page can expose repeated contact fields in
+            # visible text even when its label wrapper is not recognized by
+            # the structured extractor.  Reuse the cleaned detail scope and
+            # merge those observations without reintroducing catalogue chrome.
+            _, detail_scope = exhibitor_scraper._texhibition_detail_scope(page_html)
+            fallback_contacts = extractor.extract_contact_records(
+                str(detail_scope), page_url,
+                "browser_render" if rendered else "http",
+            )
+            for field in ("emails", "phones"):
+                seen = {str(item.get("value", "")) for item in contacts[field]}
+                for item in fallback_contacts.get(field, []):
+                    value = str(item.get("value", ""))
+                    if value and value not in seen:
+                        contacts[field].append(item)
+                        seen.add(value)
+        else:
+        # A catalogue's footer/header often contains the organiser's global
+        # phone number.  It is not exhibitor evidence and must not satisfy the
+        # source-profile contact gate.  Keep the extraction scope aligned with
+        # the source-detail parser used elsewhere in the pipeline.
+            contact_scope = BeautifulSoup(page_html, "html.parser")
+            for node in contact_scope.select(
+                "footer, header, nav, aside, script, style, noscript"
+            ):
+                node.decompose()
+            contacts = extractor.extract_contact_records(
+                str(contact_scope), page_url, "browser_render" if rendered else "http",
+            )
+        for field in ("emails", "phones"):
+            for contact in contacts.get(field, []):
+                profile_contact_evidence.append({
+                    "field": "email" if field == "emails" else "phone",
+                    "value": contact.get("value", ""),
+                    "source_url": page_url,
+                    "retrieval_method": contact.get("retrieval_method", "http"),
+                })
     websites: list[dict] = []
     for raw_url, label, explicit_website, source_page_url, rendered in raw_urls:
         if not raw_url or raw_url.startswith(("mailto:", "tel:", "javascript:", "#")):
@@ -1704,6 +1834,7 @@ def _profile_external_websites(
                 "explicit_website": explicit_website,
                 "source_page_url": source_page_url,
                 "rendered": rendered,
+                "profile_contact_evidence": profile_contact_evidence,
             })
     websites.sort(key=lambda item: bool(item.get("explicit_website")), reverse=True)
     websites = websites[:5]
@@ -1717,6 +1848,16 @@ def _profile_external_websites(
 
 def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name: str, metadata: dict | None) -> None:
     listed_website = str((metadata or {}).get("listed_website", "") or "").strip()
+    listed_field = "listed_website"
+    if not listed_website:
+        source_listed_status = str(
+            (metadata or {}).get("source_listed_website_status", "") or ""
+        ).strip().casefold()
+        if source_listed_status == "present":
+            listed_website = str(
+                (metadata or {}).get("source_listed_website", "") or ""
+            ).strip()
+            listed_field = "source_listed_website"
     listing_url = str((metadata or {}).get("listing_url", "") or "").strip()
     listed_domain = scorer.normalize_domain(listed_website)
     listed_link = source_adapters.classify_link(
@@ -1734,7 +1875,7 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
             "snippet": "",
             "query": "fair_listed_website",
             "rank": 0,
-            "reason": "fair_listed_website_discovery_only",
+            "reason": f"{listed_field}_discovery_only",
             "role": "company_candidate",
             "_source_profile_evidence": 1,
             "_official_query_evidence": 0,
@@ -1752,6 +1893,7 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
             ),
             "_search_evidence": [{
                 "source": "fair_listing",
+                "source_field": listed_field,
                 "profile_url": listing_url,
                 "rank": 0,
             }],
@@ -1763,6 +1905,7 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
     for rank, link_record in enumerate(_profile_external_websites(profile_url), start=1):
         # String support keeps old fixtures and hand-written integrations
         # compatible; newly extracted records carry semantic link evidence.
+        profile_contact_evidence: list[dict] = []
         if isinstance(link_record, str):
             website, label, explicit_website = link_record, "", True
             source_page_url = profile_url
@@ -1771,7 +1914,20 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
             label = link_record.get("label", "")
             explicit_website = bool(link_record.get("explicit_website"))
             source_page_url = link_record.get("source_page_url", profile_url)
+            profile_contact_evidence = list(link_record.get("profile_contact_evidence") or [])
         domain = scorer.normalize_domain(website)
+        profile_contact_evidence = [
+            item for item in profile_contact_evidence
+            if item.get("field") == "phone"
+            or (
+                item.get("field") == "email"
+                and "@" in str(item.get("value", ""))
+                and scorer.same_registrable_domain(
+                    domain,
+                    str(item.get("value", "")).rsplit("@", 1)[-1],
+                )
+            )
+        ]
         # Re-check cached profile links against the current exclusion policy;
         # old cache entries may predate a newly recognized catalogue host.
         if not domain or scorer.is_excluded_domain(domain):
@@ -1804,6 +1960,7 @@ def _add_profile_candidates(candidates_by_domain: dict[str, dict], company_name:
             "_search_evidence": [{"source": "source_profile", "profile_url": profile_url, "rank": rank}],
             "_profile_url": profile_url,
             "_profile_source_page_url": source_page_url,
+            "_source_profile_contact_evidence": profile_contact_evidence,
         }
         existing = candidates_by_domain.get(domain)
         if existing is None or candidate["score"] >= existing["score"]:
@@ -1941,7 +2098,12 @@ def _expand_search_bridge_candidates(
             }
 
 
-def find_candidate_domains(company_name: str, metadata: dict | None = None) -> list[dict]:
+def find_candidate_domains(
+    company_name: str,
+    metadata: dict | None = None,
+    *,
+    profile_candidates: CandidateList | None = None,
+) -> list[dict]:
     source_record_id = str((metadata or {}).get("source_record_id", "") or "").strip()
     original_index = (metadata or {}).get("original_index")
     if aliases.has_no_website(company_name):
@@ -1957,6 +2119,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     executed_queries: set[str] = set()
     related_name_hints: list[str] = []
     full_identity_query_with_results = False
+    discovery_query_count = 0
+    discovery_budget_blocked = False
 
     def remove_mirror_candidates() -> None:
         rejected = [
@@ -1969,7 +2133,13 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
 
     _add_verified_alias_candidate(candidates_by_domain, company_name)
     _add_entity_memory_candidates(candidates_by_domain, company_name)
-    _add_profile_candidates(candidates_by_domain, company_name, metadata)
+    if profile_candidates is None:
+        _add_profile_candidates(candidates_by_domain, company_name, metadata)
+    else:
+        for candidate in profile_candidates:
+            domain = scorer.normalize_domain(candidate.get("url", ""))
+            if domain:
+                candidates_by_domain[domain] = dict(candidate)
     remove_mirror_candidates()
     source_health = _source_health_snapshot((metadata or {}).get("profile_url", ""))
     if source_health.get("host"):
@@ -1979,9 +2149,18 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         phase: str,
         evidence_gaps: set[str] | None = None,
     ) -> list[dict]:
+        nonlocal discovery_query_count, discovery_budget_blocked
+        is_discovery_stage = phase != "evidence_completion"
+        if is_discovery_stage and config.SEARCH_CACHE_MODE != "replay" and discovery_query_count >= int(getattr(config, "MAX_DISCOVERY_QUERIES_PER_COMPANY", 6)):
+            if not discovery_budget_blocked:
+                discovery_budget_blocked = True
+                trace.append({"source": "ddgs", "phase": phase, "result_state": "BLOCKED_BUDGET", "result_reason": "discovery_query_limit"})
+            return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="discovery_query_limit")
         if not query or query in executed_queries:
             return []
         executed_queries.add(query)
+        if is_discovery_stage and config.SEARCH_CACHE_MODE != "replay":
+            discovery_query_count += 1
         previous_bucket = runtime.search_bucket()
         runtime.set_search_bucket("targeted" if phase == "evidence_completion" else "discovery")
         try:
@@ -2022,6 +2201,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             bridge_sources, company_name, query, results, metadata,
         )
         _add_search_results(candidates_by_domain, company_name, query, results, metadata)
+        if getattr(results, "result_state", "") == "BLOCKED_BUDGET":
+            discovery_budget_blocked = True
         remove_mirror_candidates()
         return results
 
@@ -2048,6 +2229,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         primary_queries = primary_queries[: config.DEFAULT_PAID_SEARCH_QUERY_LIMIT]
     for query in primary_queries:
         results = run_query(query, "primary")
+        if discovery_budget_blocked:
+            break
         if results and _query_covers_full_identity(company_name, query):
             full_identity_query_with_results = True
         best = _best_candidate(candidates_by_domain)
@@ -2067,6 +2250,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         adaptive_queries: list[str] = []
         adaptive_states: list[dict] = []
         while len(adaptive_queries) < config.MAX_ADAPTIVE_SEARCH_QUERIES:
+            if discovery_budget_blocked:
+                break
             if paid_total_limit > 0 and len(executed_queries) >= paid_total_limit:
                 break
             gaps = _adaptive_discovery_gaps(
@@ -2082,6 +2267,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             adaptive_queries.append(query)
             adaptive_states.append({"query": query, "evidence_gaps": sorted(gaps)})
             results = run_query(query, "adaptive", gaps)
+            if discovery_budget_blocked:
+                break
             hint_queries = {
                 f'"{hint}" Turkiye official website': hint
                 for hint in related_name_hints if hint
@@ -2109,6 +2296,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     best = _best_candidate(candidates_by_domain)
     if not best or best["score"] < config.MIN_ACCEPT_SCORE:
         for query in _fallback_queries(company_name, metadata):
+            if discovery_budget_blocked:
+                break
             if paid_total_limit > 0 and len(executed_queries) >= paid_total_limit:
                 break
             run_query(
@@ -2195,7 +2384,8 @@ def find_targeted_candidates(
     original_index = (metadata or {}).get("original_index")
     attempted = {str(value).strip() for value in already_run if str(value).strip()}
     planned_queries = [query for query in dict.fromkeys(queries) if query not in attempted]
-    for query in planned_queries[:max(0, int(limit))]:
+    targeted_limit = min(max(0, int(limit)), int(getattr(config, "MAX_TARGETED_QUERIES_PER_COMPANY", 4)))
+    for query in planned_queries[:targeted_limit]:
         previous_bucket = runtime.search_bucket()
         runtime.set_search_bucket("targeted")
         try:
@@ -2215,6 +2405,9 @@ def find_targeted_candidates(
         _add_search_results(
             candidates_by_domain, company_name, query, results, metadata,
         )
+        if getattr(results, "result_state", "") == "BLOCKED_BUDGET":
+            trace.append({"source": "ddgs", "query": query, "phase": "evidence_completion", "result_state": "BLOCKED_BUDGET", "result_reason": getattr(results, "result_reason", "budget_exhausted")})
+            break
         rejected = [
             domain for domain in candidates_by_domain
             if scorer.is_mirror_directory_domain(company_name, domain)

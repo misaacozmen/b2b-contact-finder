@@ -6,17 +6,18 @@ Firmalardan resmi web sitesi, e-posta ve telefon bulup Excel çıktısı üreten
 
 ## Kurulum
 
+Bu proje için tek yetkili interpreter exact runtime’dır:
+
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+$PY = (Resolve-Path '.runtime\python3147-sqlite3534\python.exe').Path
+& $PY -m pip install -r requirements.txt
 ```
 
 Test/geliştirme ortamı için:
 
 ```powershell
-pip install -r requirements-dev.txt
-python -m pytest -q
+& $PY -m pip install -r requirements-dev.txt
+& $PY -m pytest -q
 ```
 
 893 firmalık özel incident reconciliation testleri, Git'e eklenmeyen input,
@@ -36,7 +37,7 @@ Anahtarlari komut satirina veya `.env` dosyasina yazmak yerine tek seferlik
 guvenli kurulum aracini calistirin:
 
 ```powershell
-python setup_company_resolvers.py
+& $PY setup_company_resolvers.py
 ```
 
 Brandfetch icin Developer Dashboard'daki `Client ID`, Hunter icin Dashboard >
@@ -64,7 +65,7 @@ Proje, bağımlılıkları sadeleştiren, döngüsel bağımlılıkları engelle
 
 ### CI ve Profil Yapısı
 
-- **Base CI**: Python 3.12 üzerinde `compileall`, çevrimdışı (`B2B_TEST_OFFLINE=1`) test paketi, benchmark doğrulama, `pip check` ve CLI yardım kontrolleri.
+- **Base CI**: Python 3.14.7 / SQLite 3.53.4 exact runtime üzerinde `compileall`, çevrimdışı (`B2B_TEST_OFFLINE=1`) test paketi, benchmark doğrulama, `pip check` ve CLI yardım kontrolleri.
 - **Browser Smoke**: `requirements-browser.txt` ve Chromium ile dinamik sayfa kurtarma testi.
 - **OCR Smoke**: `requirements-ocr.txt` ve Tesseract OCR motoru (İngilizce/Türkçe dil paketleri) ile PDF/görsel metin kurtarma testi.
 
@@ -73,20 +74,20 @@ Proje, bağımlılıkları sadeleştiren, döngüsel bağımlılıkları engelle
 `input/firms.xlsx` dosyasına tek sütun halinde firma adlarını koyun. İlk satır `company` olabilir.
 
 ```powershell
-python main.py
+& $PY main.py
 ```
 
 Otomasyon/CI ortamlarında soru sormadan çalıştırmak için API seçimlerini ortam
 değişkenleriyle verip `--non-interactive` kullanın:
 
 ```powershell
-python main.py --non-interactive
+& $PY main.py --non-interactive
 ```
 
 Golden 30 firma testini başlatmak için her zaman şu komutu kullanın:
 
 ```powershell
-python run_golden.py
+& $PY run_golden.py
 ```
 
 Normal golden koşusu arama ve site sayfalarını `state/search_cache` ile
@@ -94,19 +95,19 @@ Normal golden koşusu arama ve site sayfalarını `state/search_cache` ile
 isteği yapmadan yeniden puanlamak için:
 
 ```powershell
-python run_golden.py --rerank-cache
+& $PY run_golden.py --rerank-cache
 ```
 
 Yalnızca belirli firmaları çalıştırmak için:
 
 ```powershell
-python run_golden.py --companies "AYSAN,KULA,MATRIX"
+& $PY run_golden.py --companies "AYSAN,KULA,MATRIX"
 ```
 
 API ve site kayıtlarını bilinçli olarak yenilemek gerektiğinde:
 
 ```powershell
-python run_golden.py --search-cache refresh --crawl-cache refresh
+& $PY run_golden.py --search-cache refresh --crawl-cache refresh
 ```
 
 Her başlangıçta Google Places ve Bright Data için `y/n` soruları sorulur.
@@ -116,7 +117,7 @@ Kayıtlı API anahtarını kullanmak için `y`, yeni anahtarla değiştirmek iç
 Farklı bir dosya ile çalıştırmak için:
 
 ```powershell
-python main.py --input C:\path\to\firms.xlsx
+& $PY main.py --input C:\path\to\firms.xlsx
 ```
 
 ## Fuar Katılımcı Sitelerinden Firma Çekme
@@ -124,17 +125,17 @@ python main.py --input C:\path\to\firms.xlsx
 Desteklenen kaynaklardan Türkiye katılımcılarını çekip `input/firms.xlsx` üretmek için:
 
 ```powershell
-python scrape_exhibitors.py --source all
+& $PY scrape_exhibitors.py --source all
 ```
 
 Tek kaynak çekmek için:
 
 ```powershell
-python scrape_exhibitors.py --source ifco
-python scrape_exhibitors.py --source idos
-python scrape_exhibitors.py --source beauty
-python scrape_exhibitors.py --source texhibition
-python scrape_exhibitors.py --source zuchex
+& $PY scrape_exhibitors.py --source ifco
+& $PY scrape_exhibitors.py --source idos
+& $PY scrape_exhibitors.py --source beauty
+& $PY scrape_exhibitors.py --source texhibition
+& $PY scrape_exhibitors.py --source zuchex
 ```
 
 Oluşan Excel kolonları:
@@ -147,14 +148,14 @@ Oluşan Excel kolonları:
 - `sector`
 - `description`
 
-`website` doluysa `python main.py` ikinci aşamada bu siteyi doğrudan kullanır; web sitesi araması yapmadan mail ve telefon çıkarmayı dener.
+`website` doluysa `& $PY main.py` ikinci aşamada bu siteyi doğrudan kullanır; web sitesi araması yapmadan mail ve telefon çıkarmayı dener.
 
 ## Bright Data ile Sorunlu Kayıtları Tekrar Deneme
 
 Önce mevcut sonuçlardan tekrar denenecek listeyi üretin:
 
 ```powershell
-python make_review_input.py
+& $PY make_review_input.py
 ```
 
 Sonra Bright Data SERP API ile sadece bu listeyi ayrı çıktı klasörüne çalıştırın:
@@ -163,7 +164,7 @@ Sonra Bright Data SERP API ile sadece bu listeyi ayrı çıktı klasörüne çal
 $env:SEARCH_PROVIDER="brightdata"
 $env:BRIGHTDATA_API_KEY="BRIGHT_DATA_API_KEYINIZ"
 $env:MAX_SEARCH_QUERIES_PER_COMPANY="8"
-python main.py --input output\review_retry_input.xlsx --output-dir output\brightdata_review
+& $PY main.py --input output\review_retry_input.xlsx --output-dir output\brightdata_review
 ```
 
 Bright Data zone adınız farklıysa:
@@ -201,7 +202,7 @@ Remove-Item Env:\BRIGHTDATA_API_KEY
 API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Varsayılan koşu bütçeleri Bright Data için 500, Google Places için 100 istektir. Ana komutta değiştirilebilir:
 
 ```powershell
-python main.py --brightdata-budget 300 --google-places-budget 50
+& $PY main.py --brightdata-budget 300 --google-places-budget 50
 ```
 
 ## GitHub Paylaşım Notları
@@ -210,7 +211,6 @@ Gerçek firma listeleri ve üretilen çıktılar repoya eklenmez. Kendi listeniz
 
 Repoya dahil edilmeyen klasörler/dosyalar:
 
-- `.venv/`
 - `input/*.xlsx`
 - `output/`
 - `state/`
@@ -246,7 +246,7 @@ full contact crawl, source availability, abstention, and HTTP/API cost. Golden X
 validation can also report stage metrics:
 
 ```powershell
-python validate_golden_xlsx.py --expected EXPECTED.xlsx --actual contacts.xlsx --candidates website_candidates.xlsx
+& $PY validate_golden_xlsx.py --expected EXPECTED.xlsx --actual contacts.xlsx --candidates website_candidates.xlsx
 ```
 
 The contacts output also includes `email_verification` and
@@ -296,14 +296,14 @@ An alias website is still crawled and validated; it is not blindly exported.
 Golden XLSX doğrulaması `present`, `absent` ve `unknown` durumlarını destekler. `unknown` tamamlanmış manuel inceleme sayılır fakat precision/recall hesabına girmez. Dev/Validation/Blind ayrımı ve firma çakışması kontrolü:
 
 ```powershell
-python validate_benchmark_suite.py
+& $PY validate_benchmark_suite.py
 ```
 
 Golden 3, 15 yeni firma iceren holdout setidir. Manuel dosya tamamen
 doldurulmadan kosu API kullanmadan durur. Dogrulama tamamlandiktan sonra:
 
 ```powershell
-python run_golden_3.py --brightdata-budget 200 --google-places-budget 25
+& $PY run_golden_3.py --brightdata-budget 200 --google-places-budget 25
 ```
 
 Golden 4, daha önce kullanılmamış WIN EURASIA 2026 fuarından seçilmiş 15
@@ -317,7 +317,7 @@ Türkiye katılımcısını içeren kör settir. Mevcut `input/firms.xlsx` ve Go
    önce durur:
 
 ```powershell
-python run_golden_4.py --brightdata-budget 200 --google-places-budget 25
+& $PY run_golden_4.py --brightdata-budget 200 --google-places-budget 25
 ```
 
 Golden 4 sonuçları görüldükten sonra firma-özel alias/domain düzeltmesi
@@ -331,25 +331,25 @@ For regression measurement, copy `data/golden_contacts_template.csv`, fill in
 human-verified expected fields, then compare a run:
 
 ```powershell
-python validate_golden.py --expected data\golden_contacts.csv --actual output\contacts.xlsx
+& $PY validate_golden.py --expected data\golden_contacts.csv --actual output\contacts.xlsx
 ```
 
 For JavaScript-only websites, optional rendering can be enabled after installing
 Playwright and its Chromium runtime:
 
 ```powershell
-pip install -r requirements-browser.txt
-playwright install chromium
+& $PY -m pip install -r requirements-browser.txt
+& $PY -m playwright install chromium
 $env:ENABLE_JS_FALLBACK="1"
 ```
 
 Rendering is used only when a page appears to be an empty JavaScript application
 shell or a normal HTTP fetch fails.
 
-Taranmış PDF'lerde OCR isteğe bağlıdır. Sistem Tesseract uygulamasını ve
-`tur`/`eng` dil paketlerini kurup `PATH` üzerinden erişilebilir yaptıktan sonra:
+Taranmış PDF'lerde OCR isteğe bağlıdır. Exact runtime’ın bundled Tesseract
+uygulaması ve `tur`/`eng` dil paketleri capability smoke ile doğrulanır:
 
 ```powershell
-pip install -r requirements-ocr.txt
+& $PY -m pip install -r requirements-ocr.txt
 $env:ENABLE_PDF_OCR="1"
 ```

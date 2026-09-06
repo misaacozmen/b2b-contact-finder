@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 import sqlite3
-import shutil
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -15,6 +14,7 @@ from pathlib import Path
 from contextlib import closing
 
 import config
+from modules.ocr_runtime import ocr_dependency_available
 
 
 PHASES = ("FREE", "PAID", "FINALIZING", "COMPLETE")
@@ -30,6 +30,18 @@ SEMANTIC_CONFIG_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("CRAWL_CACHE_MODE", "crawl_cache_mode", "str"),
     ("SEARCH_CACHE_TTL_DAYS", "search_cache_ttl_days", "int"),
     ("SEARCH_EMPTY_CACHE_TTL_DAYS", "search_empty_cache_ttl_days", "float"),
+    ("CRAWLER_HTTP_REQUEST_BUDGET", "crawler_global_http_budget", "int"),
+    ("CRAWLER_SOURCE_PROFILE_HTTP_LIMIT", "crawler_source_profile_http_limit", "int"),
+    ("CRAWLER_IDENTITY_HTTP_LIMIT", "crawler_identity_http_limit", "int"),
+    ("CRAWLER_CONTACT_HTTP_LIMIT", "crawler_contact_http_limit", "int"),
+    ("CRAWLER_RECOVERY_HTTP_LIMIT", "crawler_recovery_http_limit", "int"),
+    ("SOURCE_PREFLIGHT_HOST_HTTP_LIMIT", "source_preflight_host_http_limit", "int"),
+    ("DDGS_MAX_PHYSICAL_ATTEMPTS", "ddgs_max_physical_attempts", "int"),
+    ("DDGS_MAX_EMPTY_ATTEMPTS", "ddgs_max_empty_attempts", "int"),
+    ("MAX_DISCOVERY_QUERIES_PER_COMPANY", "max_discovery_queries_per_company", "int"),
+    ("MAX_TARGETED_QUERIES_PER_COMPANY", "max_targeted_queries_per_company", "int"),
+    ("INITIAL_IDENTITY_CANDIDATE_LIMIT", "initial_identity_candidate_limit", "int"),
+    ("ABSOLUTE_IDENTITY_CANDIDATE_LIMIT", "absolute_identity_candidate_limit", "int"),
     ("CRAWL_CACHE_TTL_DAYS", "crawl_cache_ttl_days", "int"),
     ("CACHE_SCHEMA_VERSION", "cache_schema_version", "int"),
     ("CRAWL_CACHE_SCHEMA_VERSION", "crawl_cache_schema_version", "int"),
@@ -117,7 +129,7 @@ def runtime_capability_profile() -> dict[str, bool]:
     return {
         "browser_dependency_available": browser_dependency,
         "browser_enabled": bool(getattr(config, "ENABLE_JS_FALLBACK", False)),
-        "ocr_dependency_available": ocr_dependencies and bool(shutil.which("tesseract")),
+        "ocr_dependency_available": ocr_dependencies and ocr_dependency_available(),
         "ocr_enabled": bool(getattr(config, "ENABLE_PDF_OCR", False)),
     }
 
@@ -220,7 +232,14 @@ class RunConfig:
         return tuple(sorted(result))
 
     @classmethod
-    def from_config(cls, *, paid_enabled: bool, free_only_finalization: bool = False) -> "RunConfig":
+    def from_config(
+        cls,
+        *,
+        paid_enabled: bool,
+        free_only_finalization: bool = False,
+        input_count: int | None = None,
+        unique_profile_host_count: int | None = None,
+    ) -> "RunConfig":
         import modules.publication_policy as publication_policy
 
         if free_only_finalization and paid_enabled:
@@ -232,6 +251,12 @@ class RunConfig:
             if hasattr(config, name)
         ))
         budget = lambda name: max(0, int(getattr(config, name))) if paid_enabled else 0
+        effective = dict(cls._semantic_settings())
+        if input_count is not None and unique_profile_host_count is not None:
+            effective["crawler_global_http_budget"] = (
+                19 * max(0, int(input_count))
+                + 2 * max(0, int(unique_profile_host_count))
+            )
         return cls(
             search_provider=str(config.SEARCH_PROVIDER),
             search_cache_mode=str(config.SEARCH_CACHE_MODE),
@@ -249,7 +274,7 @@ class RunConfig:
                 ("publication", str(publication_policy.POLICY_VERSION)),
                 ("cache", str(config.CACHE_SCHEMA_VERSION)),
             ),
-            effective_settings=cls._semantic_settings(),
+            effective_settings=tuple(sorted(effective.items())),
             free_only_finalization=bool(free_only_finalization),
         )
 

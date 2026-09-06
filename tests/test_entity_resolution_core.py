@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import main
-from modules import entity_resolution, publication_policy, search
+from modules import entity_resolution, publication_policy, scorer, search
 
 
 def _evaluation(
@@ -21,6 +21,7 @@ def _evaluation(
             "reason": "discovery_only_not_identity_authority",
             "role": "company_candidate",
             "_source_profile_evidence": int(source_profile),
+            "_source_profile_contact_anchor": int(source_profile),
         },
         "crawl_result": {
             "url": url,
@@ -50,6 +51,7 @@ class EntityResolutionCoreTests(unittest.TestCase):
                 "country_identity_tr_phone",
             ],
         )
+        evaluation["candidate"]["_source_profile_contact_anchor"] = 0
         evaluation["identity_assessment"].update({
             "publishable": False,
             "provisionally_publishable": True,
@@ -63,6 +65,7 @@ class EntityResolutionCoreTests(unittest.TestCase):
             "https://empiregroupusa.com",
             reasons=["page_identity_strong:3/3", "country_identity_tr_phone"],
         )
+        evaluation["candidate"]["_source_profile_contact_anchor"] = 0
         evaluation["candidate"]["_official_query_evidence"] = 0
         result = entity_resolution.resolve_candidates("EMPIRE GIDA", [evaluation])
         self.assertEqual(result.status, "unresolved")
@@ -172,7 +175,108 @@ class EntityResolutionCoreTests(unittest.TestCase):
             "ORNEK METAL", [evaluation],
         )
         self.assertEqual(result.status, "unresolved")
+
+    def test_unanchored_source_profile_uses_strong_intrinsic_first_party_identity(self):
+        company = "ORG TEKSTİL BUTTONS & ACCESSORIES"
+        url = "https://orgtekstil.com.tr"
+        evaluation = _evaluation(
+            url,
+            reasons=[
+                "page_identity_strong:3/3",
+                "context_name_match:1/1",
+                "email_domain_match",
+                "structured_identity_weak:1/3",
+                "legal_name_phrase_missing:0/4",
+                "country_identity_tr_tld",
+                "identity_evidence:2;decision:verified",
+            ],
+        )
+        evaluation["candidate"]["_source_profile_contact_anchor"] = 0
+        evaluation["phone_source_url"] = f"{url}/contact"
+        self.assertFalse(scorer.public_brand_domain_match(company, url))
+        self.assertTrue(scorer.domain_identity_match(company, url)[0])
+        result = entity_resolution.resolve_candidates(company, [evaluation])
+        self.assertEqual(result.status, "resolved")
+        self.assertIs(result.selected, evaluation)
+        fingerprint = entity_resolution.fingerprint(
+            entity_resolution.build_target_profile(company), evaluation,
+        )
+        self.assertTrue(fingerprint.safe_unanchored_source_profile_route)
+        self.assertFalse(evaluation["candidate"]["_source_profile_contact_anchor"])
+
+    def test_source_profile_link_only_remains_unresolved(self):
+        evaluation = _evaluation(
+            "https://directory.example",
+            reasons=["country_identity_tr_tld"],
+            publishable=False,
+            has_contact=False,
+        )
+        evaluation["candidate"]["_source_profile_contact_anchor"] = 0
+        result = entity_resolution.resolve_candidates("ORGTEKSTIL", [evaluation])
+        self.assertEqual(result.status, "unresolved")
         self.assertIsNone(result.selected)
+
+    def test_unanchored_source_profile_conflict_stays_unresolved(self):
+        evaluation = _evaluation(
+            "https://orgtekstil.com.tr",
+            reasons=["page_identity_strong:3/3", "country_identity_tr_tld"],
+            conflicts=["cross_domain_contact"],
+        )
+        evaluation["candidate"]["_source_profile_contact_anchor"] = 0
+        evaluation["email_source_url"] = "https://other.example/contact"
+        result = entity_resolution.resolve_candidates("ORGTEKSTIL", [evaluation])
+        self.assertEqual(result.status, "unresolved")
+
+    def test_unanchored_source_profile_requires_every_strict_route_signal(self):
+        company = "ORG TEKSTİL BUTTONS & ACCESSORIES"
+        url = "https://orgtekstil.com.tr"
+        base_reasons = [
+            "page_identity_strong:3/3",
+            "context_name_match:1/1",
+            "email_domain_match",
+            "structured_identity_weak:1/3",
+            "legal_name_phrase_missing:0/4",
+            "country_identity_tr_tld",
+            "identity_evidence:2;decision:verified",
+        ]
+
+        def make(reasons=None):
+            evaluation = _evaluation(url, reasons=list(reasons or base_reasons))
+            evaluation["candidate"]["_source_profile_contact_anchor"] = 0
+            evaluation["phone_source_url"] = f"{url}/contact"
+            return evaluation
+
+        intrinsic_false = make()
+        intrinsic_false["candidate"]["url"] = "https://unrelated.example"
+        intrinsic_false["crawl_result"]["url"] = "https://unrelated.example"
+        intrinsic_false["email_source_url"] = "https://unrelated.example/contact"
+        intrinsic_false["phone_source_url"] = "https://unrelated.example/contact"
+
+        page_weak = make([
+            reason for reason in base_reasons
+            if not reason.startswith("page_identity_")
+        ])
+        context_missing = make([
+            reason for reason in base_reasons
+            if not reason.startswith("context_name_match:")
+        ])
+        cross_domain = make()
+        cross_domain["email_source_url"] = "https://other.example/contact"
+        cross_domain["phone_source_url"] = "https://other.example/contact"
+        conflict = make()
+        conflict["identity_assessment"]["conflicts"] = ["identity_conflict"]
+        link_only = make(["country_identity_tr_tld"])
+        link_only["crawl_result"]["pages"] = [{"url": url, "html": "profile link only"}]
+        link_only["email_source_url"] = ""
+        link_only["phone_source_url"] = ""
+        link_only["has_contact"] = False
+
+        for evaluation in (
+            intrinsic_false, page_weak, context_missing, cross_domain,
+            conflict, link_only,
+        ):
+            result = entity_resolution.resolve_candidates(company, [evaluation])
+            self.assertEqual(result.status, "unresolved")
 
     def test_equal_unrelated_profile_routes_remain_ambiguous(self):
         reasons = [
@@ -209,6 +313,7 @@ class EntityResolutionCoreTests(unittest.TestCase):
             "reason": "discovery_only_not_identity_authority",
             "role": "company_candidate",
             "_source_profile_evidence": 1,
+            "_source_profile_contact_anchor": 0,
         }
         candidates = search.CandidateList([candidate])
         evaluation = _evaluation(
@@ -243,6 +348,46 @@ class EntityResolutionCoreTests(unittest.TestCase):
             )
         self.assertEqual(row["status"], "OK_MEDIUM_CONFIDENCE")
         self.assertTrue(row["reason"].startswith("profile_route_resolved_by_"))
+
+    def test_source_listed_website_is_discovery_only_with_safe_priority(self):
+        with patch("modules.search._profile_external_websites", return_value=[]):
+            candidates = {}
+            search._add_profile_candidates(
+                candidates,
+                "ORGTEKSTIL",
+                {
+                    "listed_website": "https://preferred.example",
+                    "source_listed_website": "https://source.example",
+                    "source_listed_website_status": "present",
+                    "listing_url": "https://fair.example/profile",
+                },
+            )
+            self.assertIn("preferred.example", candidates)
+            self.assertNotIn("source.example", candidates)
+            self.assertEqual(candidates["preferred.example"]["_search_evidence"][0]["source_field"], "listed_website")
+
+            for status in ("", "absent", "rejected"):
+                blocked = {}
+                search._add_profile_candidates(
+                    blocked,
+                    "ORGTEKSTIL",
+                    {
+                        "source_listed_website": "https://source.example",
+                        "source_listed_website_status": status,
+                    },
+                )
+                self.assertNotIn("source.example", blocked)
+
+            organizer = {}
+            search._add_profile_candidates(
+                organizer,
+                "ORGTEKSTIL",
+                {
+                    "source_listed_website": "https://www.texhibitionist.com/organizer",
+                    "source_listed_website_status": "present",
+                },
+            )
+            self.assertNotIn("texhibitionist.com", organizer)
 
     def test_search_resolution_discards_candidate_without_target_fingerprint(self):
         official = _evaluation(

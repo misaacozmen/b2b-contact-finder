@@ -8,6 +8,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import phonenumbers
+
+from modules.scorer import registrable_domain
 
 FIELDS = ("website", "email", "phone", "expected_publication")
 
@@ -29,14 +36,53 @@ def _load(path: Path) -> dict[str, dict[str, Any]]:
     return rows
 
 
-def _field_value(row: dict[str, Any], field: str) -> str:
-    value = row.get("fields", {}).get(field, {}).get("value", "")
-    return str(value or "").strip()
+def _field_value(row: dict[str, Any], field: str) -> Any:
+    return row.get("fields", {}).get(field, {}).get("value", "")
 
 
 def _field_status(row: dict[str, Any], field: str) -> str:
     value = row.get("fields", {}).get(field, {}).get("status", "unknown")
     return str(value or "unknown").strip().casefold()
+
+
+def _canonical_field_value(value: Any, field: str) -> Any:
+    if field == "website":
+        return str(value or "").strip()
+    if field in {"email", "phone"}:
+        values = value if isinstance(value, list) else ([str(value).strip()] if str(value or "").strip() else [])
+        return sorted({str(item).strip().casefold() for item in values if str(item).strip()})
+    return str(value or "").strip()
+
+
+def _e164_values(value: Any) -> list[str]:
+    raw_values = value if isinstance(value, list) else ([value] if value not in (None, "") else [])
+    normalized: set[str] = set()
+    for raw in raw_values:
+        candidate = str(raw or "").strip()
+        try:
+            parsed = phonenumbers.parse(candidate, "TR")
+        except phonenumbers.NumberParseException:
+            continue
+        if phonenumbers.is_possible_number(parsed) and phonenumbers.is_valid_number(parsed):
+            normalized.add(phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164))
+    return sorted(normalized)
+
+
+def _field_evidence(row: dict[str, Any], field: str) -> list[dict[str, Any]]:
+    value = row.get("fields", {}).get(field, {}).get("field_evidence", [])
+    evidence = [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    if evidence:
+        return evidence
+    return [{
+        "source": "reviewer_field_observation",
+        "field": field,
+        "status": _field_status(row, field),
+        "value": _field_value(row, field),
+        "evidence_url": row.get("evidence_url", ""),
+        "observed_at": row.get("observed_at", ""),
+        "content_sha256": row.get("content_sha256", ""),
+        "rationale": row.get("rationale", ""),
+    }]
 
 
 def _same_or_unknown(first: object, second: object) -> tuple[str, bool]:
@@ -75,11 +121,24 @@ def _semantic_validate(rows: list[dict[str, Any]]) -> None:
             raise RuntimeError(f"unsafe publishable label: {row['source_record_id']}")
 
 
-def merge(pass_1: Path, pass_2: Path) -> list[dict[str, Any]]:
+def merge(pass_1: Path, pass_2: Path, adjudication_queue: Path | None = None) -> list[dict[str, Any]]:
     first = _load(pass_1)
     second = _load(pass_2)
     if set(first) != set(second):
         raise RuntimeError(f"review source ID sets differ: pass1={len(first)} pass2={len(second)}")
+    first_meta = next(iter(first.values()))
+    second_meta = next(iter(second.values()))
+    identity_fields = ("reviewer_method", "reviewer_entrypoint_sha256", "reviewer_bundle_sha256", "tool_or_prompt_sha256")
+    for field in identity_fields:
+        first_value = {str(row.get(field) or "") for row in first.values()}
+        second_value = {str(row.get(field) or "") for row in second.values()}
+        if not first_value or not second_value or "" in first_value or "" in second_value:
+            raise RuntimeError(f"reviewer {field} is missing")
+        if first_value == second_value:
+            raise RuntimeError(f"reviewer {field} is not independent")
+    execution_ids = {str(row.get("reviewer_execution_id") or "") for row in (*first.values(), *second.values())}
+    if len(execution_ids) != 2:
+        raise RuntimeError("reviewer execution IDs are not exactly two independent executions")
     merged = []
     for source_id in first:
         a = first[source_id]
@@ -87,11 +146,11 @@ def merge(pass_1: Path, pass_2: Path) -> list[dict[str, Any]]:
         fields: dict[str, dict[str, str]] = {}
         disagreements: list[str] = []
         for field in FIELDS:
-            first_value = _field_value(a, field)
-            second_value = _field_value(b, field)
+            first_value = _canonical_field_value(_field_value(a, field), field)
+            second_value = _canonical_field_value(_field_value(b, field), field)
             if first_value != second_value:
                 disagreements.append(field)
-                fields[field] = {"value": "", "status": "unknown"}
+                fields[field] = {"value": [] if field in {"email", "phone"} else "", "status": "unknown"}
             else:
                 first_status = _field_status(a, field)
                 second_status = _field_status(b, field)
@@ -115,14 +174,33 @@ def merge(pass_1: Path, pass_2: Path) -> list[dict[str, Any]]:
         execution_2 = str(b.get("reviewer_execution_id") or "").strip()
         if not execution_1 or not execution_2 or execution_1 == execution_2:
             raise RuntimeError(f"reviewer executions are not independent: {source_id}")
-        merged_publication = fields["expected_publication"]["value"] or "unknown"
+        merged_publication = str(fields["expected_publication"]["value"] or "unknown").casefold()
         if merged_publication == "publishable" and (identity_status != "known" or fields["website"]["status"] != "present" or not (fields["email"]["status"] == "present" or fields["phone"]["status"] == "present")):
             merged_publication = "unknown"
+        website_value = str(fields["website"]["value"] or "")
+        email_values = list(fields["email"]["value"] or [])
+        phone_values = _e164_values(fields["phone"]["value"])
+        if fields["phone"]["status"] == "present" and not phone_values:
+            disagreements.append("phone_invalid")
+            fields["phone"] = {"value": [], "status": "unknown"}
+        if merged_publication == "publishable" and not (email_values or phone_values):
+            merged_publication = "unknown"
+        reasons = ["review_disagreement"] if disagreements else []
+        if merged_publication == "abstain" and not reasons:
+            reasons = ["insufficient_verified_evidence"]
+        if merged_publication == "unknown" and not reasons:
+            reasons = ["evidence_insufficient"]
+        listed_source_website, listed_source_disagreement = _same_or_unknown(a.get("source_listed_website"), b.get("source_listed_website"))
+        if listed_source_disagreement:
+            listed_source_website = ""
+        expected_domains = sorted({registrable_domain(website_value)} - {""})
+        expected_emails = sorted({str(value).casefold() for value in email_values if str(value).strip()})
+        expected_phones = sorted(phone_values)
         evidence_hash = hashlib.sha256(
             f"{a.get('content_sha256', '')}\n{b.get('content_sha256', '')}".encode("utf-8")
         ).hexdigest()
         merged.append({
-            "schema_version": 1,
+            "schema_version": 3,
             "source_record_id": source_id,
             "source": a.get("source"),
             "Company": a.get("display_name_observed") or b.get("display_name_observed") or "",
@@ -130,13 +208,26 @@ def merge(pass_1: Path, pass_2: Path) -> list[dict[str, Any]]:
             "listed_legal_name": legal_name,
             "listed_address": address,
             "listed_phone": fields["phone"]["value"],
-            "expected_website": fields["website"]["value"],
+            "source_listed_website": listed_source_website,
+            "source_listed_website_status": "present" if listed_source_website else "absent",
+            "expected_website": website_value,
             "website_verified": fields["website"]["status"],
-            "expected_email": fields["email"]["value"],
+            "expected_email": expected_emails[0] if expected_emails else "",
             "email_verified": fields["email"]["status"],
-            "expected_phone": fields["phone"]["value"],
+            "expected_phone": expected_phones[0] if expected_phones else "",
             "phone_verified": fields["phone"]["status"],
             "expected_publication": merged_publication,
+            "expected_website_domains_json": json.dumps(expected_domains, ensure_ascii=False, separators=(",", ":")),
+            "expected_emails_json": json.dumps(expected_emails, ensure_ascii=False, separators=(",", ":")),
+            "expected_phones_e164_json": json.dumps(expected_phones, ensure_ascii=False, separators=(",", ":")),
+            "expected_publication_reason_codes_json": json.dumps(sorted(reasons), ensure_ascii=False, separators=(",", ":")),
+            "website_field_evidence_json": json.dumps(_field_evidence(a, "website") + _field_evidence(b, "website"), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "email_field_evidence_json": json.dumps(_field_evidence(a, "email") + _field_evidence(b, "email"), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "phone_field_evidence_json": json.dumps(_field_evidence(a, "phone") + _field_evidence(b, "phone"), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "reviewer_provenance_json": json.dumps([
+                {"execution_id": execution_1, "method": a.get("reviewer_method"), "entrypoint_sha256": a.get("reviewer_entrypoint_sha256"), "bundle_sha256": a.get("reviewer_bundle_sha256"), "evidence_url": a.get("evidence_url"), "content_sha256": a.get("content_sha256")},
+                {"execution_id": execution_2, "method": b.get("reviewer_method"), "entrypoint_sha256": b.get("reviewer_entrypoint_sha256"), "bundle_sha256": b.get("reviewer_bundle_sha256"), "evidence_url": b.get("evidence_url"), "content_sha256": b.get("content_sha256")},
+            ], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             "identity_evidence_urls": a.get("evidence_url") or b.get("evidence_url") or "",
             "contact_evidence_urls": a.get("evidence_url") or b.get("evidence_url") or "",
             "observed_at": max(str(a.get("observed_at") or ""), str(b.get("observed_at") or "")),
@@ -169,6 +260,23 @@ def merge(pass_1: Path, pass_2: Path) -> list[dict[str, Any]]:
             "rationale": f"{a.get('rationale', '')} | {b.get('rationale', '')}",
         })
     _semantic_validate(merged)
+    if adjudication_queue is not None:
+        queue = [
+            {
+                "source_record_id": row["source_record_id"],
+                "disagreement_fields": [value for value in row.get("disagreement_reason", "").split(";") if value],
+                "pass_1_execution_id": row.get("reviewer_pass_1"),
+                "pass_2_execution_id": row.get("reviewer_pass_2"),
+                "pass_1_bundle_sha256": (row.get("tool_or_prompt_sha256") or ["", ""])[0],
+                "pass_2_bundle_sha256": (row.get("tool_or_prompt_sha256") or ["", ""])[-1],
+                "evidence": row.get("review_evidence", {}),
+                "status": "needs_adjudication" if row.get("disagreement_reason") else "no_disagreement",
+            }
+            for row in merged
+            if row.get("disagreement_reason")
+        ]
+        adjudication_queue.parent.mkdir(parents=True, exist_ok=True)
+        adjudication_queue.write_text("".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in queue), encoding="utf-8")
     return merged
 
 
@@ -177,8 +285,9 @@ def main() -> None:
     parser.add_argument("--pass-1", type=Path, required=True)
     parser.add_argument("--pass-2", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--adjudication-queue", type=Path)
     args = parser.parse_args()
-    rows = merge(args.pass_1, args.pass_2)
+    rows = merge(args.pass_1, args.pass_2, args.adjudication_queue)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
     print(json.dumps({"rows": len(rows), "frozen": sum(row["label_status"] == "frozen" for row in rows)}))

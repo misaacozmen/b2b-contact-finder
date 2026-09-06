@@ -7,7 +7,7 @@ become identity authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 from modules import identity, relationship_graph, scorer
@@ -63,6 +63,10 @@ class CandidateFingerprint:
     structured_business_name_corroborated: bool
     linkedin_website_match: bool
     llm_arbiter_match: bool
+    # Discovery provenance affects which bounded route may be used, but it is
+    # not itself identity evidence and must not change fingerprint equality.
+    source_profile_evidence: bool = field(compare=False)
+    source_profile_contact_anchor: bool = field(compare=False)
 
     @property
     def verified_identity(self) -> bool:
@@ -261,6 +265,43 @@ class CandidateFingerprint:
         )
 
     @property
+    def safe_source_profile_contact_route(self) -> bool:
+        """Resolve an explicit profile-listed site after its own evidence passes."""
+        return bool(
+            self.source_profile_evidence
+            and self.source_profile_contact_anchor
+            and self.reachable
+            and self.eligible_role
+            and self.conflict_free
+            and (
+                self.provisionally_publishable
+                or self.structured_strength >= 2
+                or self.legal_strength >= 2
+            )
+            and self.first_party_identity
+            and self.country_supported
+            and self.page_strength >= 2
+            and self.same_site_contact
+            and self.canonical_domain_consistent
+            and self.has_contact
+        )
+
+    @property
+    def safe_unanchored_source_profile_route(self) -> bool:
+        """Resolve an unanchored profile link only after strong intrinsic proof."""
+        return bool(
+            self.source_profile_evidence
+            and not self.source_profile_contact_anchor
+            and self.verified_identity
+            and self.intrinsic_domain
+            and self.page_strength >= 3
+            and self.context_match_count >= 1
+            and self.same_site_contact
+            and self.canonical_domain_consistent
+            and self.has_contact
+        )
+
+    @property
     def safe_linkedin_corroborated_route(self) -> bool:
         """Use LinkedIn's declared website as independent identity evidence."""
         return bool(
@@ -323,6 +364,8 @@ class CandidateFingerprint:
             self.safe_exact_domain_route
             or self.safe_exact_website_route
             or self.safe_verified_first_party_route
+            or self.safe_source_profile_contact_route
+            or self.safe_unanchored_source_profile_route
             or (
                 self.verified_identity
                 and self.has_contact
@@ -342,6 +385,7 @@ class CandidateFingerprint:
             and not self.obvious_exact_domain
             and not self.safe_places_contact_route
             and not self.safe_verified_first_party_route
+            and not self.safe_source_profile_contact_route
             and not self.safe_linkedin_corroborated_route
             and not self.safe_llm_arbiter_corroborated_route
         )
@@ -366,6 +410,8 @@ class CandidateFingerprint:
             or self.safe_exact_primary_structured_route
             or self.safe_short_brand_context_route
             or self.safe_verified_first_party_route
+            or self.safe_source_profile_contact_route
+            or self.safe_unanchored_source_profile_route
             or self.safe_linkedin_corroborated_route
             or self.safe_llm_arbiter_corroborated_route
             or (
@@ -667,6 +713,10 @@ def fingerprint(
         llm_arbiter_match=bool(
             evaluation.get("llm_arbiter_evidence", {}).get("verdict") == "match"
         ),
+        source_profile_evidence=bool(candidate.get("_source_profile_evidence")),
+        source_profile_contact_anchor=bool(
+            candidate.get("_source_profile_contact_anchor")
+        ),
     )
 
 
@@ -683,6 +733,8 @@ def _identity_key(item: tuple[dict, CandidateFingerprint]) -> tuple[int, ...]:
         int(value.safe_exact_primary_structured_route),
         int(value.safe_short_brand_context_route),
         int(value.safe_verified_first_party_route),
+        int(value.safe_source_profile_contact_route),
+        int(value.safe_unanchored_source_profile_route),
         int(value.safe_linkedin_corroborated_route),
         int(value.safe_llm_arbiter_corroborated_route),
         value.domain_specificity,

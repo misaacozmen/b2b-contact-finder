@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from modules.ocr_runtime import REQUIRED_LANGUAGES, configure_tesseract
 
 
 def main() -> int:
@@ -31,29 +32,22 @@ def main() -> int:
         from PIL import Image, ImageDraw, ImageFont
         import pytesseract
 
-        runtime_prefix = Path(sys.executable).resolve().parent
-        bundled_tesseract = runtime_prefix / "Library" / "bin" / "tesseract.exe"
-        tesseract = str(bundled_tesseract) if bundled_tesseract.is_file() else shutil.which("tesseract")
-        if not tesseract:
-            raise RuntimeError("tesseract binary not found")
-        pytesseract.pytesseract.tesseract_cmd = tesseract
-        tessdata = runtime_prefix / "share" / "tessdata"
-        if tessdata.is_dir():
-            os.environ["TESSDATA_PREFIX"] = str(tessdata)
-        langs = pytesseract.get_languages(config="")
-        if "eng" not in langs:
-            raise RuntimeError("tesseract eng language data not found")
+        receipt = configure_tesseract()
+        if not receipt.get("available"):
+            raise RuntimeError(f"Tesseract tur+eng capability unavailable: {receipt}")
         smoke_path = Path(".runtime") / "runtime_ocr_smoke.png"
         image = Image.new("RGB", (640, 160), "white")
         font_path = Path("C:/Windows/Fonts/arial.ttf")
         font = ImageFont.truetype(str(font_path), 64) if font_path.is_file() else None
         ImageDraw.Draw(image).text((30, 35), "A8 OCR", fill="black", font=font)
         image.save(smoke_path)
-        text = pytesseract.image_to_string(image, lang="eng")
+        text = pytesseract.image_to_string(image, lang="tur+eng")
         result["ocr"] = {
             "ok": "A8" in text.upper() and "OCR" in text.upper(),
-            "tesseract": tesseract,
-            "languages": sorted(langs),
+            "tesseract": receipt.get("path"),
+            "tessdata": receipt.get("tessdata"),
+            "languages": receipt.get("languages", []),
+            "required_languages": list(REQUIRED_LANGUAGES),
             "observed_text": text.strip(),
         }
     except Exception as exc:  # pragma: no cover - runtime capability probe

@@ -51,6 +51,10 @@ def _empty_result(company: str, status: str, reason: str = "", score: int = 0) -
     return result_factory.empty_result(company, status, reason=reason, score=score)
 
 
+def _crawler_budget_blocked(reason: object) -> bool:
+    return "crawler_http_budget_exhausted" in str(reason or "").casefold()
+
+
 def _attach_metadata_context(row: dict, metadata: dict | None) -> dict:
     """Persist source-specific metadata context evidence on every final row."""
     metadata = dict(metadata or {})
@@ -361,7 +365,8 @@ def _cross_domain_email_is_safe_first_party(
     if not evaluation.get("email_failed") or not identity_verified:
         return False
     if not evaluation.get("structured_domain_relation"):
-        return False
+        if not evaluation.get("source_profile_domain_relation"):
+            return False
     selected_email = str(evaluation.get("email", "") or "")
     source_url = str(evaluation.get("email_source_url", "") or "")
     website = str(evaluation.get("crawl_result", {}).get("url", "") or "")
@@ -433,6 +438,59 @@ def _strong_contact_evidence(selected_email: str, normalized_phones: list[str], 
         if email_bonus > 0:
             return True
     return bool(normalized_phones and selected_email)
+
+
+def _source_profile_first_party_contact_route(
+    company: str,
+    candidate: dict,
+    crawl_result: dict,
+    reasons: list[str],
+    selected_email: str,
+    normalized_phones: list[str],
+) -> bool:
+    """Allow a source-listed site after its own page and contact gates pass.
+
+    The source profile is discovery provenance only.  Identity still has to
+    come from the crawled candidate site, and a public contact is required.
+    This route handles short/ambiguous exhibitor names without treating the
+    fair link itself as ownership proof.
+    """
+    if not candidate.get("_source_profile_evidence"):
+        return False
+    # An explicit catalogue link is discovery provenance, not ownership proof.
+    # Keep this fallback bounded to source records that also supplied a
+    # reviewed identity/contact anchor.  Otherwise a live site found through
+    # an otherwise empty profile can turn an unreviewed name into publication.
+    if not candidate.get("_source_profile_contact_anchor"):
+        return False
+    if not (selected_email or normalized_phones):
+        return False
+    if not any(reason.startswith(("country_identity_tr_",)) for reason in reasons):
+        return False
+    if any(reason.startswith((
+        "context_conflict:", "metadata_context_conflict:",
+        "structured_identity_unmatched:", "unsafe_context_identity",
+    )) for reason in reasons):
+        return False
+    page_identity = any(
+        reason.startswith(("page_identity_strong:", "page_identity_medium:"))
+        for reason in reasons
+    )
+    if not page_identity:
+        return False
+    legal_or_structured = any(reason.startswith((
+        "structured_identity_medium:", "structured_identity_strong:",
+        "legal_name_phrase_match:", "legal_name_full_match:",
+        "legal_name_ownership_match:",
+    )) for reason in reasons)
+    context_anchor = any(reason.startswith((
+        "context_match:", "context_name_match:",
+    )) for reason in reasons)
+    domain_anchor = bool(
+        scorer.public_brand_domain_match(company, crawl_result.get("url", ""))
+        or scorer.domain_identity_match(company, candidate.get("url", ""))[0]
+    )
+    return bool(legal_or_structured or context_anchor or domain_anchor)
 
 
 def _is_hard_context_failure(evaluation: dict) -> bool:
@@ -551,6 +609,12 @@ def _apply_risk_caps(
         reasons.append("ambiguous_name_risk_resolved_by_exact_compound_identity")
         return score
 
+    if _source_profile_first_party_contact_route(
+        company, candidate, crawl_result, reasons, selected_email, normalized_phones,
+    ):
+        reasons.append("ambiguous_name_risk_resolved_by_source_profile_first_party_contact")
+        return score
+
     reasons.append("ambiguous_name_risk_cap")
     return min(score, config.REVIEW_SCORE)
 
@@ -608,6 +672,18 @@ def _evaluate_candidate(
     verify_email_domain: bool = True,
     evidence_scopes: tuple[str, ...] | list[str] | None = None,
 ) -> dict:
+    if candidate.get("_source_profile_evidence"):
+        metadata_anchor = any(
+            str(metadata.get(key, "") or "").strip()
+            for key in (
+                "listed_phone", "listed_email", "listed_address",
+                "listed_legal_name",
+            )
+        ) if isinstance(metadata, dict) else False
+        candidate["_source_profile_contact_anchor"] = int(
+            bool(candidate.get("_source_profile_contact_evidence"))
+            or metadata_anchor
+        )
     candidate["_identity_company"] = company
     crawl_result = crawler.fetch_site(
         candidate["url"], candidate.get("_contact_seed_urls", []),
@@ -664,6 +740,26 @@ def _evaluate_candidate(
             )
             email_records.extend(contacts["emails"])
             phone_records.extend(contacts["phones"])
+        # A source-profile contact is a bounded, auditable fallback for an
+        # explicit exhibitor website link. search.py removes catalogue
+        # chrome/organizer regions before recording this evidence and the
+        # contact policy still requires a verified official-family source.
+        for contact in candidate.get("_source_profile_contact_evidence", []):
+            value = str(contact.get("value", "") or "").strip()
+            if not value:
+                continue
+            record = {
+                "value": value,
+                "source_url": contact.get("source_url", ""),
+                "retrieval_method": contact.get("retrieval_method", "http"),
+                "label": contact.get("label", "general"),
+                "official_family_verified": True,
+                "source_kind": "source_profile",
+            }
+            if contact.get("field") == "email":
+                email_records.append(record)
+            elif contact.get("field") == "phone":
+                phone_records.append(record)
 
     ranked_email_records = contact_decision.rank_email_records(
         company, crawl_result["url"], email_records, _email_is_usable,
@@ -689,6 +785,11 @@ def _evaluate_candidate(
     for record in ranked_email_records:
         mail_domain = scorer.normalize_domain(str(record.get("value", "")).rsplit("@", 1)[-1])
         record["structured_domain_relation"] = bool(has_structured_owner_claim and any(scorer.same_registrable_domain(mail_domain, domain) for domain in related_domains))
+        record["source_profile_domain_relation"] = bool(
+            candidate.get("_source_profile_evidence")
+            and candidate.get("_source_profile_contact_anchor")
+            and record.get("company_domain_identity")
+        )
 
     ranked_phone_records = _select_phone_records(phone_records)
     contact_policy = contact_publication.filter_records(
@@ -709,8 +810,14 @@ def _evaluate_candidate(
     normalized_phones = [record["value"] for record in eligible_phone_records]
     phone_source = "website" if normalized_phones else ""
     # Contact values must come from the crawled official site.  Third-party
-    # directory data (such as Google Places or Hunter) is not published.
+    # directory data (such as Google Places or Hunter) is not published. A
+    # source-profile contact is allowed only through the audited fallback
+    # above, never from a generic search result.
     final_score, reasons = _score_candidate_with_site(company, candidate, crawl_result, selected_email, normalized_phones, metadata)
+    if _source_profile_first_party_contact_route(
+        company, candidate, crawl_result, reasons, selected_email, normalized_phones,
+    ) and "ambiguous_name_risk_resolved_by_source_profile_first_party_contact" not in reasons:
+        reasons.append("ambiguous_name_risk_resolved_by_source_profile_first_party_contact")
     reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
     places_phone = phone.normalize_phone(
         str(candidate.get("external_phone", "") or "")
@@ -803,6 +910,11 @@ def _evaluate_candidate(
         "structured_identity": structured_identity,
         "semantic_identity": semantic_identity,
         "identity_assessment": identity_assessment,
+        "source_profile_domain_relation": any(
+            bool(record.get("source_profile_domain_relation"))
+            for record in ranked_email_records
+            if record.get("value") == selected_email
+        ),
     }
 
 
@@ -1723,6 +1835,19 @@ def _weak_search_identity_requires_review(company: str, evaluation: dict) -> boo
     }:
         return False
     reasons = evaluation.get("reasons", [])
+    if (
+        candidate.get("_source_profile_evidence")
+        and evaluation.get("has_contact")
+        and any(reason.startswith(("page_identity_strong:", "page_identity_medium:")) for reason in reasons)
+        and not any(reason.startswith((
+            "context_conflict:", "metadata_context_conflict:",
+            "structured_identity_unmatched:",
+        )) for reason in reasons)
+    ):
+        # This is no longer an untrusted search hit: the source profile gave
+        # an explicit site, and the site's own identity/contact evidence has
+        # already passed the candidate resolution gates.
+        return False
     if any(reason.startswith((
         "legal_name_full_match:",
         "legal_name_phrase_match:",
@@ -2021,6 +2146,8 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
             logger.exception("Supplied website evaluation failed for %s, falling back to search", company)
 
     profile_candidates = search.find_profile_candidates(company, metadata)
+    profile_identity_by_domain: dict[str, dict] = {}
+    profile_full_by_domain: dict[str, dict] = {}
     if profile_candidates:
         runtime.record("pipeline.profile_candidates_discovered", len(profile_candidates))
         profile_identity = [
@@ -2030,6 +2157,11 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
             )
             for candidate in profile_candidates
         ]
+        profile_identity_by_domain = {
+            scorer.normalize_domain(item["candidate"].get("url", "")): item
+            for item in profile_identity
+            if scorer.normalize_domain(item["candidate"].get("url", ""))
+        }
         profile_full = []
         for identity_evaluation in profile_identity:
             if not (
@@ -2047,6 +2179,22 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
                     full_evaluation, identity_evaluation,
                 )
             )
+        profile_full_by_domain = {
+            scorer.normalize_domain(item["candidate"].get("url", "")): item
+            for item in profile_full
+            if scorer.normalize_domain(item["candidate"].get("url", ""))
+        }
+        # Keep the full first-party crawl in the later candidate waterfall.
+        # A profile route may be authoritative discovery while still being
+        # unresolved until its contact pages are included; dropping that
+        # enriched evaluation forced a duplicate identity crawl and lost the
+        # only usable contact evidence.
+        for full_evaluation in profile_full:
+            domain = scorer.normalize_domain(
+                full_evaluation.get("candidate", {}).get("url", "")
+            )
+            if domain and full_evaluation.get("crawl_result", {}).get("pages"):
+                profile_identity_by_domain[domain] = full_evaluation
         runtime.record("pipeline.profile_candidates_evaluated", len(profile_full))
         profile_resolution = entity_resolution.resolve_profile_anchor(
             company, profile_full,
@@ -2066,7 +2214,11 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
                 return index, _attach_candidates(row, profile_candidates)
 
     try:
-        candidates = search.find_candidate_domains(company, metadata)
+        candidates = search.find_candidate_domains(
+            company,
+            metadata,
+            profile_candidates=profile_candidates,
+        )
     except Exception as exc:
         logger.exception("Search failed for %s", company)
         random_delay()
@@ -2115,13 +2267,19 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
             and scorer.normalize_domain(candidate.get("url", "")) not in evaluated_domains
         )
     )
-    identity_evaluations = [
-        _evaluate_candidate_with_stage(
-            company, candidate, metadata,
-            crawl_profile="identity", verify_email_domain=False,
+    identity_evaluations = []
+    for candidate in eligible_candidates:
+        domain = scorer.normalize_domain(candidate.get("url", ""))
+        cached_identity = profile_identity_by_domain.get(domain)
+        if cached_identity is not None:
+            identity_evaluations.append(cached_identity)
+            continue
+        identity_evaluations.append(
+            _evaluate_candidate_with_stage(
+                company, candidate, metadata,
+                crawl_profile="identity", verify_email_domain=False,
+            )
         )
-        for candidate in eligible_candidates
-    ]
     alias_candidates = _first_party_alias_candidates(
         company,
         identity_evaluations,
@@ -2158,7 +2316,21 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
             row["confidence"] = "review"
             row["email_verification_reason"] = "website_unreachable"
             return index, _attach_candidates(row, candidates)
-        row = _empty_result(company, "WEBSITE_FETCH_FAILED", identity_evaluations[0]["reasons"][0], best["score"])
+        first_reason = next(
+            (
+                reason
+                for item in identity_evaluations
+                for reason in item.get("reasons", [])
+                if _crawler_budget_blocked(reason)
+            ),
+            identity_evaluations[0]["reasons"][0],
+        )
+        row = _empty_result(
+            company,
+            "BLOCKED_BUDGET" if _crawler_budget_blocked(first_reason) else "WEBSITE_FETCH_FAILED",
+            first_reason,
+            best["score"],
+        )
         return index, _attach_candidates(row, candidates)
 
     ranked_identity = sorted(
@@ -2296,7 +2468,12 @@ def _process_company(index: int, company: str, logger, known_website: str = "", 
     }
     evaluations = []
     for candidate in full_candidates:
-        full_evaluation = _evaluate_candidate_with_stage(company, candidate, metadata)
+        domain = scorer.normalize_domain(candidate.get("url", ""))
+        full_evaluation = profile_full_by_domain.get(domain)
+        if full_evaluation is None:
+            full_evaluation = _evaluate_candidate_with_stage(
+                company, candidate, metadata,
+            )
         light_evaluation = identity_by_domain.get(scorer.normalize_domain(candidate.get("url", "")))
         if light_evaluation:
             full_evaluation = _preserve_identity_phase_evidence(full_evaluation, light_evaluation)

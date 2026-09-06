@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from typing import Any
 
 from modules import scorer
+from modules.source_normalizer import is_website_label, normalize_url
 
 
 ORGANIZER_HOSTS = {
@@ -33,11 +34,13 @@ class AdapterResult:
 
 def classify_link(url: str, *, label: str = "", company_name: str = "") -> dict[str, Any]:
     raw = str(url or "").strip()
-    parsed = urlparse(raw)
+    normalized = normalize_url(raw)
+    candidate = normalized["normalized_value"]
+    parsed = urlparse(candidate)
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     reason = ""
-    if parsed.scheme not in {"http", "https"} or not host:
-        reason = "invalid_url"
+    if normalized["status"] != "present" or not host:
+        reason = normalized["rejection_reason"] or "invalid_url"
     elif host in REJECTED_HOSTS:
         reason = "non_company_host"
     elif host in ORGANIZER_HOSTS:
@@ -46,14 +49,12 @@ def classify_link(url: str, *, label: str = "", company_name: str = "") -> dict[
         reason = "asset_url"
     elif host in {"-", "www"} or raw.casefold() in {"http://-", "https://-", "-"}:
         reason = "placeholder_url"
-    explicit = str(label or "").strip().casefold() in {
-        "website", "web site", "web sitesi", "internet sitesi", "official site",
-    }
-    domain_match = bool(company_name and scorer.public_brand_domain_match(company_name, raw))
+    explicit = is_website_label(label)
+    domain_match = bool(company_name and scorer.public_brand_domain_match(company_name, candidate))
     if not reason and not explicit and not domain_match:
         reason = "unlabelled_external_link"
     return {
-        "url": raw,
+        "url": candidate or raw,
         "label": str(label or "").strip(),
         "explicit_website": explicit,
         "company_domain_match": domain_match,

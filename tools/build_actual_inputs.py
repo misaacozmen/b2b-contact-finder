@@ -11,7 +11,8 @@ from openpyxl import Workbook, load_workbook
 
 
 OUTPUT_HEADERS = [
-    "Company", "website", "listed_website", "source", "source_record_id",
+    "Company", "website", "source_listed_website", "listed_website", "source_listed_website_status",
+    "source", "source_record_id", "selection_group", "selection_reason", "selection_score", "selection_status",
     "profile_url", "listing_url", "listed_legal_name", "brand", "sector",
     "description", "listed_email", "listed_phone", "listed_address",
 ]
@@ -91,7 +92,7 @@ def _listing_url(record: dict[str, Any], source: str) -> str:
 def _validate_input_headers(headers: list[str]) -> None:
     for header in headers:
         folded = header.casefold().replace("-", "_")
-        if any(token in folded for token in FORBIDDEN_TOKENS):
+        if not folded.startswith(("selection_", "source_listed_")) and any(token in folded for token in FORBIDDEN_TOKENS):
             raise RuntimeError(f"forbidden non-source input column: {header}")
     if len({header.casefold() for header in headers}) != len(headers):
         raise RuntimeError("actual input header case collision")
@@ -118,9 +119,15 @@ def build(selection_path: Path, output_path: Path, original_input: Path | None =
         rows.append([
             _value(record, original_row, "display_name", "Company", "company"),
             "",
+            _value(record, original_row, "source_listed_website"),
             _value(record, original_row, "listed_website", "official_website"),
+            _value(record, original_row, "source_listed_website_status"),
             source,
             source_id,
+            _value(record, original_row, "selection_group"),
+            _value(record, original_row, "selection_reason"),
+            _value(record, original_row, "selection_score"),
+            _value(record, original_row, "selection_status"),
             profile,
             listing,
             _value(record, original_row, "legal_name", "listed_legal_name"),

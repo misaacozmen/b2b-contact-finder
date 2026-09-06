@@ -13,6 +13,7 @@ from charset_normalizer import from_bytes
 
 import config
 from modules import network_guard, run_context
+from modules.source_normalizer import field_evidence, normalize_label, normalize_url
 
 
 HEADERS = {
@@ -390,9 +391,9 @@ def _texhibition_list_rows(
 
 
 def _detail_value(scope, labels: tuple[str, ...]) -> tuple[str, list[str]]:
-    wanted = {_fold(label) for label in labels}
+    wanted = {normalize_label(label) for label in labels}
     for tag in scope.find_all(["dt", "th", "label", "strong", "b", "span", "div"]):
-        label = _fold(tag.get_text(" ", strip=True)).rstrip(":")
+        label = normalize_label(tag.get_text(" ", strip=True))
         if not label or not any(label == item or label.startswith(item + ":") for item in wanted):
             continue
         container = tag.parent
@@ -427,7 +428,7 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
     """Extract labelled exhibitor fields while excluding site-wide footer data."""
     soup, scope = _texhibition_detail_scope(html)
     legal_name, _ = _detail_value(scope, ("legal name", "company name", "firma unvani", "ticari unvan", "company"))
-    website_value, website_links = _detail_value(scope, ("website", "web site", "web sitesi", "firma website"))
+    website_value, website_links = _detail_value(scope, ("web", "website", "web site", "web sitesi", "internet sitesi", "official website", "official site", "firma website"))
     address, _ = _detail_value(scope, ("address", "adres", "company address", "firma adresi"))
     country, _ = _detail_value(scope, ("country", "ulke", "ülke"))
     description, _ = _detail_value(scope, ("description", "about company", "about", "aciklama", "açıklama"))
@@ -444,10 +445,20 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
         host = _catalog_host(value)
         if value and host and host not in {"texhibitionist.com", "www.texhibitionist.com"} and not value.lower().startswith(("mailto:", "tel:")):
             external_links.append(value)
-    website = (
-        _normalize_website(website_links[0]) if website_links
-        else _normalize_website(website_value) if website_value
-        else (external_links[0] if external_links else "")
+    website_raw = website_links[0] if website_links else website_value
+    website_candidate = normalize_url(website_raw, source_url=profile_url) if website_raw else {
+        "raw_value": "", "normalized_value": "", "status": "absent", "rejection_reason": ""
+    }
+    website = website_candidate["normalized_value"] if website_candidate["status"] == "present" else (external_links[0] if external_links else "")
+    website_evidence = field_evidence(
+        raw_value=website_raw,
+        normalized_value=website,
+        label_raw="Web Site" if website_raw else "",
+        selector_or_json_pointer="explicit_website_label/a[href]",
+        source_url=profile_url,
+        response_bytes=html.encode("utf-8", errors="ignore"),
+        status="present" if website else (website_candidate["status"] if website_raw else "absent"),
+        rejection_reason=website_candidate.get("rejection_reason", "") if not website else "",
     )
     email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", email, re.I)
     if not email_match:
@@ -459,6 +470,9 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
         description = _meta_description(str(soup))
     details = {
         "listed_legal_name": legal_name,
+        "source_listed_website": website_raw,
+        "source_listed_website_status": website_evidence["status"],
+        "source_listed_website_rejection_reason": website_evidence["rejection_reason"],
         "listed_website": website,
         "website": website,
         "listed_address": address,
@@ -471,6 +485,7 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
         "source_detail_url": profile_url,
         "source_detail_content_sha256": hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest(),
         "source_detail_status": "COMPLETED" if any((legal_name, website, address, country, description, brands, representations, phone, email)) else "EMPTY",
+        "source_field_evidence": json.dumps([website_evidence], ensure_ascii=False, sort_keys=True),
     }
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     details["source_evidence"] = json.dumps([

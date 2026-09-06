@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from modules.run_context import source_tree_sha256
+from modules.ocr_runtime import configure_tesseract
+from modules.run_context import runtime_capability_profile, source_tree_sha256
 
 
 def main() -> int:
@@ -31,6 +32,8 @@ def main() -> int:
         "runtime_lock_path": str(lock_path.resolve()),
         "browser_smoke": smoke_data["browser"],
         "ocr_smoke": smoke_data["ocr"],
+        "capability_profile": runtime_capability_profile(),
+        "ocr_runtime": configure_tesseract(),
         "runtime_guard_3_50_4_rejected": sqlite3.sqlite_version != "3.50.4",
     }
     (root / "runtime_report.json").write_text(

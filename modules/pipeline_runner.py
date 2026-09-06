@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import config
 from modules import (
@@ -248,11 +249,15 @@ def resolve_run_config(manifest: dict | None = None, *, allow_paid: bool | None 
                        search_cache: str | None = None, crawl_cache: str | None = None,
                        brightdata_budget: int | None = None, google_places_budget: int | None = None,
                        linkedin_budget: int | None = None, rerank_cache: bool = False,
-                       finalize_without_paid: bool | None = None) -> run_context.RunConfig:
+                       finalize_without_paid: bool | None = None,
+                       input_count: int | None = None,
+                       unique_profile_host_count: int | None = None) -> run_context.RunConfig:
     if manifest is None:
         return run_context.RunConfig.from_config(
             paid_enabled=bool(allow_paid),
             free_only_finalization=bool(finalize_without_paid),
+            input_count=input_count,
+            unique_profile_host_count=unique_profile_host_count,
         )
     recorded = run_context.RunConfig.from_dict(manifest.get("run_config", {}))
     if allow_paid is not None and bool(allow_paid) != recorded.paid_enabled:
@@ -571,9 +576,23 @@ def _run_pipeline_impl_body(
         allow_paid = run_config.paid_enabled
     else:
         allow_paid = bool(allow_paid)
+        profile_hosts = {
+            (urlparse(str(record.get("profile_url") or "")).hostname or "").casefold()
+            for record in company_records
+            if (urlparse(str(record.get("profile_url") or "")).hostname or "").strip()
+        }
+        # The effective per-run crawler cap is part of the frozen RunConfig.
+        # Apply it to the live reservation gate before freezing that config;
+        # otherwise the manifest and the physical limiter can disagree and a
+        # later item can be starved by an inherited environment value.
+        config.CRAWLER_HTTP_REQUEST_BUDGET = (
+            19 * len(company_records) + 2 * len(profile_hosts)
+        )
         run_config = resolve_run_config(
             None, allow_paid=allow_paid,
             finalize_without_paid=finalize_without_paid,
+            input_count=len(company_records),
+            unique_profile_host_count=len(profile_hosts),
         )
     paid_query_limit = search.configure_run_budget(len(company_records))
     paid_settings = {

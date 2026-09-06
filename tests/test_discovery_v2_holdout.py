@@ -370,6 +370,61 @@ class DiscoveryV2HoldoutTests(unittest.TestCase):
         self.assertTrue(records[0]["explicit_website"])
         self.assertTrue(records[0]["rendered"])
 
+    def test_texhibition_profile_renders_visible_contact_surface(self):
+        response = Mock(
+            status_code=200,
+            text=(
+                "<html><main><h1>Exhibitor</h1>"
+                "<div>Website: <a href='https://firma.example'>firma.example</a></div>"
+                "</main></html>"
+            ),
+            url="https://www.texhibitionist.com/en/exhibitors/exhibitor",
+        )
+        response._b2b_final_url = response.url
+        rendered = (
+            "<html><main><h1>Exhibitor</h1>"
+            "<div>Website: <a href='https://firma.example'>firma.example</a></div>"
+            "<div>Phone: +90 212 555 0101</div></main></html>"
+        )
+        with patch.object(config, "SEARCH_CACHE_MODE", "off"), patch.object(
+            config, "ENABLE_JS_PROFILE_FALLBACK", True
+        ), patch(
+            "modules.search.crawler._request_with_safe_redirects", return_value=response
+        ), patch(
+            "modules.search.crawler._try_render", return_value=(rendered, None)
+        ) as render:
+            records = search._profile_external_websites(response.url)
+
+        render.assert_called_once_with(response.url)
+        values = {
+            item["value"]
+            for item in records[0]["profile_contact_evidence"]
+            if item["field"] == "phone"
+        }
+        self.assertIn("+90 212 555 0101", values)
+
+    def test_profile_contact_evidence_excludes_catalogue_organizer_footer(self):
+        response = Mock(
+            status_code=200,
+            text=(
+                "<html><main><h1>Exhibitor</h1>"
+                "<div>Phone: +90 212 555 0101</div>"
+                "<div>Website: <a href='https://firma.example'>firma.example</a></div>"
+                "</main><footer>Organizer phone: +90 212 999 0000</footer></html>"
+            ),
+            url="https://fair.example/exhibitor/exhibitor",
+        )
+        response._b2b_final_url = response.url
+        with patch.object(config, "SEARCH_CACHE_MODE", "off"), patch(
+            "modules.search.crawler._request_with_safe_redirects", return_value=response
+        ):
+            records = search._profile_external_websites(response.url)
+
+        evidence = records[0]["profile_contact_evidence"]
+        values = {item["value"] for item in evidence if item["field"] == "phone"}
+        self.assertIn("+90 212 555 0101", values)
+        self.assertNotIn("+90 212 999 0000", values)
+
     def test_profile_403_can_render_but_replay_never_renders(self):
         error_response = Mock(status_code=403)
         error = requests.HTTPError("forbidden", response=error_response)

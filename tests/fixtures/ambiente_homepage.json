@@ -1,0 +1,13 @@
+{
+  "result": {
+    "hits": [
+      {"exhibitor": {
+        "id": "fixture-id-1",
+        "rewriteId": "fixture-company",
+        "name": "Fixture Company",
+        "homepage": "www.fixture-company.example",
+        "address": {"email": "info@fixture-company.example", "tel": "+90 212 000 00 00", "city": "Istanbul"}
+      }}
+    ]
+  }
+}

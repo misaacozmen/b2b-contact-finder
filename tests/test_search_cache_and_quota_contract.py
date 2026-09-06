@@ -92,3 +92,60 @@ def test_eight_concurrent_workers_cannot_exceed_quota(tmp_path: Path):
     with patch.object(config, "PROGRESS_DB_FILE", db), concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         accepted = list(pool.map(reserve, range(8)))
     assert sum(accepted) == 10
+
+
+def test_ddgs_uses_at_most_three_physical_attempts_and_two_empty_responses(monkeypatch):
+    calls = []
+    ddgs_kwargs = []
+
+    class _DDGS:
+        def __init__(self, **kwargs):
+            ddgs_kwargs.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def text(self, query, max_results, backend):
+            calls.append(backend)
+            return []
+
+    search.reset_source_health()
+    monkeypatch.setattr(search, "DDGS", _DDGS)
+    monkeypatch.setattr(search, "PREFERRED_BACKENDS", ["one", "two", "three", "four"])
+    monkeypatch.setattr(search, "FALLBACK_BACKENDS", [])
+    with patch.object(config, "SEARCH_HTTP_REQUEST_BUDGET", 0):
+        result = search._ddgs_text("empty-query")
+    assert result.result_state == "EMPTY"
+    assert ddgs_kwargs == [{"timeout": config.REQUEST_TIMEOUT_SEC}] * len(ddgs_kwargs)
+    assert calls == ["one", "two"]
+    assert runtime.snapshot()["counters"]["http.search.physical_http_requests"] == 2
+
+
+def test_ddgs_transport_failures_are_failed_and_open_backend_circuit(monkeypatch):
+    calls = []
+
+    class _DDGS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def text(self, query, max_results, backend):
+            calls.append(backend)
+            raise RuntimeError("transport down")
+
+    search.reset_source_health()
+    monkeypatch.setattr(search, "DDGS", _DDGS)
+    monkeypatch.setattr(search, "PREFERRED_BACKENDS", ["one"])
+    monkeypatch.setattr(search, "FALLBACK_BACKENDS", [])
+    for _ in range(3):
+        result = search._ddgs_text("failed-query")
+        assert result.result_state == "FAILED"
+    before = len(calls)
+    result = search._ddgs_text("failed-query")
+    assert result.result_state == "UNKNOWN"
+    assert len(calls) == before

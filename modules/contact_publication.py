@@ -60,7 +60,13 @@ def evaluate_email(website: str, record: dict) -> dict:
     if dns_status in DNS_REJECTED:
         blockers.append("email_domain_invalid")
     if not same_mail_domain and dns_status not in DNS_REJECTED:
-        if not (source_ok and record.get("structured_domain_relation")):
+        if not (
+            source_ok
+            and (
+                record.get("structured_domain_relation")
+                or record.get("source_profile_domain_relation")
+            )
+        ):
             blockers.append("cross_domain_email_relation_unverified")
         elif dns_status not in DNS_ACCEPTED:
             runtime.record("contact_policy.email.cross_domain_structured_relation")
@@ -75,7 +81,10 @@ def evaluate_email(website: str, record: dict) -> dict:
         "reason": source_reason if eligible and same_mail_domain else (
             (
                 "first_party_cross_domain_company_identity"
-                if record.get("structured_domain_relation")
+                if (
+                    record.get("structured_domain_relation")
+                    or record.get("source_profile_domain_relation")
+                )
                 else "verified_cross_domain_email_from_first_party_source"
             )
             if eligible else ";".join(dict.fromkeys(blockers))

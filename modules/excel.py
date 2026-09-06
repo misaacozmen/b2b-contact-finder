@@ -121,6 +121,15 @@ def read_company_records(path: Path) -> list[dict]:
             {
                 "company": company,
                 "website": value_for(row, ("website", "web sitesi", "websitesi", "site"), 1),
+                "source_listed_website": value_for(
+                    row, ("source_listed_website", "source listed website"), None
+                ),
+                "source_listed_website_status": value_for(
+                    row, ("source_listed_website_status", "source listed website status"), None
+                ),
+                "source_listed_website_rejection_reason": value_for(
+                    row, ("source_listed_website_rejection_reason", "source listed website rejection reason"), None
+                ),
                 "listed_website": value_for(
                     row, ("listed_website", "fair_website", "fuar web sitesi"), None
                 ),
@@ -352,7 +361,8 @@ def write_company_records(path: Path, rows: Iterable[dict]) -> None:
             "listed_address", "hall", "stand", "brands", "representations",
             "listed_legal_name", "source_detail_status", "source_detail_url",
             "source_detail_content_sha256", "source_evidence", "sector", "description",
-            "source_record_id", "_id",
+            "source_record_id", "_id", "source_listed_website",
+            "source_listed_website_status", "source_listed_website_rejection_reason",
         ],
         rows,
     )

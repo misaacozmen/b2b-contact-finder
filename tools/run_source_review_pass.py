@@ -17,6 +17,8 @@ from urllib.parse import unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from modules.source_normalizer import is_website_label, normalize_url
+
 
 ALLOWED_HOSTS = {
     "hometex.com.tr",
@@ -79,28 +81,31 @@ def _first_phone(soup: BeautifulSoup) -> str:
 
 
 def _labelled_company_website(soup: BeautifulSoup) -> str:
-    labels = re.compile(r"^(website|web site|web sitesi|internet sitesi|official site)$", re.I)
-    for text_node in soup.find_all(string=labels):
+    for text_node in soup.find_all(string=lambda value: is_website_label(value)):
         parent = text_node.parent
         for container in (parent, parent.parent if parent else None, parent.parent.parent if parent and parent.parent else None):
             if container is None:
                 continue
             for link in container.find_all("a", href=True):
                 href = _clean(link.get("href"))
-                parsed = urlparse(href)
+                normalized = normalize_url(href)
+                parsed = urlparse(normalized["normalized_value"])
                 host = (parsed.hostname or "").casefold().removeprefix("www.")
-                if parsed.scheme in {"http", "https"} and host and host not in ALLOWED_HOSTS and host not in NON_COMPANY_HOSTS and host not in {"informa.com", "xing.com", "tobb.org.tr"} and not any(parsed.path.casefold().endswith(suffix) for suffix in (".pdf", ".jpg", ".jpeg", ".png")):
-                    return href
+                if normalized["status"] == "present" and host and host not in ALLOWED_HOSTS and host not in NON_COMPANY_HOSTS and host not in {"informa.com", "xing.com", "tobb.org.tr"} and not any(parsed.path.casefold().endswith(suffix) for suffix in (".pdf", ".jpg", ".jpeg", ".png")):
+                    return normalized["normalized_value"]
     return ""
 
 
 def _source_field_website(record: dict) -> str:
     candidate = _clean(record.get("listed_website"))
-    parsed = urlparse(candidate)
-    host = (parsed.hostname or "").casefold().removeprefix("www.")
-    if parsed.scheme not in {"http", "https"} or not host or host in NON_COMPANY_HOSTS or host in {"informa.com", "xing.com", "tobb.org.tr"}:
+    normalized = normalize_url(candidate)
+    if normalized["status"] != "present":
         return ""
-    return candidate
+    parsed = urlparse(normalized["normalized_value"])
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    if not host or host in NON_COMPANY_HOSTS or host in {"informa.com", "xing.com", "tobb.org.tr"}:
+        return ""
+    return normalized["normalized_value"]
 
 
 def _first_company_website(soup: BeautifulSoup) -> str:

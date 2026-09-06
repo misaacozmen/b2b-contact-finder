@@ -8,10 +8,18 @@ import sys
 from pathlib import Path
 
 from openpyxl import Workbook
+import pytest
 
 from materialize_legacy_publication_decisions import materialize
 from modules import publication_policy
-from validate_benchmark_suite import SOURCE_REVIEW_FIELDS, _invalid_package_issues, _sheet_rows, _validate_invalid_registry
+from validate_benchmark_suite import (
+    SOURCE_REVIEW_FIELDS,
+    _invalid_package_issues,
+    _sheet_rows,
+    _validate_invalid_registry,
+    _validate_v3_ground_truth,
+    evaluate_source_review,
+)
 
 
 def _workbook(path: Path, headers: list[str], rows: list[dict]) -> None:
@@ -44,6 +52,24 @@ def _actual_row(source_id: str, website: str = "https://example.test") -> dict:
         "phone": "+90 212 555 0101", "publication_eligible": True,
         "publication_decision": json.dumps({"source_record_id": source_id, "run_id": "run-v2", "config_sha256": "a" * 64, "publishable": True}),
     }
+
+
+def _v3_expected_row(source_id: str = "src:v3") -> dict:
+    row = _expected_row(source_id)
+    row.update({
+        "source_listed_website": "www.example.test",
+        "source_listed_website_status": "present",
+        "expected_website_domains_json": '["example.test"]',
+        "expected_emails_json": '["info@example.test"]',
+        "expected_phones_e164_json": '["+902125550101"]',
+        "expected_publication_reason_codes_json": "[]",
+        "website_field_evidence_json": '[{"source":"first_party","url":"https://example.test"}]',
+        "email_field_evidence_json": '[{"source":"first_party","url":"https://example.test/contact"}]',
+        "phone_field_evidence_json": '[{"source":"first_party","url":"https://example.test/contact"}]',
+        "reviewer_provenance_json": '[{"execution_id":"structured-1","method":"structured"},{"execution_id":"rendered-1","method":"rendered"}]',
+    })
+    row["expected_phone"] = "+902125550101"
+    return row
 
 
 def _manifest(tmp_path: Path, expected: Path) -> Path:
@@ -119,6 +145,96 @@ def test_source_review_validator_passes_perfect_actual_and_fails_false_publicati
     )
     assert failed.returncode == 3
     assert "false publication" in failed.stdout
+
+
+def test_v3_ground_truth_accepts_canonical_sets_and_provenance():
+    _validate_v3_ground_truth([_v3_expected_row()], "expected")
+
+
+@pytest.mark.parametrize("field,value,needle", [
+    ("expected_emails_json", '["Info@example.test","info@example.test"]', "duplicate"),
+    ("expected_website_domains_json", '["https://example.test"]', "canonical"),
+    ("expected_phones_e164_json", '["+902125550101","+902125550101"]', "duplicate"),
+    ("expected_phones_e164_json", '["+999"]', "E.164"),
+])
+def test_v3_ground_truth_rejects_malformed_sets(field: str, value: str, needle: str):
+    row = _v3_expected_row()
+    row[field] = value
+    if field == "expected_emails_json":
+        row["email_verified"] = "unknown"
+    with pytest.raises(ValueError, match=needle):
+        _validate_v3_ground_truth([row], "expected")
+
+
+def test_v3_ground_truth_rejects_populated_absent_and_unsupported_publication():
+    row = _v3_expected_row()
+    row["website_verified"] = "absent"
+    with pytest.raises(ValueError, match="absent field"):
+        _validate_v3_ground_truth([row], "expected")
+    row = _v3_expected_row()
+    row["expected_publication"] = "abstain"
+    with pytest.raises(ValueError, match="reason code"):
+        _validate_v3_ground_truth([row], "expected")
+    row = _v3_expected_row()
+    row["expected_publication"] = "publishable"
+    row["expected_emails_json"] = "[]"
+    row["expected_phones_e164_json"] = "[]"
+    row["expected_email"] = ""
+    row["expected_phone"] = ""
+    row["email_verified"] = "absent"
+    row["phone_verified"] = "absent"
+    with pytest.raises(ValueError, match="verified contact"):
+        _validate_v3_ground_truth([row], "expected")
+
+
+def test_v3_metrics_use_domain_and_alternative_contact_sets_and_item_latency(tmp_path: Path):
+    expected = tmp_path / "expected.xlsx"
+    actual = tmp_path / "actual.xlsx"
+    row = _v3_expected_row("src:sets")
+    row["expected_website"] = "https://example.test"
+    row["expected_website_domains_json"] = '["example.org","example.test"]'
+    row["expected_emails_json"] = '["info@example.test","sales@example.test"]'
+    row["expected_email"] = "info@example.test"
+    row["expected_phones_e164_json"] = '["+902125550101"]'
+    row["expected_phone"] = "+902125550101"
+    _workbook(expected, list(SOURCE_REVIEW_FIELDS) + [
+        "source_listed_website", "source_listed_website_status", "expected_website_domains_json",
+        "expected_emails_json", "expected_phones_e164_json", "expected_publication_reason_codes_json",
+        "website_field_evidence_json", "email_field_evidence_json", "phone_field_evidence_json", "reviewer_provenance_json",
+    ], [row])
+    _workbook(actual, ["source_record_id", "website", "email", "alternative_emails", "phone", "alternative_phones", "publication_eligible", "elapsed_seconds"], [{
+        "source_record_id": "src:sets", "website": "https://www.example.org", "email": "wrong@example.test",
+        "alternative_emails": "info@example.test;other@example.test", "phone": "0212 555 01 01",
+        "alternative_phones": "+90 212 000 00 00", "publication_eligible": True, "elapsed_seconds": 1.0,
+    }])
+    metrics = evaluate_source_review(expected, actual)
+    assert metrics["correct_published"] == 1
+    assert metrics["publication_recall"] == 1.0
+    assert metrics["safe_yield"] == 1.0
+    assert metrics["email_tp"] == 1
+    assert metrics["phone_tp"] == 1
+    assert metrics["verified_complete_contact_recall"] == 1.0
+    assert metrics["p50_item_seconds"] == 1.0
+    assert metrics["p95_item_seconds"] == 1.0
+    assert metrics["run_elapsed_seconds"] is None
+
+
+def test_unknown_records_remain_in_safe_yield_denominator(tmp_path: Path):
+    expected = tmp_path / "expected.xlsx"
+    actual = tmp_path / "actual.xlsx"
+    row = _v3_expected_row("src:unknown-metric")
+    row.update({
+        "website_verified": "unknown", "email_verified": "unknown", "phone_verified": "unknown",
+        "expected_publication": "unknown", "expected_website": "", "expected_email": "", "expected_phone": "",
+        "expected_website_domains_json": "[]", "expected_emails_json": "[]", "expected_phones_e164_json": "[]",
+    })
+    _workbook(expected, list(SOURCE_REVIEW_FIELDS), [row])
+    _workbook(actual, ["source_record_id", "publication_eligible", "elapsed_seconds"], [{"source_record_id": "src:unknown-metric", "publication_eligible": False, "elapsed_seconds": 2.0}])
+    metrics = evaluate_source_review(expected, actual)
+    assert metrics["unknown_record_count"] == 1
+    assert metrics["total_expected_records"] == 1
+    assert metrics["denominators"]["safe_yield"] == 1
+    assert metrics["safe_yield"] == 0.0
 
 
 def test_source_review_validator_reports_structural_source_id_failure(tmp_path: Path) -> None:
@@ -249,6 +365,79 @@ def test_invalid_benchmark_registry_cannot_be_bypassed_by_expected_hash_only(tmp
     }
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     assert _invalid_package_issues(manifest, payload)
+
+
+def test_invalid_benchmark_registry_schema_v2_accepts_artifact_receipt(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({
+        "schema_version": 2,
+        "packages": [],
+        "artifacts": [{
+            "artifact_id": "prepackage",
+            "artifact_sha256": {"manifest": "a" * 64, "expected": "b" * 64},
+            "invalid_reason_codes": [
+                "review_passes_same_tool_hash",
+                "website_label_web_and_colon_not_parsed",
+            ],
+        }],
+    }), encoding="utf-8")
+    assert _validate_invalid_registry(registry)[0]["artifact_id"] == "prepackage"
+
+
+def test_invalid_benchmark_registry_v2_rejects_duplicate_artifacts_and_hash_bypass(tmp_path: Path, monkeypatch) -> None:
+    base_artifact = {
+        "artifact_id": "one",
+        "artifact_sha256": {"manifest": "a" * 64},
+        "invalid_reason_codes": ["crawler_budget_starved_later_records"],
+    }
+    duplicate = tmp_path / "duplicate-artifact.json"
+    duplicate.write_text(json.dumps({
+        "schema_version": 2,
+        "packages": [],
+        "artifacts": [base_artifact, {**base_artifact, "artifact_id": "two"}],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate invalid benchmark artifact hash"):
+        _validate_invalid_registry(duplicate)
+
+    malformed = tmp_path / "malformed-artifact.json"
+    malformed.write_text(json.dumps({
+        "schema_version": 2,
+        "packages": [],
+        "artifacts": [{
+            "artifact_id": "broken",
+            "artifact_sha256": {"manifest": "not-a-sha"},
+            "invalid_reason_codes": ["crawler_budget_starved_later_records"],
+        }],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed artifact SHA-256"):
+        _validate_invalid_registry(malformed)
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("artifact bytes\n", encoding="utf-8")
+    artifact_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    registry_path = tmp_path / "registry-match.json"
+    registry_path.write_text(json.dumps({
+        "schema_version": 2,
+        "packages": [],
+        "artifacts": [{
+            "artifact_id": "manifest-bytes",
+            "artifact_sha256": {"manifest": artifact_hash},
+            "invalid_reason_codes": ["review_passes_same_tool_hash"],
+        }],
+    }), encoding="utf-8")
+    assert _invalid_package_issues(manifest, {}, registry_path=registry_path)
+
+
+def test_current_prepackage_is_rejected_before_quality() -> None:
+    manifest = Path("output/a8_corrected_work/benchmark_manifest_prepackage.json")
+    if not manifest.exists():
+        pytest.skip("corrected prepackage receipt is not present")
+    result = subprocess.run(
+        [sys.executable, "validate_benchmark_suite.py", "--manifest", str(manifest), "--require-actual"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "invalid benchmark package registry match" in result.stdout
 
 
 def test_legacy_materializer_uses_checkpoint_and_evidence_not_excel(tmp_path: Path) -> None:

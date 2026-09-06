@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from modules.scorer import normalize_text, registrable_domain
+from modules.source_normalizer import field_evidence, is_website_label, normalize_source_url, normalize_url
 
 
 HOMETEX_LISTING_URL = "https://hometex.com.tr/en/2026-exhibitor-list"
@@ -77,9 +78,12 @@ def _clean_string(value: Any) -> str:
 
 def _valid_company_website(value: Any) -> bool:
     raw = _clean_string(value)
-    parsed = urlparse(raw)
+    normalized = normalize_url(raw)
+    if normalized["status"] != "present":
+        return False
+    parsed = urlparse(normalized["normalized_value"])
     host = (parsed.hostname or "").casefold().removeprefix("www.")
-    if parsed.scheme not in {"http", "https"} or not host or host in {"-", "www"}:
+    if not host or host in {"-", "www"}:
         return False
     if host in NON_COMPANY_HOSTS or host.endswith(".hometex.com.tr") or host.endswith(".messefrankfurt.com"):
         return False
@@ -163,8 +167,17 @@ def _candidate_scalar(value: Any) -> str:
 
 def _labelled_website(soup: BeautifulSoup) -> str:
     """Read only a link contained by an explicit Website/Web Sitesi field."""
-    labels = re.compile(r"^(website|web site|web sitesi|internet sitesi|official site)$", re.I)
-    for label in soup.find_all(string=labels):
+    value, _ = _labelled_website_field(soup, "")
+    return value
+
+
+def _labelled_website_field(
+    soup: BeautifulSoup,
+    source_url: str,
+    response_bytes: bytes | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Return a canonical explicitly labelled website and its source receipt."""
+    for label in soup.find_all(string=lambda value: is_website_label(value)):
         parent = label.parent
         if parent is None:
             continue
@@ -173,10 +186,27 @@ def _labelled_website(soup: BeautifulSoup) -> str:
             if container is None:
                 continue
             for link in container.find_all("a", href=True):
-                candidate = _clean_string(link.get("href"))
-                if _valid_company_website(candidate):
-                    return candidate
-    return ""
+                raw = _clean_string(link.get("href"))
+                normalized = normalize_url(raw, source_url=source_url)
+                if _valid_company_website(raw):
+                    return normalized["normalized_value"], field_evidence(
+                        raw_value=raw,
+                        normalized_value=normalized["normalized_value"],
+                        label_raw=label,
+                        selector_or_json_pointer="explicit_website_label/a[href]",
+                        source_url=source_url,
+                        response_bytes=response_bytes,
+                        status="present",
+                    )
+    return "", field_evidence(
+        raw_value="",
+        normalized_value="",
+        label_raw="",
+        selector_or_json_pointer="explicit_website_label/a[href]",
+        source_url=source_url,
+        response_bytes=response_bytes,
+        status="absent",
+    )
 
 
 def _find_category_objects(value: Any, target: str) -> list[dict[str, Any]]:
@@ -223,7 +253,8 @@ def _hometex_detail(session: requests.Session, href: str, listing_label: str) ->
     title = _clean_string(soup.title.get_text(" ", strip=True) if soup.title else "")
     if not title or title.casefold() in {"hometex", "hometex | international home textile fair"}:
         raise RuntimeError(f"HOMETEX detail has no verified company title: {detail_url}")
-    website = _labelled_website(soup)
+    website, website_evidence = _labelled_website_field(soup, detail_url, response.content)
+    source_listed_website = website_evidence["raw_value"]
     slug = href.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
     return {
         "source": "hometex_2026",
@@ -232,7 +263,11 @@ def _hometex_detail(session: requests.Session, href: str, listing_label: str) ->
         "legal_name": title.strip(),
         "brand": _clean_string(listing_label) if _clean_string(listing_label) and not _clean_string(listing_label).isdigit() else title.strip(),
         "official_profile_url": detail_url,
+        "source_listed_website": source_listed_website,
+        "source_listed_website_status": website_evidence["status"],
+        "source_listed_website_rejection_reason": website_evidence["rejection_reason"],
         "listed_website": website,
+        "source_field_evidence": [website_evidence],
         "website": "",
         "response_sha256": _sha256_bytes(response.content),
         "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -265,6 +300,9 @@ def acquire_hometex(session: requests.Session) -> dict[str, Any]:
             "brand": label.strip() if label.strip() and not label.strip().isdigit() else "",
             "official_profile_url": urljoin(HOMETEX_LISTING_URL, href),
             "website": "",
+            "source_listed_website": "",
+            "source_listed_website_status": "absent",
+            "source_field_evidence": [],
             "listing_label_verified": False,
             "listing_response_sha256": _sha256_bytes(response.content),
             "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -329,7 +367,8 @@ def acquire_ambiente(session: requests.Session) -> dict[str, Any]:
 
     records = []
     seen: set[str] = set()
-    for hit in hits:
+    homepage_nonempty_count = 0
+    for hit_index, hit in enumerate(hits):
         exhibitor = hit.get("exhibitor") if isinstance(hit, dict) else None
         if not isinstance(exhibitor, dict):
             raise RuntimeError("Ambiente hit has no exhibitor object")
@@ -339,6 +378,58 @@ def acquire_ambiente(session: requests.Session) -> dict[str, Any]:
         seen.add(rewrite_id)
         detail_url = f"https://ambiente.messefrankfurt.com/frankfurt/en/exhibitor-search.detail.html/{rewrite_id}.html"
         address = exhibitor.get("address") if isinstance(exhibitor.get("address"), dict) else {}
+        raw_homepage = _clean_string(exhibitor.get("homepage"))
+        listed_website = normalize_source_url(raw_homepage)
+        homepage_status = "present" if raw_homepage else "absent"
+        homepage_nonempty_count += bool(raw_homepage)
+        response_bytes = search_response.content
+        field_receipts = [
+            field_evidence(
+                raw_value=raw_homepage,
+                normalized_value=listed_website,
+                label_raw="homepage",
+                selector_or_json_pointer=f"/result/hits/{hit_index}/exhibitor/homepage",
+                source_url=AMBIENTE_SEARCH_URL,
+                response_bytes=response_bytes,
+                status=homepage_status,
+            ),
+            field_evidence(
+                raw_value=address.get("email"),
+                normalized_value=_clean_string(address.get("email")),
+                label_raw="address.email",
+                selector_or_json_pointer=f"/result/hits/{hit_index}/exhibitor/address/email",
+                source_url=AMBIENTE_SEARCH_URL,
+                response_bytes=response_bytes,
+                status="present" if address.get("email") else "absent",
+            ),
+            field_evidence(
+                raw_value=address.get("tel"),
+                normalized_value=_clean_string(address.get("tel")),
+                label_raw="address.tel",
+                selector_or_json_pointer=f"/result/hits/{hit_index}/exhibitor/address/tel",
+                source_url=AMBIENTE_SEARCH_URL,
+                response_bytes=response_bytes,
+                status="present" if address.get("tel") else "absent",
+            ),
+            field_evidence(
+                raw_value=address,
+                normalized_value=_clean_string(address),
+                label_raw="address",
+                selector_or_json_pointer=f"/result/hits/{hit_index}/exhibitor/address",
+                source_url=AMBIENTE_SEARCH_URL,
+                response_bytes=response_bytes,
+                status="present" if address else "absent",
+            ),
+            field_evidence(
+                raw_value=rewrite_id,
+                normalized_value=rewrite_id,
+                label_raw="rewriteId",
+                selector_or_json_pointer=f"/result/hits/{hit_index}/exhibitor/rewriteId",
+                source_url=AMBIENTE_SEARCH_URL,
+                response_bytes=response_bytes,
+                status="present",
+            ),
+        ]
         records.append({
             "source": "ambiente_2026",
             "source_record_id": f"ambiente_2026:{rewrite_id}",
@@ -347,10 +438,13 @@ def acquire_ambiente(session: requests.Session) -> dict[str, Any]:
             "brand": _candidate_scalar(exhibitor.get("brands")),
             "official_profile_url": detail_url,
             "website": "",
-            "listed_website": _clean_string(exhibitor.get("homepage")),
+            "source_listed_website": raw_homepage,
+            "source_listed_website_status": homepage_status,
+            "listed_website": listed_website,
             "listed_email": _clean_string(address.get("email")),
             "listed_phone": _clean_string(address.get("tel")),
             "listed_address": _clean_string(address),
+            "source_field_evidence": field_receipts,
             "observed_first_party_fields": {
                 "id": exhibitor.get("id"),
                 "rewriteId": exhibitor.get("rewriteId"),
@@ -374,6 +468,7 @@ def acquire_ambiente(session: requests.Session) -> dict[str, Any]:
         "search_response_sha256": _sha256_bytes(search_response.content),
         "hits_total": total,
         "unique_rewrite_id_count": len(seen),
+        "homepage_nonempty_count": homepage_nonempty_count,
         "category_matches": category_matches,
         "records": records,
     }

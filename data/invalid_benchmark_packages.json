@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "registry_name": "invalid_benchmark_packages",
   "packages": [
     {
@@ -18,6 +18,27 @@
         "package_integrity_not_verified"
       ],
       "instruction_file": "MIMAR_A8_D8_KOK_NEDEN_DUZELTME_TALIMATI_2026-09-01.md"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "a8_corrected_work_prepackage",
+      "artifact_sha256": {
+        "prepackage_manifest": "b1df1e9f57755af580bb543261586a06ec7527efe4f407b4e101cba80e7a5616",
+        "diagnostic_expected": "7d9bfe54d4e6daaf6e4a55a46e8a4aeff9602c3ab449813937d37948e8870799",
+        "independent_expected": "73596b1a9b92c611a1a62bb8812b98ef3c4802f26e03e8713779366810d73672",
+        "diagnostic_merged_review": "8a9c2babd7bbb47da41abc76689c8580df52b9759fd31c60163c2fa72605f788",
+        "independent_merged_review": "a82e2a6d9c1af5cc0a15074b5503f53de5970afa094153b8d04924d21a8b0914"
+      },
+      "invalid_reason_codes": [
+        "review_passes_same_decision_implementation",
+        "review_passes_same_tool_hash",
+        "website_label_web_and_colon_not_parsed",
+        "schemeless_official_homepage_rejected",
+        "source_listed_field_conflated_with_verified_ground_truth",
+        "single_contact_value_rejected_valid_alternative",
+        "crawler_budget_starved_later_records"
+      ]
     }
   ]
 }

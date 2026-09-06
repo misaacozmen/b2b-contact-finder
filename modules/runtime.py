@@ -29,6 +29,9 @@ _CURRENT_OPERATION: ContextVar[str] = ContextVar("current_operation", default=""
 _CURRENT_PROVIDER_OUTCOMES: ContextVar[tuple[dict, ...] | None] = ContextVar("current_provider_outcomes", default=None)
 _FREE_QUERY_COUNTS: dict[tuple[str, int, str], int] = {}
 _CURRENT_SEARCH_BUCKET: ContextVar[str] = ContextVar("current_search_bucket", default="")
+_CURRENT_CRAWLER_BUCKET: ContextVar[str] = ContextVar("current_crawler_bucket", default="")
+_LAST_CRAWLER_REASON: ContextVar[str] = ContextVar("last_crawler_reason", default="")
+_CRAWLER_COUNTS: dict[tuple[str, int, str], int] = {}
 
 _PROVIDER_ALIASES = {
     "brightdata": "brightdata", "google_places": "google_places",
@@ -143,7 +146,7 @@ def _counter_provider_name(provider: str) -> str:
 
 
 def reset() -> None:
-    global _COUNTERS, _STARTED_AT, _NEXT_REQUEST_AT, _PHASE, _DURABLE_RUN_ID, _DURABLE_BUDGETS, _FREE_QUERY_COUNTS
+    global _COUNTERS, _STARTED_AT, _NEXT_REQUEST_AT, _PHASE, _DURABLE_RUN_ID, _DURABLE_BUDGETS, _FREE_QUERY_COUNTS, _CRAWLER_COUNTS
     with _LOCK:
         _COUNTERS = Counter({
             "api.brightdata.requests": max(
@@ -174,10 +177,13 @@ def reset() -> None:
         _DURABLE_RUN_ID = ""
         _DURABLE_BUDGETS = {}
         _FREE_QUERY_COUNTS = {}
+        _CRAWLER_COUNTS = {}
     _CURRENT_ITEM_INDEX.set(-1)
     _CURRENT_SOURCE_RECORD_ID.set("")
     _CURRENT_OPERATION.set("")
     _CURRENT_SEARCH_BUCKET.set("")
+    _CURRENT_CRAWLER_BUCKET.set("")
+    _LAST_CRAWLER_REASON.set("")
     _CURRENT_PROVIDER_OUTCOMES.set(None)
 
 
@@ -218,6 +224,19 @@ def set_search_bucket(bucket: str = "") -> None:
 
 def search_bucket() -> str:
     return _CURRENT_SEARCH_BUCKET.get()
+
+
+def set_crawler_bucket(bucket: str = "") -> None:
+    value = str(bucket or "").casefold()
+    _CURRENT_CRAWLER_BUCKET.set(value if value in {"source_profile_http", "identity_http", "contact_http", "recovery_http"} else "")
+
+
+def crawler_bucket() -> str:
+    return _CURRENT_CRAWLER_BUCKET.get()
+
+
+def crawler_budget_reason() -> str:
+    return _LAST_CRAWLER_REASON.get()
 
 
 def request_fingerprint(provider: str, operation: str, request: object) -> str:
@@ -368,15 +387,59 @@ def reserve_api(provider: str, budget: int | None = None, *, operation: str = ""
         return Reservation(True, canonical, operation, item_index, phase_name, call_id=call_id)
 
 
-def reserve_crawler_http(budget: int) -> bool:
-    """Atomically reserve one crawler request; zero/negative means unlimited."""
+def reserve_crawler_http(budget: int, *, bucket: str | None = None) -> bool:
+    """Reserve one physical crawler request with durable per-item buckets."""
+    global _CRAWLER_COUNTS
+    bucket = str(bucket if bucket is not None else _CURRENT_CRAWLER_BUCKET.get()).casefold()
+    bucket_limits = {
+        "source_profile_http": int(getattr(config, "CRAWLER_SOURCE_PROFILE_HTTP_LIMIT", 2)),
+        "identity_http": int(getattr(config, "CRAWLER_IDENTITY_HTTP_LIMIT", 9)),
+        "contact_http": int(getattr(config, "CRAWLER_CONTACT_HTTP_LIMIT", 5)),
+        "recovery_http": int(getattr(config, "CRAWLER_RECOVERY_HTTP_LIMIT", 3)),
+    }
+    if bucket not in bucket_limits:
+        bucket = "identity_http"
+    per_item_limit = bucket_limits[bucket]
+    item_index = _CURRENT_ITEM_INDEX.get()
+    source_id = _CURRENT_SOURCE_RECORD_ID.get()
+    _LAST_CRAWLER_REASON.set("")
+
+    # Reserve the process-wide physical slot before entering SQLite.  The
+    # durable reservation must not run while _LOCK is held: final item saves
+    # take the SQLite writer gate and then snapshot runtime counters.
     with _LOCK:
         used_key = "http.crawler.requests"
-        if budget > 0 and _COUNTERS[used_key] >= budget:
+        if int(budget) > 0 and _COUNTERS[used_key] >= int(budget):
             _COUNTERS["http.crawler.budget_blocked"] += 1
+            _LAST_CRAWLER_REASON.set(f"crawler_http_budget_exhausted:global:{_COUNTERS[used_key]}/{int(budget)}")
             return False
+        if not (_DURABLE_RUN_ID and item_index >= 0) and item_index >= 0:
+            key = (_DURABLE_RUN_ID or "volatile", item_index, bucket)
+            if per_item_limit > 0 and _CRAWLER_COUNTS.get(key, 0) >= per_item_limit:
+                _COUNTERS["http.crawler.bucket_blocked"] += 1
+                _LAST_CRAWLER_REASON.set(f"crawler_http_budget_exhausted:{bucket}:{_CRAWLER_COUNTS.get(key, 0)}/{per_item_limit}")
+                return False
+            _CRAWLER_COUNTS[key] = _CRAWLER_COUNTS.get(key, 0) + 1
         _COUNTERS[used_key] += 1
-        return True
+
+    if _DURABLE_RUN_ID and item_index >= 0:
+        checkpoint = importlib.import_module("modules.checkpoint")
+        try:
+            accepted = checkpoint.reserve_crawler_http(
+                run_id=_DURABLE_RUN_ID, item_index=item_index, source_record_id=source_id,
+                bucket=bucket, limit=per_item_limit,
+            )
+        except BaseException:
+            with _LOCK:
+                _COUNTERS[used_key] = max(0, _COUNTERS[used_key] - 1)
+            raise
+        if not accepted:
+            with _LOCK:
+                _COUNTERS[used_key] = max(0, _COUNTERS[used_key] - 1)
+                _COUNTERS["http.crawler.bucket_blocked"] += 1
+                _LAST_CRAWLER_REASON.set(f"crawler_http_budget_exhausted:{bucket}:{per_item_limit}")
+            return False
+    return True
 
 
 def reserve_search_query(budget: int, *, bucket: str | None = None) -> bool:

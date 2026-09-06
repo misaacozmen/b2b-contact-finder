@@ -1,7 +1,6 @@
 from collections import OrderedDict
 from io import BytesIO
 import re
-import shutil
 import threading
 import warnings
 import xml.etree.ElementTree as ET
@@ -12,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
-from modules import cache_store, network_guard, replay_snapshot, runtime, run_context, site_mapper, site_recovery
+from modules import cache_store, network_guard, ocr_runtime, replay_snapshot, runtime, run_context, site_mapper, site_recovery
 from modules.extractor import extract_contact_page_links, extract_contact_records, extract_emails, extract_phones
 from modules import scorer
 from modules.utils import retry_with_backoff
@@ -31,6 +30,14 @@ _BROWSER_RENDER_SEMAPHORE = threading.BoundedSemaphore(
 
 class ResponseTooLarge(requests.RequestException):
     pass
+
+
+class CrawlerBudgetExhausted(requests.RequestException):
+    """A typed per-item or global crawler reservation failure."""
+
+    def __init__(self, reason: str):
+        self.reason = str(reason)
+        super().__init__(self.reason)
 
 
 def _http_session() -> requests.Session:
@@ -63,8 +70,8 @@ def _is_transient_fetch_error(exc: Exception) -> bool:
 
 
 @retry_with_backoff(retry_if=_is_transient_fetch_error)
-def _fetch(url: str) -> requests.Response:
-    return _request_with_safe_redirects(url, verify=True)
+def _fetch(url: str, *, bucket: str = "") -> requests.Response:
+    return _request_with_safe_redirects(url, verify=True, bucket=bucket)
 
 
 def _read_bounded_response(
@@ -94,6 +101,7 @@ def _request_with_safe_redirects(
     url: str,
     verify: bool,
     max_bytes: int | None = None,
+    bucket: str = "",
 ) -> requests.Response:
     current = url
     original_host = urlparse(url).netloc.casefold()
@@ -102,8 +110,8 @@ def _request_with_safe_redirects(
         allowed, reason = network_guard.validate_public_http_url(current)
         if not allowed:
             raise requests.exceptions.InvalidURL(f"blocked_network_target:{reason}")
-        if not runtime.reserve_crawler_http(config.CRAWLER_HTTP_REQUEST_BUDGET):
-            raise requests.exceptions.RequestException("crawler_http_budget_exhausted")
+        if not runtime.reserve_crawler_http(config.CRAWLER_HTTP_REQUEST_BUDGET, bucket=bucket or runtime.crawler_bucket()):
+            raise CrawlerBudgetExhausted(runtime.crawler_budget_reason() or "crawler_http_budget_exhausted:unknown")
         runtime.wait_for_request_slot()
         response = _http_session().get(
             current,
@@ -137,10 +145,10 @@ def _request_with_safe_redirects(
     raise requests.exceptions.TooManyRedirects(f"redirect_limit:{url}")
 
 
-def _try_fetch(url: str) -> tuple[str | None, str | None]:
+def _try_fetch(url: str, *, bucket: str = "") -> tuple[str | None, str | None]:
     _FETCH_STATE.last = {"requested_url": url, "final_url": url, "tls_insecure": False}
     try:
-        response = _fetch(url)
+        response = _fetch(url, bucket=bucket)
         _FETCH_STATE.last = {
             "requested_url": url,
             "final_url": getattr(response, "_b2b_final_url", getattr(response, "url", url)),
@@ -165,7 +173,7 @@ def _try_fetch(url: str) -> tuple[str | None, str | None]:
             from urllib3.exceptions import InsecureRequestWarning
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", InsecureRequestWarning)
-                response = _request_with_safe_redirects(url, verify=False)
+                response = _request_with_safe_redirects(url, verify=False, bucket=bucket)
             _FETCH_STATE.last = {
                 "requested_url": url,
                 "final_url": getattr(response, "_b2b_final_url", getattr(response, "url", url)),
@@ -182,8 +190,40 @@ def _try_fetch(url: str) -> tuple[str | None, str | None]:
         return None, "redirect_limit"
     except ResponseTooLarge:
         return None, "response_too_large"
+    except CrawlerBudgetExhausted as exc:
+        return None, str(exc)
     except requests.exceptions.RequestException as exc:
         return None, exc.__class__.__name__.lower()
+
+
+def _bucketed_try_fetch(url: str, bucket: str) -> tuple[str | None, str | None]:
+    """Set bucket context without changing the long-standing _try_fetch call shape."""
+    blocked_buckets = getattr(_FETCH_STATE, "budget_blocked_buckets", set())
+    if getattr(_FETCH_STATE, "global_budget_blocked", False) or bucket in blocked_buckets:
+        reason = getattr(_FETCH_STATE, "budget_block_reasons", {}).get(
+            bucket, f"crawler_http_budget_exhausted:{bucket}:cached"
+        )
+        _FETCH_STATE.last = {"requested_url": url, "final_url": url, "tls_insecure": False}
+        return None, reason
+    previous = runtime.crawler_bucket()
+    runtime.set_crawler_bucket(bucket)
+    _FETCH_STATE.last = {"requested_url": url, "final_url": url, "tls_insecure": False}
+    try:
+        result = _try_fetch(url)
+        error = result[1]
+        if str(error or "").startswith("crawler_http_budget_exhausted:"):
+            if ":global:" in str(error):
+                _FETCH_STATE.global_budget_blocked = True
+                runtime.record("crawler.global_budget_exhausted")
+            else:
+                blocked_buckets.add(bucket)
+            _FETCH_STATE.budget_blocked_buckets = blocked_buckets
+            reasons = getattr(_FETCH_STATE, "budget_block_reasons", {})
+            reasons.setdefault(bucket, str(error))
+            _FETCH_STATE.budget_block_reasons = reasons
+        return result
+    finally:
+        runtime.set_crawler_bucket(previous)
 
 
 def _decoded_response_text(response: requests.Response) -> str:
@@ -372,7 +412,7 @@ def _contactish_url(url: str) -> bool:
 
 def _robots_and_sitemaps(root: str) -> tuple[robotparser.RobotFileParser | None, list[str]]:
     robots_url = urljoin(root.rstrip("/") + "/", "robots.txt")
-    content, _ = _try_fetch(robots_url)
+    content, _ = _bucketed_try_fetch(robots_url, "source_profile_http")
     parser = None
     sitemap_urls: list[str] = []
     if content:
@@ -403,7 +443,9 @@ def _sitemap_contact_urls(root: str, sitemap_urls: list[str]) -> list[str]:
         ):
             continue
         seen_sitemaps.add(sitemap_url)
-        content, _ = _try_fetch(sitemap_url)
+        content, error = _bucketed_try_fetch(sitemap_url, "recovery_http")
+        if str(error or "").startswith("crawler_http_budget_exhausted:"):
+            break
         if not content:
             continue
         try:
@@ -466,7 +508,8 @@ def _try_ocr_pdf(content: bytes) -> tuple[str | None, str | None]:
     except ImportError:
         runtime.record("capability_unavailable.ocr")
         return None, "pdf_ocr_dependencies_unavailable"
-    if not shutil.which("tesseract"):
+    tesseract_receipt = ocr_runtime.configure_tesseract()
+    if not tesseract_receipt.get("available"):
         runtime.record("capability_unavailable.ocr")
         return None, "pdf_ocr_binary_unavailable"
     try:
@@ -494,7 +537,7 @@ def _try_extract_pdf(url: str) -> tuple[str | None, str | None]:
     runtime.record("recovery.pdf_attempts")
     try:
         response = _request_with_safe_redirects(
-            url, verify=True, max_bytes=config.MAX_PDF_RESPONSE_BYTES,
+            url, verify=True, max_bytes=config.MAX_PDF_RESPONSE_BYTES, bucket="recovery_http",
         )
         from pypdf import PdfReader
         reader = PdfReader(BytesIO(response.content))
@@ -580,6 +623,9 @@ def _fetch_site_live(
     root_retrieval_method = "http"
     recovery_trace: list[dict] = []
     browser_render_attempts = 0
+    _FETCH_STATE.budget_blocked_buckets = set()
+    _FETCH_STATE.budget_block_reasons = {}
+    _FETCH_STATE.global_budget_blocked = False
 
     def render_page(render_url: str) -> tuple[str | None, str | None]:
         nonlocal browser_render_attempts
@@ -589,7 +635,12 @@ def _fetch_site_live(
         browser_render_attempts += 1
         return _try_render(render_url)
 
-    html, error = _try_fetch(root)
+    # The exhibitor/profile page is fetched by search.py.  Once its outbound
+    # website is selected, the candidate site's root is identity evidence, not
+    # another fair-profile request.  Keeping it in the identity bucket leaves
+    # the bounded source-profile quota available for the actual catalogue page
+    # and allows the identity and full/contact stages to share one site safely.
+    html, error = _bucketed_try_fetch(root, "identity_http")
     root_meta = getattr(_FETCH_STATE, "last", {})
     tls_insecure = tls_insecure or bool(root_meta.get("tls_insecure"))
     if html and root_meta.get("tls_insecure"):
@@ -602,7 +653,7 @@ def _fetch_site_live(
         html, error = None, "security_interstitial"
     if not html and parsed.scheme == "https":
         http_root = f"http://{parsed.netloc}"
-        http_html, http_error = _try_fetch(http_root)
+        http_html, http_error = _bucketed_try_fetch(http_root, "identity_http")
         http_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(http_meta.get("tls_insecure"))
         if http_html and _looks_like_security_interstitial(http_html):
@@ -629,7 +680,7 @@ def _fetch_site_live(
         for recovery_root in recovery_roots:
             attempted_roots.add(recovery_root)
             runtime.record("recovery.host_variant_attempts")
-            recovery_html, recovery_error = _try_fetch(recovery_root)
+            recovery_html, recovery_error = _bucketed_try_fetch(recovery_root, "recovery_http")
             recovery_meta = getattr(_FETCH_STATE, "last", {})
             if recovery_html and not _looks_like_security_interstitial(
                 recovery_html
@@ -685,7 +736,7 @@ def _fetch_site_live(
                 recovery_html, recovery_error = (
                     _try_extract_pdf(recovery_url)
                     if recovery_url.casefold().endswith(".pdf")
-                    else _try_fetch(recovery_url)
+                    else _bucketed_try_fetch(recovery_url, "recovery_http")
                 )
                 if recovery_html and not _looks_like_security_interstitial(recovery_html):
                     runtime.record("recovery.static_successes")
@@ -701,6 +752,8 @@ def _fetch_site_live(
                     )
                 elif recovery_error:
                     errors.append(f"{recovery_url}:{recovery_error}")
+                    if str(recovery_error).startswith("crawler_http_budget_exhausted:"):
+                        break
         else:
             runtime.record("recovery.static_skips")
             recovery_trace.append({
@@ -785,7 +838,7 @@ def _fetch_site_live(
         for identity_url in identity_urls:
             if identity_url in pages:
                 continue
-            identity_html, identity_error = _try_fetch(identity_url)
+            identity_html, identity_error = _bucketed_try_fetch(identity_url, "identity_http")
             identity_meta = getattr(_FETCH_STATE, "last", {})
             tls_insecure = tls_insecure or bool(identity_meta.get("tls_insecure"))
             if identity_html:
@@ -865,7 +918,10 @@ def _fetch_site_live(
         contact_attempts += 1
         runtime.record("crawler.contact_url_attempts")
         contact_retrieval_method = "http"
-        contact_html, contact_error = _try_fetch(contact_url)
+        contact_html, contact_error = _bucketed_try_fetch(contact_url, "contact_http")
+        if str(contact_error or "").startswith("crawler_http_budget_exhausted:"):
+            errors.append(f"{contact_url}:{contact_error}")
+            break
         contact_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(contact_meta.get("tls_insecure"))
         if contact_html and _looks_like_security_interstitial(contact_html):
@@ -965,7 +1021,7 @@ def _fetch_site_live(
         if robots_parser is not None and not robots_parser.can_fetch(config.USER_AGENT, document_url):
             continue
         if document_url.casefold().endswith((".vcf", ".vcard")):
-            document_text, document_error = _try_fetch(document_url)
+            document_text, document_error = _bucketed_try_fetch(document_url, "recovery_http")
         else:
             document_text, document_error = _try_extract_pdf(document_url)
         if document_text:
@@ -975,6 +1031,8 @@ def _fetch_site_live(
             }))
         elif document_error:
             errors.append(f"{document_url}:{document_error}")
+            if str(document_error).startswith("crawler_http_budget_exhausted:"):
+                break
 
     redirect_target = ""
     for error_value in [error, *errors]:

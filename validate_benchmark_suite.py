@@ -8,8 +8,12 @@ import json
 import re
 import statistics
 from pathlib import Path
+from urllib.parse import urlparse
+
+import phonenumbers
 
 from modules import excel, scorer
+from modules import phone as phone_normalizer
 from validate_golden_xlsx import FIELDS, _sheet_rows, assertion_coverage, evaluate, readiness_issues
 
 
@@ -24,8 +28,16 @@ SOURCE_REVIEW_FIELDS = (
     "contact_evidence_urls", "observed_at", "evidence_content_sha256",
     "reviewer_pass_1", "reviewer_pass_2", "disagreement_reason", "label_status",
 )
+SOURCE_REVIEW_V3_FIELDS = SOURCE_REVIEW_FIELDS + (
+    "source_listed_website", "source_listed_website_status",
+    "expected_website_domains_json", "expected_emails_json", "expected_phones_e164_json",
+    "expected_publication_reason_codes_json",
+    "website_field_evidence_json", "email_field_evidence_json", "phone_field_evidence_json",
+    "reviewer_provenance_json",
+)
 _STATES = {"present", "absent", "unknown"}
 _PUBLICATION_STATES = {"publishable", "abstain", "unknown"}
+_SOURCE_LISTED_STATES = {"present", "absent", "rejected"}
 REQUIRED_ACCEPTANCE = {
     "max_false_publication": 0,
     "max_published_unknown_identity": 0,
@@ -40,6 +52,13 @@ _INVALID_REASON_CODES = {
     "review_passes_not_independent",
     "actual_not_finalized",
     "package_integrity_not_verified",
+    "review_passes_same_decision_implementation",
+    "review_passes_same_tool_hash",
+    "website_label_web_and_colon_not_parsed",
+    "schemeless_official_homepage_rejected",
+    "source_listed_field_conflated_with_verified_ground_truth",
+    "single_contact_value_rejected_valid_alternative",
+    "crawler_budget_starved_later_records",
 }
 
 
@@ -49,12 +68,14 @@ def _validate_invalid_registry(registry_path: Path = INVALID_PACKAGE_REGISTRY) -
         payload = json.loads(registry_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise ValueError(f"invalid benchmark registry cannot be read: {exc}") from exc
-    if type(payload) is not dict or payload.get("schema_version") != 1:
+    if type(payload) is not dict or payload.get("schema_version") not in {1, 2}:
         raise ValueError("invalid benchmark registry schema_version")
     packages = payload.get("packages")
     if type(packages) is not list:
         raise ValueError("invalid benchmark registry packages")
     seen: set[str] = set()
+    seen_artifacts: set[str] = set()
+    seen_artifact_hashes: set[str] = set()
     validated: list[dict] = []
     for entry in packages:
         if type(entry) is not dict:
@@ -76,11 +97,61 @@ def _validate_invalid_registry(registry_path: Path = INVALID_PACKAGE_REGISTRY) -
             raise ValueError(f"unknown invalidation reason for {package_id}")
         seen.add(package_id)
         validated.append(entry)
+    if payload.get("schema_version") == 2:
+        artifacts = payload.get("artifacts")
+        if type(artifacts) is not list:
+            raise ValueError("invalid benchmark registry artifacts")
+        for artifact in artifacts:
+            if type(artifact) is not dict:
+                raise ValueError("invalid benchmark registry artifact entry")
+            artifact_id = str(artifact.get("artifact_id") or "")
+            hashes = artifact.get("artifact_sha256")
+            reasons = artifact.get("invalid_reason_codes")
+            if not artifact_id or artifact_id in seen_artifacts:
+                raise ValueError(f"duplicate invalid benchmark artifact: {artifact_id}")
+            if type(hashes) is not dict or not hashes:
+                raise ValueError(f"malformed invalid benchmark artifact: {artifact_id}")
+            if any(
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                or not _SHA256_RE.fullmatch(value)
+                for key, value in hashes.items()
+            ):
+                raise ValueError(f"malformed artifact SHA-256 for {artifact_id}")
+            duplicate_hashes = set(hashes.values()) & seen_artifact_hashes
+            if duplicate_hashes:
+                raise ValueError(f"duplicate invalid benchmark artifact hash: {artifact_id}")
+            if type(reasons) is not list or not reasons or any(
+                value not in _INVALID_REASON_CODES for value in reasons
+            ):
+                raise ValueError(f"unknown artifact invalidation reason: {artifact_id}")
+            seen_artifacts.add(artifact_id)
+            seen_artifact_hashes.update(hashes.values())
+            validated.append({"artifact_id": artifact_id, **artifact})
     return validated
 
 
-def _invalid_package_issues(manifest_path: Path, manifest_payload: dict) -> list[str]:
-    entries = _validate_invalid_registry()
+def _sha256_strings(value: object) -> set[str]:
+    """Collect declared hashes from a manifest without trusting field names."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for nested in value.values():
+            found.update(_sha256_strings(nested))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            found.update(_sha256_strings(nested))
+    elif isinstance(value, str) and _SHA256_RE.fullmatch(value):
+        found.add(value)
+    return found
+
+
+def _invalid_package_issues(
+    manifest_path: Path,
+    manifest_payload: dict,
+    registry_path: Path | None = None,
+) -> list[str]:
+    entries = _validate_invalid_registry(registry_path or INVALID_PACKAGE_REGISTRY)
     path_name = manifest_path.resolve().parent.name
     package_id = str(manifest_payload.get("package_id_sha256") or manifest_payload.get("manifest_sha256") or "")
     expected_hashes = {
@@ -88,13 +159,21 @@ def _invalid_package_issues(manifest_path: Path, manifest_payload: dict) -> list
         for item in manifest_payload.get("sets", [])
         if isinstance(item, dict)
     }
+    manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest() if manifest_path.is_file() else ""
+    declared_hashes = _sha256_strings(manifest_payload)
+    if manifest_hash:
+        declared_hashes.add(manifest_hash)
     issues: list[str] = []
     for entry in entries:
-        entry_id = str(entry["package_id"])
-        entry_hash = str(entry["package_id_sha256"])
-        matched = path_name == entry_id or package_id in {entry_id, entry_hash} or bool(
-            expected_hashes & set(entry["expected_sha256"])
-        )
+        if "artifact_id" in entry:
+            entry_id = str(entry["artifact_id"])
+            matched = bool(declared_hashes & set((entry.get("artifact_sha256") or {}).values()))
+        else:
+            entry_id = str(entry["package_id"])
+            entry_hash = str(entry["package_id_sha256"])
+            matched = path_name == entry_id or package_id in {entry_id, entry_hash} or bool(
+                expected_hashes & set(entry["expected_sha256"])
+            ) or bool(declared_hashes & {str(value) for value in entry["expected_sha256"]})
         if matched:
             issues.append(f"invalid benchmark package registry match: {entry_id}")
     return issues
@@ -136,6 +215,100 @@ def _source_rows(path: Path) -> list[dict]:
     return rows
 
 
+def _json_array_cell(row: dict, field: str, *, sort_key=None) -> list[str]:
+    raw = row.get(field, "")
+    if isinstance(raw, list):
+        values = raw
+    else:
+        try:
+            values = json.loads(str(raw or ""))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{field} must be a JSON array") from exc
+    if type(values) is not list or any(type(value) is not str or not value for value in values):
+        raise ValueError(f"{field} must be a non-null string array")
+    if len(values) != len(set(values)):
+        raise ValueError(f"{field} contains duplicate values")
+    key = sort_key or (lambda value: value.casefold())
+    if values != sorted(values, key=key):
+        raise ValueError(f"{field} is not canonically ordered")
+    if isinstance(raw, str) and json.dumps(values, ensure_ascii=False, separators=(",", ":")) != raw:
+        raise ValueError(f"{field} is not canonical JSON")
+    return values
+
+
+def _evidence_array_cell(row: dict, field: str) -> list[dict]:
+    raw = row.get(field, "")
+    try:
+        values = raw if isinstance(raw, list) else json.loads(str(raw or ""))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{field} must be a JSON array") from exc
+    if type(values) is not list or any(type(value) is not dict for value in values):
+        raise ValueError(f"{field} must be an array of objects")
+    return values
+
+
+def _validate_v3_ground_truth(rows: list[dict], label: str) -> None:
+    required = {value.casefold() for value in SOURCE_REVIEW_V3_FIELDS}
+    headers = {str(key).strip().casefold() for key in rows[0]} if rows else set()
+    missing = required - headers
+    if missing:
+        raise ValueError(f"{label}: v3 workbook missing fields: {sorted(missing)}")
+    for row in rows:
+        source_id = _source_id_key(row)
+        if not source_id:
+            raise ValueError(f"{label}: missing source_record_id")
+        for field in ("website_field_evidence_json", "email_field_evidence_json", "phone_field_evidence_json", "reviewer_provenance_json"):
+            if not _evidence_array_cell(row, field):
+                raise ValueError(f"{label}: {field} is empty: {source_id}")
+        listed_status = str(row.get("source_listed_website_status", "") or "").strip().casefold()
+        if listed_status not in _SOURCE_LISTED_STATES:
+            raise ValueError(f"{label}: invalid source_listed_website_status: {source_id}")
+        domains = _json_array_cell(row, "expected_website_domains_json")
+        for domain in domains:
+            if scorer.registrable_domain(domain) != domain.casefold() or "://" in domain or "/" in domain:
+                raise ValueError(f"{label}: expected website domain is not canonical: {source_id}")
+        emails = _json_array_cell(row, "expected_emails_json")
+        if len({value.casefold() for value in emails}) != len(emails):
+            raise ValueError(f"{label}: expected email set contains duplicate values: {source_id}")
+        if any(value != value.casefold() or not re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", value) for value in emails):
+            raise ValueError(f"{label}: expected email set is not canonical: {source_id}")
+        phones = _json_array_cell(row, "expected_phones_e164_json", sort_key=lambda value: value)
+        for value in phones:
+            if not re.fullmatch(r"\+[1-9][0-9]{6,14}", value) or phone_normalizer.normalize_phone(value, default_country="TR") == "":
+                raise ValueError(f"{label}: invalid E.164 phone: {source_id}")
+        reasons = _json_array_cell(row, "expected_publication_reason_codes_json")
+        compatibility_values = (
+            ("expected_website", domains, lambda value: scorer.registrable_domain(value)),
+            ("expected_email", emails, lambda value: value.casefold()),
+            ("expected_phone", phones, lambda value: value.strip()),
+        )
+        for field, values, canonicalize in compatibility_values:
+            compatibility = str(row.get(field, "") or "").strip()
+            if compatibility and (not values or canonicalize(compatibility) != values[0]):
+                raise ValueError(f"{label}: compatibility field does not project first canonical value: {field}:{source_id}")
+        website_state = _state(row, "website_verified")
+        email_state = _state(row, "email_verified")
+        phone_state = _state(row, "phone_verified")
+        publication = _expected_publication(row)
+        if not website_state or not email_state or not phone_state or not publication:
+            raise ValueError(f"{label}: invalid field/publication state: {source_id}")
+        for state, values, field in (
+            (website_state, domains, "expected_website_domains_json"),
+            (email_state, emails, "expected_emails_json"),
+            (phone_state, phones, "expected_phones_e164_json"),
+        ):
+            if state == "present" and not values:
+                raise ValueError(f"{label}: present field has empty values: {field}:{source_id}")
+            if state == "absent" and values:
+                raise ValueError(f"{label}: absent field has populated values: {field}:{source_id}")
+        if publication == "publishable" and not domains:
+            raise ValueError(f"{label}: publishable row has no expected domain: {source_id}")
+        if publication == "publishable" and not (emails or phones):
+            raise ValueError(f"{label}: publishable row has no verified contact: {source_id}")
+        if publication == "abstain" and not reasons:
+            raise ValueError(f"{label}: abstain row has no reason code: {source_id}")
+
+
 def _source_id_key(row: dict) -> str:
     return str(row.get("source_record_id") or row.get("Source_Record_ID") or "").strip()
 
@@ -171,11 +344,76 @@ def _host(value: object) -> str:
 
 
 def _emails(value: object) -> set[str]:
-    return set(re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", str(value or "").casefold()))
+    if isinstance(value, (list, tuple, set)):
+        values = [str(item) for item in value]
+    else:
+        raw = str(value or "")
+        try:
+            parsed = json.loads(raw)
+            values = [str(item) for item in parsed] if isinstance(parsed, list) else [raw]
+        except json.JSONDecodeError:
+            values = re.split(r"[;\n,]+", raw)
+    return set(re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", " ".join(values).casefold()))
 
 
 def _digits(value: object) -> str:
     return re.sub(r"\D", "", str(value or ""))
+
+
+def _phones(value: object) -> set[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = [str(item) for item in value]
+    else:
+        raw = str(value or "")
+        try:
+            parsed = json.loads(raw)
+            values = [str(item) for item in parsed] if isinstance(parsed, list) else [raw]
+        except json.JSONDecodeError:
+            values = re.split(r"[;\n,]+", raw)
+    result: set[str] = set()
+    for value in values:
+        candidate = value.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = phonenumbers.parse(candidate, "TR")
+        except phonenumbers.NumberParseException:
+            continue
+        if phonenumbers.is_possible_number(parsed) and phonenumbers.is_valid_number(parsed):
+            result.add(phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164))
+    return result
+
+
+def _array_values(row: dict, field: str) -> list[str]:
+    value = row.get(field, "")
+    try:
+        parsed = json.loads(str(value or ""))
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+
+def _expected_domains(row: dict) -> set[str]:
+    values = _array_values(row, "expected_website_domains_json")
+    if values:
+        return {scorer.registrable_domain(value) for value in values if scorer.registrable_domain(value)}
+    fallback = _host(row.get("expected_website"))
+    return {scorer.registrable_domain(fallback)} if fallback else set()
+
+
+def _expected_emails(row: dict) -> set[str]:
+    values = _array_values(row, "expected_emails_json")
+    return {value.casefold() for value in values} if values else _emails(row.get("expected_email"))
+
+
+def _expected_phones(row: dict) -> set[str]:
+    values = _array_values(row, "expected_phones_e164_json")
+    return _phones(values) if values else _phones(row.get("expected_phone"))
+
+
+def _actual_values(row: dict, primary: str, alternatives: str) -> object:
+    values = [row.get(primary, ""), row.get(alternatives, "")]
+    return values
 
 
 def _published(row: dict) -> bool:
@@ -362,20 +600,29 @@ def evaluate_source_review(expected_path: Path, actual_path: Path, actual_manife
         raise ValueError(f"source ID coverage mismatch: missing={len(missing)} unexpected={len(unexpected)}")
     metrics = {
         "identity_correct": 0, "false_publication": 0, "published_unknown_identity": 0,
-        "publication_precision": 0.0, "publication_coverage": 0.0,
-        "expected_publishable_count": 0,
-        "total_expected_records": len(expected),
-        "unknown_record_count": 0,
+        "publication_precision": 0.0, "publication_recall": 0.0,
+        "publication_coverage": 0.0, "safe_yield": 0.0,
+        "expected_publishable_count": 0, "total_expected_records": len(expected),
+        "unknown_record_count": 0, "unknown_label_count": 0,
+        "website_tp": 0, "website_fp": 0, "website_fn": 0,
         "email_tp": 0, "email_fp": 0, "email_fn": 0,
         "phone_tp": 0, "phone_fp": 0, "phone_fn": 0,
-        "verified_complete_contacts": 0, "abstain_count": 0, "unknown_label_count": 0,
+        "website_precision": 0.0, "website_recall": 0.0,
+        "email_precision": 0.0, "email_recall": 0.0,
+        "phone_precision": 0.0, "phone_recall": 0.0,
+        "verified_complete_contacts": 0, "verified_complete_contact_recall": 0.0,
+        "expected_complete_contact_count": 0,
+        "abstain_count": 0, "published_count": 0, "correct_published": 0,
         "provider_calls": 0, "physical_http_requests": 0,
-        "p50_seconds": None, "p95_seconds": None, "cost": None,
+        "run_elapsed_seconds": None, "records_per_minute": None,
+        "p50_item_seconds": None, "p95_item_seconds": None,
+        "p50_seconds": None, "p95_seconds": None, "item_latency_count": 0,
+        "cost": None,
         "denominators": {
-            "publication_coverage": len(expected),
-            "publication_precision": 0,
-            "known_identity": 0,
-            "website": len(expected), "email": len(expected), "phone": len(expected),
+            "publication_coverage": len(expected), "safe_yield": len(expected),
+            "publication_precision": 0, "publication_recall": 0,
+            "known_identity": 0, "website": 0, "email": 0, "phone": 0,
+            "verified_complete_contact_recall": 0,
         },
     }
     published = 0
@@ -396,9 +643,20 @@ def evaluate_source_review(expected_path: Path, actual_path: Path, actual_manife
         if expected_publication == "unknown" or any(state == "unknown" for state in identity_states):
             metrics["unknown_record_count"] += 1
         is_pub = _published(row)
-        actual_host = _host(row.get("website"))
-        expected_host = _host(expected_row.get("expected_website"))
-        if website_state == "present" and actual_host == expected_host and actual_host:
+        actual_domains = {scorer.registrable_domain(_host(row.get("website")))} - {""}
+        expected_domains = _expected_domains(expected_row)
+        website_hit = bool(actual_domains & expected_domains)
+        if website_state == "present":
+            metrics["denominators"]["website"] += 1
+            if website_hit:
+                metrics["website_tp"] += 1
+            else:
+                metrics["website_fn"] += 1
+                if actual_domains:
+                    metrics["website_fp"] += 1
+        elif website_state == "absent" and actual_domains:
+            metrics["website_fp"] += 1
+        if website_state == "present" and website_hit:
             metrics["identity_correct"] += 1
         if is_pub:
             published += 1
@@ -406,15 +664,16 @@ def evaluate_source_review(expected_path: Path, actual_path: Path, actual_manife
                 metrics["false_publication"] += 1
             elif expected_publication == "unknown" or website_state == "unknown":
                 metrics["published_unknown_identity"] += 1
-            elif website_state == "present" and actual_host == expected_host and actual_host:
+            elif website_state == "present" and website_hit:
                 correct_published += 1
             else:
                 metrics["false_publication"] += 1
         else:
             metrics["abstain_count"] += 1
-        expected_email = _emails(expected_row.get("expected_email"))
-        actual_email = _emails(row.get("email"))
+        expected_email = _expected_emails(expected_row)
+        actual_email = _emails(_actual_values(row, "email", "alternative_emails"))
         if email_state == "present":
+            metrics["denominators"]["email"] += 1
             if expected_email & actual_email:
                 metrics["email_tp"] += 1
             else:
@@ -423,10 +682,11 @@ def evaluate_source_review(expected_path: Path, actual_path: Path, actual_manife
                     metrics["email_fp"] += 1
         elif email_state == "absent" and actual_email:
             metrics["email_fp"] += 1
-        expected_phone = _digits(expected_row.get("expected_phone"))
-        actual_phone = _digits(row.get("phone"))
+        expected_phone = _expected_phones(expected_row)
+        actual_phone = _phones(_actual_values(row, "phone", "alternative_phones"))
         if phone_state == "present":
-            if expected_phone and actual_phone and expected_phone == actual_phone:
+            metrics["denominators"]["phone"] += 1
+            if expected_phone & actual_phone:
                 metrics["phone_tp"] += 1
             else:
                 metrics["phone_fn"] += 1
@@ -434,22 +694,44 @@ def evaluate_source_review(expected_path: Path, actual_path: Path, actual_manife
                     metrics["phone_fp"] += 1
         elif phone_state == "absent" and actual_phone:
             metrics["phone_fp"] += 1
-        if email_state == "present" and phone_state == "present" and expected_email & actual_email and expected_phone and expected_phone == actual_phone:
+        if email_state == "present" and phone_state == "present":
+            metrics["expected_complete_contact_count"] += 1
+        if email_state == "present" and phone_state == "present" and expected_email & actual_email and expected_phone & actual_phone:
             metrics["verified_complete_contacts"] += 1
         for key in ("elapsed_seconds", "duration_seconds"):
             if row.get(key) not in (None, ""):
                 try:
-                    durations.append(float(row[key]))
+                    value = float(row[key])
+                    if value >= 0:
+                        durations.append(value)
                 except (TypeError, ValueError):
                     pass
     metrics["denominators"]["publication_precision"] = published
+    metrics["denominators"]["publication_recall"] = metrics["expected_publishable_count"]
     metrics["denominators"]["known_identity"] = sum(
         1 for row in expected.values() if _expected_publication(row) != "unknown"
     )
+    metrics["denominators"]["verified_complete_contact_recall"] = metrics["expected_complete_contact_count"]
     metrics["publication_precision"] = round(correct_published / published, 4) if published else 0.0
-    metrics["publication_coverage"] = round(
+    metrics["publication_recall"] = round(
+        correct_published / metrics["expected_publishable_count"], 4
+    ) if metrics["expected_publishable_count"] else 0.0
+    metrics["safe_yield"] = round(
         correct_published / metrics["total_expected_records"], 4
     ) if metrics["total_expected_records"] else 0.0
+    metrics["publication_coverage"] = metrics["safe_yield"]
+    metrics["published_count"] = published
+    metrics["correct_published"] = correct_published
+    for field in ("website", "email", "phone"):
+        tp = metrics[f"{field}_tp"]
+        fp = metrics[f"{field}_fp"]
+        denominator = metrics["denominators"][field]
+        metrics[f"{field}_precision"] = round(tp / (tp + fp), 4) if tp + fp else 0.0
+        metrics[f"{field}_recall"] = round(tp / denominator, 4) if denominator else 0.0
+    complete_denominator = metrics["expected_complete_contact_count"]
+    metrics["verified_complete_contact_recall"] = round(
+        metrics["verified_complete_contacts"] / complete_denominator, 4
+    ) if complete_denominator else 0.0
     if actual_manifest and Path(actual_manifest).exists():
         payload = json.loads(Path(actual_manifest).read_text(encoding="utf-8"))
         for field, aliases in {
@@ -468,10 +750,15 @@ def evaluate_source_review(expected_path: Path, actual_path: Path, actual_manife
         if duration is not None and (type(duration) not in {int, float} or duration < 0):
             raise ValueError("actual manifest duration is not a non-negative number")
         if duration is not None:
-            durations.append(float(duration))
+            metrics["run_elapsed_seconds"] = float(duration)
+            if metrics["total_expected_records"]:
+                metrics["records_per_minute"] = round(metrics["total_expected_records"] / (float(duration) / 60), 4) if duration else None
     if durations:
-        metrics["p50_seconds"] = statistics.median(durations)
-        metrics["p95_seconds"] = statistics.quantiles(durations, n=20, method="inclusive")[18] if len(durations) > 1 else durations[0]
+        metrics["item_latency_count"] = len(durations)
+        metrics["p50_item_seconds"] = statistics.median(durations)
+        metrics["p95_item_seconds"] = statistics.quantiles(durations, n=20, method="inclusive")[18] if len(durations) > 1 else durations[0]
+        metrics["p50_seconds"] = metrics["p50_item_seconds"]
+        metrics["p95_seconds"] = metrics["p95_item_seconds"]
     return metrics
 
 
@@ -536,6 +823,8 @@ def validate_manifest(
                 if acceptance != REQUIRED_ACCEPTANCE:
                     issues.append(f"{role}: v2 acceptance contract is missing or invalid")
                 source_rows = _source_rows(expected)
+                if manifest_schema_version >= 3:
+                    _validate_v3_ground_truth(source_rows, role)
                 _validated_id_map(source_rows, f"{role} expected")
                 if any(str(row.get("label_status", "")).casefold() not in {"frozen", "unknown"} for row in source_rows):
                     issues.append(f"{role}: label_status must be frozen or unknown")
@@ -703,8 +992,8 @@ def main() -> None:
                     quality_failures.append(f"{role}: confirmed false publication={metrics['false_publication']}")
                 if metrics["published_unknown_identity"]:
                     quality_failures.append(f"{role}: published unknown identity={metrics['published_unknown_identity']}")
-                if metrics["total_expected_records"] <= 0 or metrics["denominators"]["known_identity"] <= 0:
-                    quality_failures.append(f"{role}: zero expected or known-identity denominator")
+                if metrics["total_expected_records"] <= 0 or metrics["denominators"]["known_identity"] <= 0 or metrics["expected_publishable_count"] <= 0:
+                    quality_failures.append(f"{role}: zero expected, publishable, or known-identity denominator")
                 if metrics["denominators"]["publication_precision"] <= 0:
                     quality_failures.append(f"{role}: zero published denominator")
                 if item.get("acceptance", manifest_payload.get("acceptance")) != REQUIRED_ACCEPTANCE:
@@ -713,10 +1002,17 @@ def main() -> None:
                     quality_failures.append(f"{role}: actual manifest has unknown telemetry/cost")
                 thresholds = dict(quality_thresholds)
                 thresholds.update(item.get("quality_thresholds", {}) or {})
+                thresholds.setdefault("min_publication_precision", 1.0)
+                thresholds.setdefault("min_publication_recall", 0.75)
+                thresholds.setdefault("min_verified_complete_contact_recall", 0.70)
                 if "min_publication_precision" in thresholds and metrics["publication_precision"] < float(thresholds["min_publication_precision"]):
                     quality_failures.append(f"{role}: publication precision below threshold")
-                if "min_publication_coverage" in thresholds and metrics["publication_coverage"] < float(thresholds["min_publication_coverage"]):
-                    quality_failures.append(f"{role}: publication coverage below threshold")
+                if "min_publication_recall" in thresholds and metrics["publication_recall"] < float(thresholds["min_publication_recall"]):
+                    quality_failures.append(f"{role}: publication recall below threshold")
+                if "min_verified_complete_contact_recall" in thresholds and metrics["verified_complete_contact_recall"] < float(thresholds["min_verified_complete_contact_recall"]):
+                    quality_failures.append(f"{role}: verified complete contact recall below threshold")
+                if "min_publication_coverage" in thresholds and metrics["safe_yield"] < float(thresholds["min_publication_coverage"]):
+                    quality_failures.append(f"{role}: safe yield below threshold")
             else:
                 metrics, complete = evaluate(expected, actual)
                 evaluated_roles.add(role)

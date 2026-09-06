@@ -38,6 +38,34 @@ CONFLICT_TOKENS = {
     "country_mismatch",
     "foreign_country",
 }
+GENERIC_ORGANIZATION_SUFFIXES = {
+    "company", "companies", "corp", "corporation", "global", "group",
+    "holding", "holdings", "inc", "international", "intl", "limited",
+    "ltd", "llc",
+}
+
+
+def _generic_suffix_identity_unverified(company: str, structured_identity: dict) -> bool:
+    """Reject a bare brand plus generic organization suffix without legal proof."""
+    if len(scorer.legal_identity_tokens(company)) != 1 or not isinstance(structured_identity, dict):
+        return False
+    if any(
+        structured_identity.get(key)
+        for key in ("legal_names", "addresses", "identifiers", "ownership_statements")
+    ):
+        return False
+    company_token = scorer.legal_identity_tokens(company)[0]
+    values = [
+        value
+        for key in ("names", "brand_names")
+        for value in (structured_identity.get(key) or [])
+    ]
+    return any(
+        len(tokens := scorer.legal_identity_tokens(str(value))) == 2
+        and tokens[0] == company_token
+        and tokens[1] in GENERIC_ORGANIZATION_SUFFIXES
+        for value in values
+    )
 
 
 def _legacy_is_publishable_row(row: dict) -> bool:
@@ -86,6 +114,11 @@ def _legacy_is_publishable_row(row: dict) -> bool:
     assessment = row.get("identity_assessment") or evaluation.get("identity_assessment") or {}
     if not bool(assessment.get("publishable")) or assessment.get("conflicts"):
         return False
+    if _generic_suffix_identity_unverified(
+        str(row.get("company", "") or ""),
+        row.get("structured_identity") or evaluation.get("structured_identity") or {},
+    ):
+        return False
     reasons = " ".join(str(value) for value in (
         row.get("reason", ""), row.get("publication_blockers", ""),
         evaluation.get("reasons", []) if isinstance(evaluation, dict) else "",
@@ -98,7 +131,13 @@ def _legacy_is_publishable_row(row: dict) -> bool:
     conflict_tokens = (reason_tokens | blocker_tokens | evaluation_tokens) - {CONTEXT_CONFLICT_OVERRIDE}
     if any(marker in token for token in conflict_tokens for marker in CONFLICT_TOKENS):
         return False
-    if "cross_domain_email_accepted_from_verified_official_page" in reasons and not evaluation.get("structured_domain_relation"):
+    if (
+        "cross_domain_email_accepted_from_verified_official_page" in reasons
+        and not (
+            evaluation.get("structured_domain_relation")
+            or evaluation.get("source_profile_domain_relation")
+        )
+    ):
         return False
     if len(scorer.legal_identity_tokens(str(row.get("company", "")))) <= 1:
         if not (
@@ -106,7 +145,16 @@ def _legacy_is_publishable_row(row: dict) -> bool:
             and scorer.domain_identity_match(str(row.get("company", "")), str(row.get("website", "")))[0]
             and _has_reason(str(row.get("reason", "")).split(";"), LEGAL_NAME_REASON_PREFIXES)
             and "country_identity_tr_" in reasons
-            and "context_match:" in reasons
+            and (
+                "context_match:" in reasons
+                or (
+                    "page_identity_strong:" in reasons
+                    and (
+                        not evaluation.get("candidate")
+                        or _profile_route_has_first_party_identity(evaluation)
+                    )
+                )
+            )
         ):
             return False
     valid_email = bool(row.get("email")) and str(row.get("email_publication_status", "")).casefold() == "allowed"
@@ -161,7 +209,10 @@ def _context_resolution_is_verified(context: dict) -> bool:
 def _website_identity_verified(row: dict, evaluation: dict) -> bool:
     assessment = row.get("identity_assessment") or evaluation.get("identity_assessment") or {}
     candidate = evaluation.get("candidate") or {}
-    if assessment.get("conflicts") or assessment.get("publishable") is False:
+    profile_route = _profile_route_has_first_party_identity(evaluation)
+    if assessment.get("conflicts") or (
+        assessment.get("publishable") is False and not profile_route
+    ):
         return False
     website = str(row.get("website") or candidate.get("url") or "").strip()
     if not website:
@@ -174,7 +225,36 @@ def _website_identity_verified(row: dict, evaluation: dict) -> bool:
         "legal_name_", "country_identity_tr_", "context_match:",
     )) for token in reasons)
     resolution = str(row.get("identity_resolution") or evaluation.get("identity_resolution") or evaluation.get("_identity_resolution") or "")
-    return bool(assessment.get("publishable") is True and (identity_evidence or resolution or candidate))
+    return bool(
+        (assessment.get("publishable") is True or profile_route)
+        and (identity_evidence or resolution or candidate)
+    )
+
+
+def _profile_route_has_first_party_identity(evaluation: dict) -> bool:
+    """Recognize the bounded explicit-profile route after candidate gates pass."""
+    resolution = str(
+        evaluation.get("_identity_resolution", "")
+        or evaluation.get("identity_resolution", "")
+        or ""
+    )
+    if not (
+        resolution.startswith("profile_route_resolved_by_")
+        or resolution.startswith("candidate_resolved_by_")
+    ):
+        return False
+    try:
+        from modules import entity_resolution
+
+        company = str(
+            (evaluation.get("candidate") or {}).get("_identity_company", "")
+        )
+        fingerprint = entity_resolution.fingerprint(
+            entity_resolution.build_target_profile(company), evaluation,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return bool(fingerprint.safe_source_profile_contact_route)
 
 
 def decide_row(row: dict, evaluation: dict | None = None) -> dict:
@@ -223,7 +303,13 @@ def decide_row(row: dict, evaluation: dict | None = None) -> dict:
             blockers.append("context_conflict")
         if override_present and not _context_resolution_is_verified(context):
             blockers.append("context_resolution_unverified")
-        if "cross_domain_email_accepted_from_verified_official_page" in reasons and not evaluation.get("structured_domain_relation"):
+        if (
+            "cross_domain_email_accepted_from_verified_official_page" in reasons
+            and not (
+                evaluation.get("structured_domain_relation")
+                or evaluation.get("source_profile_domain_relation")
+            )
+        ):
             blockers.append("cross_domain_email_unresolved")
         if not allowed_contact_fields:
             blockers.append("no_allowed_contact_field")
@@ -604,12 +690,23 @@ def evaluate(
     role = str(candidate.get("role", ""))
     if role in EXCLUDED_ROLES:
         blockers.append(f"excluded_candidate_role:{role}")
+    # A guessed domain is a discovery lead only.  It is not an authoritative
+    # source route and must never become a publication decision merely because
+    # the guessed site happens to contain matching text or contacts.
+    if str(candidate.get("query", "")).casefold() == "domain_guess":
+        blockers.append("domain_guess_not_authoritative")
+    if _generic_suffix_identity_unverified(
+        company,
+        evaluation.get("structured_identity") or {},
+    ):
+        blockers.append("generic_suffix_identity_unverified")
     exact_domain_resolution = str(
         evaluation.get("_identity_resolution", "") or ""
     ).endswith("_exact_full_name_domain")
     fingerprint_resolution = str(
         evaluation.get("_identity_resolution", "") or ""
     ).startswith("candidate_resolved_by_")
+    profile_route = _profile_route_has_first_party_identity(evaluation)
     legal_or_ownership_evidence = _has_reason(reasons, ("legal_name_phrase_match:", "legal_name_full_match:", "legal_name_ownership_match:")) or bool(evaluation.get("structured_domain_relation"))
     if len(scorer.legal_identity_tokens(company)) <= 1 and not (
         scorer.normalize_domain(candidate.get("url", ""))
@@ -619,7 +716,7 @@ def evaluate(
         and _has_reason(reasons, ("context_match:", "page_identity_strong:"))
     ):
         blockers.append("generic_single_token_identity_not_verified")
-    if not assessment.get("publishable"):
+    if not assessment.get("publishable") and not profile_route:
         # A fingerprint/fast-path resolution is useful evidence, but never a
         # publication authorization by itself.
         blockers.append("identity_resolution_not_publishable" if fingerprint_resolution else "identity_not_publishable")
@@ -658,6 +755,8 @@ def evaluate(
     if assessment.get("strong_first_party_bundle"):
         score += 18
     if assessment.get("publishable"):
+        score += 10
+    if profile_route:
         score += 10
     if _has_reason(reasons, ("country_identity_tr_",)):
         score += 7

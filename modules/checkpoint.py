@@ -60,12 +60,46 @@ def _run_id(input_hash: str, run_signature: str) -> str:
 
 
 _SCHEMA_CONNECTIONS: dict[int, list[sqlite3.Connection]] = {}
+_SCHEMA_INIT_LOCK = threading.RLock()
+_SCHEMA_READY_INODES: set[tuple[str, int]] = set()
+_WRITER_LOCK = threading.RLock()
 
 
-def _connect_impl() -> sqlite3.Connection:
+class _TrackedConnection(sqlite3.Connection):
+    """Release the process-local writer gate with every transaction boundary."""
+
+    _writer_lock_held = False
+
+    def commit(self) -> None:
+        try:
+            super().commit()
+        finally:
+            if self._writer_lock_held:
+                self._writer_lock_held = False
+                _WRITER_LOCK.release()
+
+    def rollback(self) -> None:
+        try:
+            super().rollback()
+        finally:
+            if self._writer_lock_held:
+                self._writer_lock_held = False
+                _WRITER_LOCK.release()
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._writer_lock_held:
+                self._writer_lock_held = False
+                _WRITER_LOCK.release()
+
+
+def _initialize_connection_schema() -> sqlite3.Connection:
     config.PROGRESS_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(config.PROGRESS_DB_FILE, timeout=30)
+    connection = sqlite3.connect(config.PROGRESS_DB_FILE, timeout=30, factory=_TrackedConnection)
     _SCHEMA_CONNECTIONS.setdefault(threading.get_ident(), []).append(connection)
+    connection.execute("PRAGMA busy_timeout=60000")
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=FULL")
     connection.execute(
@@ -144,6 +178,9 @@ def _connect_impl() -> sqlite3.Connection:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS free_query_usage (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, item_index INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, quota INTEGER NOT NULL, PRIMARY KEY(run_id,source_record_id), UNIQUE(run_id,item_index))"
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS crawler_http_usage (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, item_index INTEGER NOT NULL, bucket TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, quota INTEGER NOT NULL, PRIMARY KEY(run_id,source_record_id,item_index,bucket), UNIQUE(run_id,item_index,bucket))"
+    )
     query_columns = {row[1] for row in connection.execute("PRAGMA table_info(free_query_usage)")}
     if "source_record_id" not in query_columns:
         old_columns = query_columns
@@ -188,6 +225,60 @@ def _connect_impl() -> sqlite3.Connection:
     return connection
 
 
+def _connect_impl() -> sqlite3.Connection:
+    """Open a connection without rerunning schema DDL on every operation."""
+    config.PROGRESS_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    path = str(config.PROGRESS_DB_FILE.resolve())
+    with _SCHEMA_INIT_LOCK:
+        try:
+            inode = int(os.stat(path).st_ino)
+        except FileNotFoundError:
+            inode = 0
+        identity = (path, inode)
+        if identity not in _SCHEMA_READY_INODES:
+            connection = _initialize_connection_schema()
+            try:
+                inode = int(os.stat(path).st_ino)
+            except FileNotFoundError:
+                inode = 0
+            _SCHEMA_READY_INODES.add((path, inode))
+            return connection
+        connection = sqlite3.connect(config.PROGRESS_DB_FILE, timeout=30, factory=_TrackedConnection)
+        connection.execute("PRAGMA busy_timeout=60000")
+        return connection
+
+
+def _begin_immediate(connection: sqlite3.Connection) -> None:
+    """Retry SQLite writer collisions for a bounded, busy-timeout window."""
+    tracked = connection if isinstance(connection, _TrackedConnection) else getattr(connection, "value", None)
+    if not isinstance(tracked, _TrackedConnection):
+        raise RuntimeError("checkpoint writer connection must use the tracked SQLite connection")
+    _WRITER_LOCK.acquire()
+    tracked._writer_lock_held = True
+    deadline = time.monotonic() + 60.0
+    attempt = 0
+    while True:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).casefold() or time.monotonic() >= deadline:
+                tracked._writer_lock_held = False
+                _WRITER_LOCK.release()
+                raise
+            # A failed BEGIN can leave a deferred transaction marker on the
+            # connection.  Clear it before retrying so the next attempt does
+            # not carry a stale lock state into the writer race.
+            try:
+                # Bypass the tracked override: the process-local writer gate
+                # must remain held while the same connection retries BEGIN.
+                sqlite3.Connection.rollback(connection)
+            except sqlite3.Error:
+                pass
+            time.sleep(min(0.5, 0.02 * (2 ** min(attempt, 5))))
+            attempt += 1
+
+
 def _connect() -> sqlite3.Connection:
     """Close a partially migrated schema connection on every error path."""
     thread_id = threading.get_ident()
@@ -207,7 +298,7 @@ def claim_source_probe(*, run_id: str, host: str) -> dict[str, Any]:
     """Atomically assign one probe owner per run/host; waiters share its snapshot."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         row = connection.execute("SELECT state,owner_token,snapshot_json,error,lease_expires_at FROM source_probes WHERE run_id=? AND host=?", (run_id, host)).fetchone()
         if row and str(row[0]) == "DONE":
             connection.commit()
@@ -248,7 +339,7 @@ def heartbeat_source_probe(*, run_id: str, host: str, owner_token: str) -> str:
 def finish_source_probe(*, run_id: str, host: str, owner_token: str, snapshot: dict[str, Any] | None = None, error: str = "") -> None:
     state = "ERROR" if error else "DONE"
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         cursor = connection.execute("UPDATE source_probes SET state=?,snapshot_json=?,error=?,updated_at=?,lease_expires_at='' WHERE run_id=? AND host=? AND state='RUNNING' AND owner_token=?", (state, json.dumps(_json_safe(snapshot or {}), ensure_ascii=False), str(error), datetime.now(timezone.utc).isoformat(timespec="seconds"), run_id, host, owner_token))
         if cursor.rowcount != 1:
             connection.rollback()
@@ -267,7 +358,7 @@ def reserve_free_search_query(*, run_id: str, item_index: int, source_record_id:
     if bucket not in {"discovery", "targeted"}:
         bucket = ""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         source_id = str(source_record_id or "").strip()
         source_row = connection.execute(
             "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
@@ -314,6 +405,44 @@ def reserve_free_search_query(*, run_id: str, item_index: int, source_record_id:
                 "UPDATE free_query_usage SET used=used+1 WHERE run_id=? AND source_record_id=? AND used < quota",
                 (run_id, source_id),
             )
+        connection.commit()
+        return cursor.rowcount == 1
+
+
+def reserve_crawler_http(*, run_id: str, item_index: int, source_record_id: str, bucket: str, limit: int) -> bool:
+    """Atomically reserve a per-item crawler bucket request."""
+    bucket = str(bucket).strip()
+    source_id = str(source_record_id or "").strip()
+    if not source_id:
+        raise ValueError("crawler HTTP reservation requires source_record_id")
+    with closing(_connect()) as connection:
+        _begin_immediate(connection)
+        source_row = connection.execute(
+            "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
+            (run_id, int(item_index)),
+        ).fetchone()
+        if source_row and str(source_row[0]) != source_id:
+            connection.rollback()
+            raise RuntimeError("crawler_http source_record_id/item_index invariant mismatch")
+        connection.execute(
+            "INSERT OR IGNORE INTO crawler_http_usage(run_id,source_record_id,item_index,bucket,used,quota) VALUES(?,?,?,?,0,?)",
+            (run_id, source_id, int(item_index), bucket, int(limit)),
+        )
+        by_source = connection.execute(
+            "SELECT source_record_id,item_index FROM crawler_http_usage WHERE run_id=? AND source_record_id=? AND item_index=? AND bucket=?",
+            (run_id, source_id, int(item_index), bucket),
+        ).fetchone()
+        by_index = connection.execute(
+            "SELECT source_record_id,item_index FROM crawler_http_usage WHERE run_id=? AND item_index=? AND bucket=?",
+            (run_id, int(item_index), bucket),
+        ).fetchone()
+        if not by_source or not by_index or str(by_index[0]) != source_id:
+            connection.rollback()
+            raise RuntimeError("crawler_http source_record_id/item_index invariant mismatch")
+        cursor = connection.execute(
+            "UPDATE crawler_http_usage SET used=used+1 WHERE run_id=? AND source_record_id=? AND item_index=? AND bucket=? AND used < quota",
+            (run_id, source_id, int(item_index), bucket),
+        )
         connection.commit()
         return cursor.rowcount == 1
 
@@ -559,7 +688,7 @@ def seed_recovered_run(*, path: Path, run_id: str, input_hash: str, run_signatur
     try:
         initialize_schema(Path(path))
         with closing(_connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _begin_immediate(connection)
             result_map = {int(result["item_index"]): str(result["payload"]) for result in results}
             if len(result_map) != len(results):
                 connection.rollback()
@@ -768,7 +897,7 @@ def claim_item(*, run_id: str, item_index: int, phase: str) -> bool:
         raise ValueError(f"invalid item phase: {phase}")
     column = "free_state" if phase == "FREE" else "paid_state"
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         cursor = connection.execute(
             f"UPDATE run_items SET {column}='RUNNING' WHERE run_id=? AND item_index=? AND {column}='PENDING'",
             (run_id, int(item_index)),
@@ -780,7 +909,7 @@ def claim_item(*, run_id: str, item_index: int, phase: str) -> bool:
 def recover_interrupted_items(run_id: str) -> dict[str, int]:
     """Recover only scheduler state; payloads never make an item runnable."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         free_reset = connection.execute("UPDATE run_items SET free_state='PENDING' WHERE run_id=? AND free_state='RUNNING'", (run_id,)).rowcount
         paid_unknown = connection.execute("UPDATE run_items SET paid_state='UNKNOWN' WHERE run_id=? AND paid_state IN ('RUNNING','RESERVED')", (run_id,)).rowcount
         connection.commit()
@@ -802,7 +931,7 @@ def transition_phase(run_id: str, new_phase: str, *, expected_count: int) -> Non
     if new_phase not in {"FREE", "PAID", "FINALIZING", "COMPLETE"}:
         raise ValueError(f"invalid phase: {new_phase}")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         row = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if not row or new_phase not in PHASE_TRANSITIONS.get(str(row[0]), set()):
             connection.rollback()
@@ -844,7 +973,7 @@ def transition_phase(run_id: str, new_phase: str, *, expected_count: int) -> Non
 def complete_finalization_phase(run_id: str, *, expected_count: int) -> None:
     """Idempotent CAS used when publishing succeeded before the DB phase update."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         row = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if not row or str(row[0]) == "COMPLETE":
             connection.commit()
@@ -885,7 +1014,7 @@ def load_results_by_id(run_id: str) -> dict[int, dict[str, Any]]:
 def freeze_paid_queue(run_id: str, item_indexes: list[int] | None = None) -> list[int]:
     """Freeze the paid set exactly once at the FREE -> PAID boundary."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         row = connection.execute("SELECT context_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
         context = json.loads(row[0] or "{}") if row else {}
         indexes = [int(item[0]) for item in connection.execute("SELECT item_index FROM run_items WHERE run_id=? AND paid_required=1 AND paid_state='PENDING' ORDER BY item_index", (run_id,)).fetchall()]
@@ -902,7 +1031,7 @@ def freeze_paid_queue(run_id: str, item_indexes: list[int] | None = None) -> lis
 def finalize_free_only_queue(run_id: str) -> dict[str, int]:
     """Atomically skip the recommended paid queue without running a provider."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         phase_row = connection.execute("SELECT phase,context_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if not phase_row or str(phase_row[0]) != "FREE":
             connection.rollback()
@@ -953,7 +1082,7 @@ def finalize_free_only_queue(run_id: str) -> dict[str, int]:
 def mark_handoff_pending(*, run_id: str, expected_count: int) -> dict[str, int]:
     """Quarantine the complete free snapshot in one durable handoff transaction."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         phase = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if not phase or str(phase[0]) != "FREE":
             connection.rollback()
@@ -1012,7 +1141,7 @@ def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, in
     """Atomically remove the temporary overlay and recompute publication policy."""
     from modules import publication_policy
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         phase = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
         pending = connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=? AND paid_required=1 AND paid_state NOT IN ('DONE','FAILED','NOT_REQUIRED')", (run_id,)).fetchone()[0]
         unresolved = connection.execute("SELECT COUNT(*) FROM provider_calls WHERE run_id=? AND state IN ('RESERVED','RUNNING')", (run_id,)).fetchone()[0]
@@ -1082,7 +1211,7 @@ def save_item_transaction(*, run_id: str, item_index: int, source_record_id: str
                           paid_attempts: int, last_error: str = "") -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         current = connection.execute(
             "SELECT free_state,paid_state,free_attempts,quarantine_state,quarantine_status,publication_blockers FROM run_items WHERE run_id=? AND item_index=?",
             (run_id, item_index),
@@ -1173,7 +1302,7 @@ def begin_paid_attempt(*, run_id: str, item_index: int, attempt_number: int) -> 
     """Durably create the paid attempt at item claim time."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         item = connection.execute("SELECT paid_required,paid_state FROM run_items WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
         if not item or int(item[0]) != 1 or str(item[1]) != "RUNNING":
             connection.rollback()
@@ -1267,7 +1396,7 @@ def begin_finalization_intent(*, run_id: str, generation: str, input_snapshot_sh
 
 def complete_finalization_intent(*, run_id: str, artifact_set_sha256: str, manifest_sha256: str) -> None:
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         row = connection.execute("SELECT status,artifact_set_sha256,manifest_sha256 FROM finalization_intent WHERE run_id=?", (run_id,)).fetchone()
         if not row:
             connection.rollback()
@@ -1340,7 +1469,7 @@ def mark_finalization_artifact_and_outbox(*, run_id: str, generation: str,
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     frozen_telemetry = _json_safe(telemetry_snapshot or {})
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         intent = connection.execute(
             "SELECT generation,result_snapshot_sha256,status,artifact_set_sha256,memory_plan_sha256,memory_plan_count,memory_plan_committed FROM finalization_intent WHERE run_id=?",
             (run_id,),
@@ -1408,7 +1537,7 @@ def mark_finalization_artifact_and_outbox(*, run_id: str, generation: str,
 def mark_legacy_no_memory_plan(run_id: str, *, artifact_set_sha256: str = "", manifest_sha256: str = "") -> None:
     """Close an old COMPLETE run without inventing a post-hoc memory plan."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         run_row = connection.execute("SELECT context_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
         context = json.loads(run_row[0] or "{}") if run_row else {}
         legacy_provenance = str((context.get("lineage") or {}).get("type", "")) == "legacy_recovery"
@@ -1566,7 +1695,7 @@ def commit_finalization_memory_plan(*, run_id: str, generation: str,
                                     telemetry_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     """Commit the already-enqueued outbox plan in its own transaction."""
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         intent = connection.execute(
             "SELECT generation,result_snapshot_sha256,status,memory_plan_sha256,memory_plan_count,memory_plan_committed,output_context_json FROM finalization_intent WHERE run_id=?",
             (run_id,),
@@ -1640,7 +1769,7 @@ def reserve_provider_call(*, run_id: str, provider: str, item_index: int, phase:
     call_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         item = connection.execute(
             "SELECT paid_required,paid_state FROM run_items WHERE run_id=? AND item_index=?",
             (run_id, int(item_index)),
@@ -1684,7 +1813,7 @@ def complete_provider_call(*, call_id: str, state: str, result_ref: str = "") ->
         raise ValueError(f"invalid provider call state: {state}")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         call = connection.execute("SELECT run_id,provider,state FROM provider_calls WHERE call_id=?", (call_id,)).fetchone()
         if not call or call[2] in {"DONE", "FAILED", "UNKNOWN"}:
             connection.rollback()
@@ -1708,7 +1837,7 @@ def complete_provider_call_for_context(*, run_id: str, provider: str, item_index
 def reconcile_unknown_provider_calls(run_id: str) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate(connection)
         calls = connection.execute("SELECT call_id,provider,item_index FROM provider_calls WHERE run_id=? AND state IN ('RESERVED','RUNNING')", (run_id,)).fetchall()
         for call_id, provider, item_index in calls:
             connection.execute("UPDATE provider_calls SET state='UNKNOWN',updated_at=? WHERE call_id=?", (now, call_id))

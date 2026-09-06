@@ -18,6 +18,11 @@ const headers = [
   "phone_verified", "expected_publication", "identity_evidence_urls",
   "contact_evidence_urls", "observed_at", "evidence_content_sha256",
   "reviewer_pass_1", "reviewer_pass_2", "disagreement_reason", "label_status",
+  "source_listed_website", "source_listed_website_status",
+  "expected_website_domains_json", "expected_emails_json", "expected_phones_e164_json",
+  "expected_publication_reason_codes_json",
+  "website_field_evidence_json", "email_field_evidence_json", "phone_field_evidence_json",
+  "reviewer_provenance_json",
 ];
 
 async function loadJsonl(filePath) {
