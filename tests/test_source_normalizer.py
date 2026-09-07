@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 from modules.source_normalizer import field_evidence, normalize_label, normalize_url
 from modules.exhibitor_scraper import _texhibition_profile_details
-from tools.acquire_independent_sources import _labelled_website, _labelled_website_field
+from tools.acquire_independent_sources import _labelled_website, _labelled_website_field, _select_pool
 from tools.run_source_review_pass import _labelled_company_website
 
 
@@ -47,12 +47,38 @@ def test_ambiente_schemeless_homepage_is_not_rejected():
     assert normalized["normalized_value"] == "https://www.fixture-company.example"
 
 
-def test_current_independent_acquisition_receipt_has_expected_pool_shape():
-    snapshot = Path(__file__).parents[1] / "output" / "a8_corrected_independent_acquisition.json"
-    payload = json.loads(snapshot.read_text(encoding="utf-8"))
-    assert len(payload["hometex"]["selected"]) == 60
-    assert len(payload["ambiente"]["selected"]) == 60
-    assert sum(bool(row.get("listed_website")) for row in payload["ambiente"]["selected"]) == 58
+def test_independent_pool_selection_is_deterministic_and_bounded():
+    records = [
+        {
+            "source_record_id": f"ambiente_2026:{index:03d}",
+            "legal_name": f"Fixture Company {index:03d}",
+            "website": f"https://fixture-{index:03d}.example",
+        }
+        for index in range(65)
+    ]
+    known = [{"source_record_id": "ambiente_2026:000"}]
+    selected, excluded = _select_pool(
+        records, known, "ambiente_2026", limit=60,
+    )
+    reversed_selected, reversed_excluded = _select_pool(
+        list(reversed(records)), known, "ambiente_2026", limit=60,
+    )
+
+    assert len(selected) == 60
+    assert [row["source_record_id"] for row in selected] == [
+        row["source_record_id"] for row in reversed_selected
+    ]
+    assert all(
+        row["source_record_id"] != "ambiente_2026:000"
+        for row in selected
+    )
+    assert excluded == reversed_excluded == [{
+        "source": "ambiente_2026",
+        "source_record_id": "ambiente_2026:000",
+        "matched_key": "source_record_id",
+        "matched_previous_id": "ambiente_2026:000",
+        "reason": "overlap_with_previous_893_golden_or_diagnostic",
+    }]
 
 
 def test_url_canonicalization_and_relative_host_guard():
