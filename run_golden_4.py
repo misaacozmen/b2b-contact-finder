@@ -33,8 +33,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--crawl-cache", choices=("use", "refresh", "off", "replay"), default="use")
     parser.add_argument("--rerank-cache", action="store_true", help="Never make search or crawl network requests")
     parser.add_argument("--companies", default="", help="Comma-separated exact company names")
-    parser.add_argument("--brightdata-budget", type=int, default=config.BRIGHTDATA_REQUEST_BUDGET)
-    parser.add_argument("--google-places-budget", type=int, default=config.GOOGLE_PLACES_REQUEST_BUDGET)
+    parser.add_argument("--brightdata-budget", type=int, default=None)
+    parser.add_argument("--google-places-budget", type=int, default=None)
+    parser.add_argument("--hunter-budget", type=int, default=None)
+    parser.add_argument("--brandfetch-budget", type=int, default=None)
     return parser.parse_args()
 
 
@@ -65,8 +67,14 @@ def main_cli() -> None:
 
     config.SEARCH_CACHE_MODE = "replay" if args.rerank_cache else args.search_cache
     config.CRAWL_CACHE_MODE = "replay" if args.rerank_cache else args.crawl_cache
-    config.BRIGHTDATA_REQUEST_HARD_CAP = config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)
-    config.GOOGLE_PLACES_REQUEST_HARD_CAP = config.GOOGLE_PLACES_REQUEST_BUDGET = max(0, args.google_places_budget)
+    if args.brightdata_budget is not None:
+        config.BRIGHTDATA_REQUEST_HARD_CAP = config.BRIGHTDATA_REQUEST_BUDGET = max(0, args.brightdata_budget)
+    if args.google_places_budget is not None:
+        config.GOOGLE_PLACES_REQUEST_HARD_CAP = config.GOOGLE_PLACES_REQUEST_BUDGET = max(0, args.google_places_budget)
+    if args.hunter_budget is not None:
+        config.HUNTER_REQUEST_HARD_CAP = config.HUNTER_REQUEST_BUDGET = max(0, args.hunter_budget)
+    if args.brandfetch_budget is not None:
+        config.BRANDFETCH_REQUEST_HARD_CAP = config.BRANDFETCH_REQUEST_BUDGET = max(0, args.brandfetch_budget)
     if args.rerank_cache:
         config.MIN_DELAY_SEC = 0
         config.MAX_DELAY_SEC = 0

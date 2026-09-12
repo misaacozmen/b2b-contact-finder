@@ -402,7 +402,7 @@ class DiscoveryV2HoldoutTests(unittest.TestCase):
 
         def empty_search(query):
             seen.append(query)
-            return []
+            return search.SearchResults([], "fake", "brightdata", result_state="EMPTY")
 
         with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(
             config, "SEARCH_CACHE_MODE", "off"

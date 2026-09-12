@@ -6,7 +6,7 @@ import re
 import requests
 
 import config
-from modules import runtime
+from modules import checkpoint, runtime
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -44,21 +44,42 @@ def find_domain_emails(domain: str) -> list[dict]:
         if not reservation:
             LOGGER.warning("Hunter run budget exhausted")
             return runtime.rejected_provider_result(reservation)
+        runtime.start_api(reservation)
         runtime.wait_for_request_slot()
-        response = requests.get(
-            DOMAIN_SEARCH_URL,
-            params={"domain": domain, "api_key": config.HUNTER_API_KEY, "limit": 10},
+        runtime.mark_api_http_started(reservation, 1)
+        endpoint = DOMAIN_SEARCH_URL
+        params = {"domain": domain, "api_key": config.HUNTER_API_KEY, "limit": 10}
+        envelope = runtime.transport_envelope(reservation, endpoint=endpoint, request_shape={"method": "GET", "params": {"domain": domain, "limit": 10}}, timeout=config.HUNTER_TIMEOUT_SEC)
+        response = runtime.invoke_paid_transport(envelope, lambda: requests.get(
+            endpoint,
+            params=params,
             timeout=config.HUNTER_TIMEOUT_SEC,
-        )
+        ))
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Hunter response is not a JSON object")
+        if "data" not in payload:
+            raise ValueError("Hunter response lacks data")
         data = payload.get("data", {})
         if not isinstance(data, dict):
             raise ValueError("Hunter response data is not a JSON object")
-        runtime.complete_api(reservation, "DONE")
+        raw_emails = data.get("emails", [])
+        if not isinstance(raw_emails, list) or any(not isinstance(item, dict) for item in raw_emails):
+            raise ValueError("Hunter emails is not a list of objects")
+        emails = []
+        for item in raw_emails:
+            value = item.get("value", "")
+            confidence = item.get("confidence", 0)
+            sources = item.get("sources", [])
+            if not isinstance(value, str) or isinstance(confidence, bool) or not isinstance(confidence, int) or confidence < 0 or not isinstance(sources, list):
+                raise ValueError("Hunter email fields have invalid types")
+            value = value.strip().lower()
+            if value and confidence >= config.HUNTER_MIN_CONFIDENCE:
+                emails.append({"email": value, "confidence": confidence, "sources": sources})
     except Exception as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         if "reservation" in locals():
             state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
             runtime.complete_api(reservation, state)
@@ -71,10 +92,5 @@ def find_domain_emails(domain: str) -> list[dict]:
         )
         return runtime.provider_result([], state="FAILED", reason=f"{type(exc).__name__}:{exc}")
 
-    emails = []
-    for item in data.get("emails", []):
-        value = (item.get("value") or "").strip().lower()
-        confidence = int(item.get("confidence") or 0)
-        if value and confidence >= config.HUNTER_MIN_CONFIDENCE:
-            emails.append({"email": value, "confidence": confidence, "sources": item.get("sources") or []})
+    runtime.complete_api(reservation, "DONE")
     return runtime.provider_result(emails, state="COMPLETED" if emails else "EMPTY", reason="results" if emails else "empty_response", call_ids=(getattr(reservation, "call_id", ""),))

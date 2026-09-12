@@ -219,7 +219,7 @@ class RunConfig:
         return tuple(sorted(result))
 
     @classmethod
-    def from_config(cls, *, paid_enabled: bool) -> "RunConfig":
+    def from_config(cls, *, paid_enabled: bool, budgets: dict[str, int] | None = None) -> "RunConfig":
         import modules.publication_policy as publication_policy
 
         thresholds = tuple(sorted(
@@ -227,18 +227,26 @@ class RunConfig:
             for name in ("REVIEW_SCORE", "MEDIUM_CONFIDENCE_SCORE", "HIGH_CONFIDENCE_SCORE")
             if hasattr(config, name)
         ))
-        budget = lambda name: max(0, int(getattr(config, name))) if paid_enabled else 0
+        configured_budgets = dict(budgets) if budgets is not None else {
+            "brightdata": getattr(config, "BRIGHTDATA_REQUEST_BUDGET", 0),
+            "google_places": getattr(config, "GOOGLE_PLACES_REQUEST_BUDGET", 0),
+            "brandfetch": getattr(config, "BRANDFETCH_REQUEST_BUDGET", 0),
+            "hunter": getattr(config, "HUNTER_REQUEST_BUDGET", 0),
+            "linkedin": getattr(config, "LINKEDIN_COMPANY_REQUEST_BUDGET", 0),
+            "llm": getattr(config, "LLM_ARBITER_BUDGET", 0),
+        }
+        budget = lambda key: max(0, int(configured_budgets.get(key, 0))) if paid_enabled else 0
         return cls(
             search_provider=str(config.SEARCH_PROVIDER),
             search_cache_mode=str(config.SEARCH_CACHE_MODE),
             crawl_cache_mode=str(config.CRAWL_CACHE_MODE),
             paid_enabled=bool(paid_enabled),
-            brightdata_budget=budget("BRIGHTDATA_REQUEST_BUDGET"),
-            google_places_budget=budget("GOOGLE_PLACES_REQUEST_BUDGET"),
-            brandfetch_budget=budget("BRANDFETCH_REQUEST_BUDGET"),
-            hunter_budget=budget("HUNTER_REQUEST_BUDGET"),
-            linkedin_budget=budget("LINKEDIN_COMPANY_REQUEST_BUDGET"),
-            llm_budget=budget("LLM_ARBITER_BUDGET"),
+            brightdata_budget=budget("brightdata"),
+            google_places_budget=budget("google_places"),
+            brandfetch_budget=budget("brandfetch"),
+            hunter_budget=budget("hunter"),
+            linkedin_budget=budget("linkedin"),
+            llm_budget=budget("llm"),
             model=str(config.LLM_ARBITER_MODEL),
             thresholds=thresholds,
             policy_versions=(
@@ -270,26 +278,40 @@ class RunConfig:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "RunConfig":
-        if not isinstance(payload, dict) or not isinstance(payload.get("budgets"), dict):
-            raise ValueError("manifest run_config is invalid")
-        budgets = payload["budgets"]
-        thresholds = tuple(sorted((str(k), int(v)) for k, v in dict(payload.get("thresholds", {})).items()))
-        policies = tuple(sorted((str(k), str(v)) for k, v in dict(payload.get("policy_versions", {})).items()))
-        settings = tuple(sorted(dict(payload.get("effective_settings", {})).items()))
-        return cls(
-            search_provider=str(payload["search_provider"]),
-            search_cache_mode=str(payload["search_cache_mode"]),
-            crawl_cache_mode=str(payload["crawl_cache_mode"]),
-            paid_enabled=bool(payload["paid_enabled"]),
-            brightdata_budget=int(budgets["brightdata"]),
-            google_places_budget=int(budgets["google_places"]),
-            brandfetch_budget=int(budgets["brandfetch"]),
-            hunter_budget=int(budgets["hunter"]),
-            linkedin_budget=int(budgets["linkedin"]),
-            llm_budget=int(budgets["llm"]),
-            model=str(payload["model"]), thresholds=thresholds,
-            policy_versions=policies, effective_settings=settings,
-        )
+        from modules import checkpoint
+        canonical = set(checkpoint.CANONICAL_PROVIDERS)
+        try:
+            if not isinstance(payload, dict) or not isinstance(payload.get("budgets"), dict):
+                raise TypeError
+            budgets = payload["budgets"]
+            if set(budgets) != canonical or not isinstance(payload.get("paid_enabled"), bool):
+                raise TypeError
+            normalized_budgets = {}
+            for provider in canonical:
+                value = budgets[provider]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise TypeError
+                normalized_budgets[provider] = value
+            semantic_fields = ("search_provider", "search_cache_mode", "crawl_cache_mode", "model", "thresholds", "policy_versions", "effective_settings")
+            if any(field not in payload for field in semantic_fields):
+                raise KeyError
+            if not all(isinstance(payload[field], dict) for field in ("thresholds", "policy_versions", "effective_settings")):
+                raise TypeError
+            thresholds = tuple(sorted((str(k), int(v)) for k, v in payload["thresholds"].items()))
+            policies = tuple(sorted((str(k), str(v)) for k, v in payload["policy_versions"].items()))
+            settings = tuple(sorted(payload["effective_settings"].items()))
+            return cls(
+                search_provider=str(payload["search_provider"]), search_cache_mode=str(payload["search_cache_mode"]),
+                crawl_cache_mode=str(payload["crawl_cache_mode"]), paid_enabled=payload["paid_enabled"],
+                brightdata_budget=normalized_budgets["brightdata"], google_places_budget=normalized_budgets["google_places"],
+                brandfetch_budget=normalized_budgets["brandfetch"], hunter_budget=normalized_budgets["hunter"],
+                linkedin_budget=normalized_budgets["linkedin"], llm_budget=normalized_budgets["llm"],
+                model=str(payload["model"]), thresholds=thresholds, policy_versions=policies, effective_settings=settings,
+            )
+        except checkpoint.SchedulerInvariantError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise checkpoint.ResumeInvariant("resume run_config requires exact canonical provider budgets and semantic fields") from exc
 
     def apply_effective_settings(self) -> None:
         """Apply only recorded, non-secret typed settings to the process config."""
@@ -439,7 +461,7 @@ def active_leases() -> tuple[RunLease, ...]:
     return tuple(_ACTIVE_LEASES)
 
 
-def validate_run_bundle(
+def _validate_run_bundle_impl(
     run_root: Path,
     *,
     expected_input_hash: str | None = None,
@@ -536,25 +558,40 @@ def validate_run_bundle(
         for provider, state in provider_calls:
             if provider not in {"brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm"} or state not in {"RESERVED", "RUNNING", "DONE", "FAILED", "UNKNOWN"}:
                 raise ValueError("provider ledger state is invalid")
-        usage = connection.execute("SELECT provider,configured_limit,effective_limit,reserved,completed,failed FROM provider_usage WHERE run_id=?", (run_id,)).fetchall()
+        usage = connection.execute("SELECT provider,configured_limit,effective_limit,reserved_total,reserved,completed,failed,unknown FROM provider_usage WHERE run_id=?", (run_id,)).fetchall()
         usage_by_provider = {str(row[0]): row[1:] for row in usage}
         recorded_budgets = ((manifest.get("run_config") or {}).get("budgets") or {})
-        for provider in {"brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm"}:
+        canonical_providers = {"brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm"}
+        if set(usage_by_provider) != canonical_providers:
+            raise ValueError("provider ledger set mismatch")
+        if {str(provider) for provider, _state in provider_calls} - canonical_providers:
+            raise ValueError("provider call set mismatch")
+        for provider in canonical_providers:
             if provider not in usage_by_provider:
                 raise ValueError(f"provider ledger budget is missing: {provider}")
-            configured, effective, reserved, completed, failed = usage_by_provider[provider]
-            if provider not in {"brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm"} or min(configured, effective, reserved, completed, failed) < 0 or effective > configured:
+            configured, effective, reserved_total, reserved, completed, failed, unknown = usage_by_provider[provider]
+            if min(configured, effective, reserved_total, reserved, completed, failed, unknown) < 0 or effective > configured or reserved_total > effective:
                 raise ValueError("provider ledger budget is invalid")
             if provider in recorded_budgets and int(effective) != int(recorded_budgets[provider]):
                 raise ValueError(f"provider ledger budget does not match recorded config: {provider}")
             actual = connection.execute("SELECT state,COUNT(*) FROM provider_calls WHERE run_id=? AND provider=? GROUP BY state", (run_id, provider)).fetchall()
             counts = {str(state): int(count) for state, count in actual}
+            if int(reserved_total) != sum(counts.get(state, 0) for state in ("RESERVED", "RUNNING", "DONE", "FAILED", "UNKNOWN")):
+                raise ValueError(f"provider reserved_total counter mismatch: {provider}")
             if int(reserved) != counts.get("RESERVED", 0) + counts.get("RUNNING", 0):
                 raise ValueError(f"provider reserved counter mismatch: {provider}")
             if int(completed) != counts.get("DONE", 0):
                 raise ValueError(f"provider completed counter mismatch: {provider}")
-            if int(failed) != counts.get("FAILED", 0) + counts.get("UNKNOWN", 0):
+            if int(failed) != counts.get("FAILED", 0):
                 raise ValueError(f"provider failed counter mismatch: {provider}")
+            if int(unknown) != counts.get("UNKNOWN", 0):
+                raise ValueError(f"provider unknown counter mismatch: {provider}")
+        plan_table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paid_query_plan_entries'").fetchone()
+        if plan_table and "paid_query_plan_sha256" in manifest:
+            plan_rows = connection.execute("SELECT item_index,plan_version,query_kind,round_ordinal,query_ordinal,normalized_query,query_sha256 FROM paid_query_plan_entries WHERE run_id=? ORDER BY item_index,plan_version,query_kind,round_ordinal,query_ordinal", (run_id,)).fetchall()
+            plan_material = json.dumps([list(row) for row in plan_rows], ensure_ascii=False, separators=(",", ":"))
+            if int(manifest.get("paid_query_plan_count", -1)) != len(plan_rows) or manifest.get("paid_query_plan_sha256") != hashlib.sha256(plan_material.encode()).hexdigest() or int(manifest.get("plan_version", 0)) != 1:
+                raise ValueError("paid query plan receipt mismatch")
     artifact_required = profile in {"FROZEN_RECOVERY", "COMPLETE"} or profile == "FINALIZING" and bool(manifest.get("complete"))
     if artifact_required and require_artifacts:
         artifact_hash = str(manifest.get("artifact_set_sha256", ""))
@@ -593,6 +630,17 @@ def validate_run_bundle(
             if terminal:
                 raise ValueError("nonterminal scheduler items remain")
     return {"run_id": run_id, "item_count": item_count, "source_ids": source_ids, "manifest": manifest}
+
+
+def validate_run_bundle(*args, **kwargs) -> dict:
+    """Typed fail-closed boundary for every resume/bundle invariant."""
+    from modules import checkpoint
+    try:
+        return _validate_run_bundle_impl(*args, **kwargs)
+    except checkpoint.SchedulerInvariantError:
+        raise
+    except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise checkpoint.ResumeInvariant(f"run bundle validation failed: {exc}") from exc
 
 
 def write_manifest(path: Path, context: RunContext, run_config: RunConfig, *, complete: bool = False, extra: dict | None = None) -> None:

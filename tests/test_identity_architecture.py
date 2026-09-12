@@ -176,6 +176,21 @@ class IdentityArchitectureTests(unittest.TestCase):
         self.assertEqual(result["crawl_profile"], "identity")
         self.assertLessEqual(fetch.call_count, 1 + config.MAX_IDENTITY_PAGES)
 
+    def test_six_page_candidate_fetches_homepage_plus_six_identity_pages(self):
+        links = "".join(f'<a href="/about-{index}">About {index}</a>' for index in range(7))
+
+        def fake_fetch(url):
+            return (links, None) if url == "https://example.com" else ("Example company", None)
+
+        with patch.object(config, "MAX_IDENTITY_PAGES", 6), patch.object(
+            config, "CRAWL_CACHE_MODE", "off"
+        ), patch("modules.crawler._try_fetch", side_effect=fake_fetch) as fetch, patch(
+            "modules.crawler.site_mapper.classify", return_value="about"
+        ):
+            result = crawler.fetch_site("https://example.com", profile="identity")
+        self.assertEqual(fetch.call_count, 7)
+        self.assertEqual(len(result["pages"]), 7)
+
     def test_stage_metrics_separate_candidate_selection_and_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

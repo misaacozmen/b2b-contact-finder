@@ -14,7 +14,7 @@ from urllib.parse import quote
 import requests
 
 import config
-from modules import cache_store, redaction, runtime, scorer
+from modules import cache_store, checkpoint, redaction, runtime, scorer
 
 
 LOGGER = logging.getLogger("contact_finder")
@@ -48,6 +48,11 @@ def _clean_results(items, provider: str) -> list[dict]:
     cleaned: list[dict] = []
     seen: set[str] = set()
     for rank, item in enumerate(items or [], start=1):
+        for field in ("domain", "name", "company_name"):
+            if field in item and not isinstance(item.get(field), str):
+                raise ValueError(f"{provider} {field} is not a string")
+        if "claimed" in item and not isinstance(item.get("claimed"), bool):
+            raise ValueError(f"{provider} claimed is not a boolean")
         domain = scorer.normalize_domain(item.get("domain", ""))
         if (
             not scorer.is_valid_hostname(domain)
@@ -96,7 +101,11 @@ def brandfetch_domains(company: str) -> list[dict]:
     if not (config.ENABLE_BRANDFETCH_DOMAIN_SEARCH and config.BRANDFETCH_CLIENT_ID and company):
         return runtime.provider_result([], state="NOT_ENABLED", reason="provider_disabled")
     namespace = "brandfetch_domain_search"
-    cached = _cached(namespace, company)
+    try:
+        cached = _cached(namespace, company)
+    except Exception:
+        runtime.record("resolver.brandfetch.cache_read_error")
+        cached = None
     if cached is not None:
         runtime.record("resolver.brandfetch.cache_hit")
         return runtime.provider_result(_clean_results(cached, "brandfetch"), state="CACHE_HIT", reason="cached")
@@ -107,20 +116,31 @@ def brandfetch_domains(company: str) -> list[dict]:
     if not reservation:
         return runtime.rejected_provider_result(reservation)
     try:
+        runtime.start_api(reservation)
         runtime.wait_for_request_slot()
-        response = requests.get(
-            BRANDFETCH_SEARCH_URL.format(company=quote(company, safe="")),
+        runtime.mark_api_http_started(reservation, 1)
+        endpoint = BRANDFETCH_SEARCH_URL.format(company=quote(company, safe=""))
+        envelope = runtime.transport_envelope(reservation, endpoint=endpoint, request_shape={"method": "GET", "company": company}, timeout=config.BRANDFETCH_TIMEOUT_SEC)
+        response = runtime.invoke_paid_transport(envelope, lambda: requests.get(
+            endpoint,
             params={"c": config.BRANDFETCH_CLIENT_ID},
             timeout=config.BRANDFETCH_TIMEOUT_SEC,
-        )
+        ))
         response.raise_for_status()
         payload = response.json()
-        items = payload if isinstance(payload, list) else []
-        _save(namespace, company, items)
-        runtime.complete_api(reservation, "DONE")
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise ValueError("Brandfetch response is not a list of objects")
+        items = payload
         cleaned = _clean_results(items, "brandfetch")
+        runtime.complete_api(reservation, "DONE")
+        try:
+            _save(namespace, company, items)
+        except Exception:
+            runtime.record("resolver.brandfetch.cache_write_error")
         return runtime.provider_result(cleaned, state="COMPLETED" if cleaned else "EMPTY", reason="results" if cleaned else "empty_response", call_ids=(getattr(reservation, "call_id", ""),))
     except Exception as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
         runtime.complete_api(reservation, state)
         runtime.record("resolver.brandfetch.error")
@@ -137,7 +157,11 @@ def hunter_domains(company: str) -> list[dict]:
     if not (config.ENABLE_HUNTER_DOMAIN_FINDER and config.HUNTER_API_KEY and company):
         return runtime.provider_result([], state="NOT_ENABLED", reason="provider_disabled")
     namespace = "hunter_domain_finder"
-    cached = _cached(namespace, company)
+    try:
+        cached = _cached(namespace, company)
+    except Exception:
+        runtime.record("resolver.hunter.cache_read_error")
+        cached = None
     if cached is not None:
         runtime.record("resolver.hunter.cache_hit")
         return runtime.provider_result(_clean_results(cached, "hunter_domain_finder"), state="CACHE_HIT", reason="cached")
@@ -152,28 +176,38 @@ def hunter_domains(company: str) -> list[dict]:
     if not runtime.paid_access_allowed("hunter"):
         return runtime.provider_result([], state="NOT_ENABLED", reason="paid_not_authorized", call_ids=(getattr(reservation, "call_id", ""),))
     try:
+        runtime.start_api(reservation)
         runtime.wait_for_request_slot()
-        response = requests.get(
-            HUNTER_DOMAIN_FINDER_URL,
-            params={
+        runtime.mark_api_http_started(reservation, 1)
+        endpoint = HUNTER_DOMAIN_FINDER_URL
+        params = {
                 "company": company,
                 "api_key": config.HUNTER_API_KEY,
                 "limit": max(1, min(config.COMPANY_RESOLVER_MAX_RESULTS, 10)),
-            },
+            }
+        envelope = runtime.transport_envelope(reservation, endpoint=endpoint, request_shape={"method": "GET", "company": company, "limit": params["limit"]}, timeout=config.HUNTER_TIMEOUT_SEC)
+        response = runtime.invoke_paid_transport(envelope, lambda: requests.get(
+            endpoint,
+            params=params,
             timeout=config.HUNTER_TIMEOUT_SEC,
-        )
+        ))
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Hunter response is not a JSON object")
         items = payload.get("data", [])
-        if not isinstance(items, list):
-            raise ValueError("Hunter response data is not a JSON list")
-        _save(namespace, company, items)
-        runtime.complete_api(reservation, "DONE")
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise ValueError("Hunter response data is not a list of objects")
         cleaned = _clean_results(items, "hunter_domain_finder")
+        runtime.complete_api(reservation, "DONE")
+        try:
+            _save(namespace, company, items)
+        except Exception:
+            runtime.record("resolver.hunter.cache_write_error")
         return runtime.provider_result(cleaned, state="COMPLETED" if cleaned else "EMPTY", reason="results" if cleaned else "empty_response", call_ids=(getattr(reservation, "call_id", ""),))
     except Exception as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
         runtime.complete_api(reservation, state)
         runtime.record("resolver.hunter.error")

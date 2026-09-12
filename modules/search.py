@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 import math
 import os
@@ -6,6 +7,9 @@ import re
 import socket
 import threading
 import time
+import uuid
+from contextlib import contextmanager
+from enum import Enum
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
@@ -47,6 +51,7 @@ _BRIGHTDATA_NEXT_REQUEST_AT = 0.0
 _BRIGHTDATA_CIRCUIT_LOCK = threading.Lock()
 _BRIGHTDATA_CONSECUTIVE_FAILURES = 0
 _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
+_BRIGHTDATA_CIRCUIT_OBSERVATIONS: set[tuple[str, str, str]] = set()
 _BRIGHTDATA_INFLIGHT = threading.BoundedSemaphore(
     config.BRIGHTDATA_MAX_INFLIGHT_QUERIES
 )
@@ -72,30 +77,63 @@ class SearchBudgetExhausted(BrightDataSearchError):
     reason = "budget_exhausted"
 
 
+class SearchOrigin(str, Enum):
+    LIVE_OWNER = "LIVE_OWNER"
+    SINGLEFLIGHT_FOLLOWER = "SINGLEFLIGHT_FOLLOWER"
+    SAME_RUN_CACHE = "SAME_RUN_CACHE"
+    CROSS_RUN_CACHE = "CROSS_RUN_CACHE"
+    REPLAY = "REPLAY"
+    BUDGET_BLOCK = "BUDGET_BLOCK"
+    CIRCUIT_BLOCK = "CIRCUIT_BLOCK"
+
+
 class CandidateList(list):
-    def __init__(self, values=(), trace: list[dict] | None = None, source_health: dict | None = None):
+    def __init__(self, values=(), trace: list[dict] | None = None, source_health: dict | None = None, *, stop_scope: runtime.StopScope | str = runtime.StopScope.NONE, stopped_provider: str = "", stop_reason: str = "", stop_call_ids: tuple[str, ...] = ()):
         super().__init__(values)
         self.trace = trace or []
         self.source_health = source_health or {}
+        self.stop_scope = stop_scope if isinstance(stop_scope, runtime.StopScope) else runtime.StopScope(str(stop_scope).upper())
+        self.stopped_provider = str(stopped_provider)
+        self.stop_reason = str(stop_reason)
+        self.stop_call_ids = tuple(str(value) for value in stop_call_ids if value)
 
 
 class SearchResults(list):
-    def __init__(self, values=(), cache_status: str = "unknown", provider: str = "", *, result_state: str = "EMPTY", reason: str = "", result_reason: str | None = None, call_ids: tuple[str, ...] = ()):
+    def __init__(self, values=(), cache_status: str = "unknown", provider: str = "", *, result_state: str = "EMPTY", reason: str = "", result_reason: str | None = None, call_ids: tuple[str, ...] = (), primary_provider: str = "", primary_result_state: str = "", primary_result_reason: str = "", primary_call_ids: tuple[str, ...] = (), fallback_provider: str = "", fallback_result_state: str = "", fallback_result_reason: str = "", fallback_call_ids: tuple[str, ...] = (), stop_scope: runtime.StopScope | str = runtime.StopScope.NONE, origin: SearchOrigin | str = SearchOrigin.LIVE_OWNER, flight_fingerprint: str = "", call_relations: dict[str, str] | None = None):
         super().__init__(values)
         self.cache_status = cache_status
         self.provider = provider
         self.result_state = str(result_state)
         self.result_reason = str(result_reason if result_reason is not None else reason)
         self.call_ids = tuple(str(value) for value in call_ids if value)
+        self.primary_provider = str(primary_provider or provider)
+        self.primary_result_state = str(primary_result_state or result_state)
+        self.primary_result_reason = str(primary_result_reason or self.result_reason)
+        self.primary_call_ids = tuple(str(value) for value in (primary_call_ids or call_ids) if value)
+        self.fallback_provider = str(fallback_provider)
+        self.fallback_result_state = str(fallback_result_state)
+        self.fallback_result_reason = str(fallback_result_reason)
+        self.fallback_call_ids = tuple(str(value) for value in fallback_call_ids if value)
+        self.stop_scope = stop_scope if isinstance(stop_scope, runtime.StopScope) else runtime.StopScope(str(stop_scope).upper())
+        self.origin = origin if isinstance(origin, SearchOrigin) else SearchOrigin(str(origin).upper())
+        self.flight_fingerprint = str(flight_fingerprint)
+        self.call_relations = {str(key): str(value) for key, value in (call_relations or {}).items()}
+        if self.stop_scope != runtime.StopScope.NONE and runtime.current_item_index() >= 0:
+            runtime.apply_provider_outcome_stop(
+                self.result_state, self.provider, self.result_reason,
+                self.call_ids, self.stop_scope,
+            )
         runtime.record_provider_outcome(
             state=self.result_state, reason=self.result_reason,
-            call_ids=self.call_ids, provider=self.provider,
+            call_ids=self.call_ids, provider=self.provider, origin=self.origin.value,
+            flight_fingerprint=self.flight_fingerprint, call_relations=self.call_relations,
+            stop_scope=self.stop_scope,
         )
 
 
-def reset_source_health() -> None:
+def reset_run_state() -> None:
     global _BRIGHTDATA_NEXT_REQUEST_AT, _BRIGHTDATA_CONSECUTIVE_FAILURES
-    global _BRIGHTDATA_CIRCUIT_OPEN_UNTIL
+    global _BRIGHTDATA_CIRCUIT_OPEN_UNTIL, _BRIGHTDATA_INFLIGHT, _RUN_PAID_QUERY_LIMIT, _BRIGHTDATA_CIRCUIT_OBSERVATIONS
     with _SOURCE_HEALTH_LOCK:
         _SOURCE_HEALTH.clear()
     with _BRIGHTDATA_RATE_LOCK:
@@ -103,6 +141,13 @@ def reset_source_health() -> None:
     with _BRIGHTDATA_CIRCUIT_LOCK:
         _BRIGHTDATA_CONSECUTIVE_FAILURES = 0
         _BRIGHTDATA_CIRCUIT_OPEN_UNTIL = 0.0
+        _BRIGHTDATA_CIRCUIT_OBSERVATIONS = set()
+    _RUN_PAID_QUERY_LIMIT = None
+    _BRIGHTDATA_INFLIGHT = threading.BoundedSemaphore(max(1, int(config.BRIGHTDATA_MAX_INFLIGHT_QUERIES)))
+
+
+def reset_source_health() -> None:
+    reset_run_state()
 
 
 def reset_candidate_host_observations() -> None:
@@ -132,13 +177,113 @@ def _record_brightdata_result(success: bool) -> None:
             runtime.record("search.provider_circuit_opened")
 
 
+def _observe_brightdata_owner(*, flight_fingerprint: str, state: str, http_attempted: bool, logical_execution_id: str = "", execution_generation: int = 0) -> None:
+    if not http_attempted or str(state).upper() not in {"COMPLETED", "EMPTY", "FAILED"}:
+        return
+    run_id = runtime.durable_run_id()
+    key = (run_id, "brightdata", str(flight_fingerprint), int(execution_generation)) if run_id else ("volatile", "brightdata", str(logical_execution_id or uuid.uuid4().hex))
+    with _BRIGHTDATA_CIRCUIT_LOCK:
+        if key in _BRIGHTDATA_CIRCUIT_OBSERVATIONS:
+            return
+        _BRIGHTDATA_CIRCUIT_OBSERVATIONS.add(key)
+    _record_brightdata_result(str(state).upper() in {"COMPLETED", "EMPTY"})
+
+
 _RUN_PAID_QUERY_LIMIT: int | None = None
+
+
+def _flight_lease_seconds() -> float:
+    return max(30.0, float(config.BRIGHTDATA_TIMEOUT_SEC) + 10.0)
+
+
+def _flight_heartbeat_interval() -> float:
+    return min(5.0, max(0.1, _flight_lease_seconds() / 3.0))
+
+
+class FlightLeaseKeeper:
+    """Keep a durable flight leased through every wait and terminal commit."""
+
+    def __init__(self, *, run_id: str, provider: str, query_fingerprint: str, owner_token: str,
+                 lease_seconds: float, interval: float, waiter=None, clock=time.monotonic,
+                 now_fn=lambda: datetime.now(timezone.utc)) -> None:
+        self.run_id = run_id; self.provider = provider; self.query_fingerprint = query_fingerprint
+        self.owner_token = owner_token; self.lease_seconds = lease_seconds; self.interval = interval
+        self.waiter = waiter; self.clock = clock; self.now_fn = now_fn
+        self.stop_event = threading.Event(); self.errors: list[BaseException] = []
+        self.lock = threading.Lock(); self.thread: threading.Thread | None = None
+
+    def heartbeat(self) -> str:
+        return checkpoint.heartbeat_provider_query_flight(
+            run_id=self.run_id, provider=self.provider, query_fingerprint=self.query_fingerprint,
+            owner_token=self.owner_token, lease_seconds=self.lease_seconds, now_fn=self.now_fn,
+        )
+
+    def _pause(self, seconds: float) -> bool:
+        if self.waiter is None:
+            return self.stop_event.wait(seconds)
+        self.waiter(seconds)
+        return self.stop_event.is_set()
+
+    def _worker(self) -> None:
+        while not self._pause(self.interval):
+            try:
+                with self.lock:
+                    if self.stop_event.is_set():
+                        return
+                    self.heartbeat()
+            except BaseException as exc:
+                self.errors.append(exc); self.stop_event.set(); return
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._worker, name="provider-flight-lease", daemon=True)
+        self.thread.start()
+
+    def wait(self, seconds: float) -> None:
+        deadline = self.clock() + max(0.0, float(seconds))
+        while self.clock() < deadline:
+            quantum = min(self.interval, deadline - self.clock())
+            if self._pause(quantum):
+                break
+            with self.lock:
+                self.heartbeat()
+        self.raise_if_failed()
+
+    def terminalize(self, operation) -> None:
+        try:
+            with self.lock:
+                self.raise_if_failed()
+                self.heartbeat()
+                operation()
+        finally:
+            self.stop_event.set()
+            if self.thread is not None:
+                self.thread.join(timeout=max(1.0, self.interval + 0.1))
+        self.raise_if_failed()
+
+    def raise_if_failed(self) -> None:
+        if self.errors:
+            raise checkpoint.StateTransitionInvariant("singleflight heartbeat failed") from self.errors[0]
+
+
+def _paid_wait(seconds: float, lease_keeper: FlightLeaseKeeper | None = None) -> None:
+    (lease_keeper.wait if lease_keeper else time.sleep)(seconds)
 
 
 def configure_run_budget(company_count: int) -> int:
     global _RUN_PAID_QUERY_LIMIT
     _RUN_PAID_QUERY_LIMIT = run_budget.configure_run_budget(company_count)
     return _RUN_PAID_QUERY_LIMIT
+
+
+def configure_frozen_paid_query_limit(limit: int) -> int:
+    global _RUN_PAID_QUERY_LIMIT
+    frozen = int(limit)
+    if frozen < 0:
+        raise checkpoint.SchedulerInvariantError("frozen paid query limit cannot be negative")
+    if _RUN_PAID_QUERY_LIMIT is not None and _RUN_PAID_QUERY_LIMIT != frozen:
+        raise checkpoint.SchedulerInvariantError("frozen paid query limit mismatch")
+    _RUN_PAID_QUERY_LIMIT = frozen
+    return frozen
 
 
 def scale_paid_api_budgets(company_count: int) -> dict[str, int]:
@@ -338,18 +483,28 @@ def preflight_source_profiles(records: list[dict], *, run_id: str | None = None)
 
 
 def _retry_delay(response: requests.Response | None, attempt: int) -> float:
-    value = response.headers.get("Retry-After", "") if response is not None else ""
+    headers = {str(key).casefold(): str(value) for key, value in (response.headers.items() if response is not None else ())}
+    value = headers.get("retry-after", "")
+    maximum = float(config.MAX_RETRY_AFTER_SEC)
     if value:
         try:
-            return max(0.0, min(float(value), 120.0))
+            return max(0.0, min(float(value), maximum))
         except ValueError:
             try:
                 retry_at = parsedate_to_datetime(value)
                 if retry_at.tzinfo is None:
                     retry_at = retry_at.replace(tzinfo=timezone.utc)
-                return max(0.0, min((retry_at - datetime.now(timezone.utc)).total_seconds(), 120.0))
+                return max(0.0, min((retry_at - datetime.now(timezone.utc)).total_seconds(), maximum))
             except (TypeError, ValueError, OverflowError):
                 pass
+    period_ms = headers.get("x-brd-rate-limit-period-ms", "")
+    if period_ms:
+        try:
+            milliseconds = int(period_ms)
+            if milliseconds > 0:
+                return min(milliseconds / 1000.0, maximum)
+        except ValueError:
+            pass
     return min((attempt + 1) * config.RETRY_BACKOFF_BASE_SEC, 60.0)
 
 
@@ -362,13 +517,18 @@ def _canonical_site_url(raw_url: str) -> str:
 
 
 def _ddgs_text(query: str) -> SearchResults:
-    if not runtime.reserve_search_query(config.SEARCH_HTTP_REQUEST_BUDGET, bucket=runtime.search_bucket()):
-        LOGGER.warning("Free search query budget exhausted: %s", query)
-        raise SearchBudgetExhausted("Free search query budget exhausted")
+    bucket = runtime.search_bucket() or "discovery"
+    fingerprint = hashlib.sha256(" ".join(str(query).split()).casefold().encode("utf-8")).hexdigest()
+    logical = runtime.reserve_free_logical_query(bucket, fingerprint)
+    if not logical.accepted:
+        return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=logical.reason, stop_scope="FREE_CURRENT_BUCKET")
     had_non_error_response = False
     last_hard_error: Exception | None = None
 
     for backend in PREFERRED_BACKENDS + FALLBACK_BACKENDS:
+        physical = runtime.reserve_free_physical_attempt(bucket, fingerprint, backend)
+        if not physical.accepted:
+            return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=physical.reason, stop_scope="FREE_CURRENT_BUCKET")
         try:
             # DDGS may make a separate physical request per backend.  Each
             # attempt gets its own global limiter slot even though it consumes
@@ -376,25 +536,29 @@ def _ddgs_text(query: str) -> SearchResults:
             runtime.wait_for_request_slot()
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
+            runtime.complete_free_physical_attempt(physical.attempt_id, True)
             had_non_error_response = True
-            if results:
-                return SearchResults(results, "live", "ddgs", result_state="COMPLETED", reason=f"backend:{backend}")
-            LOGGER.debug("DDGS backend '%s' returned 0 results for '%s'", backend, query)
+            return SearchResults(results, "live", "ddgs", result_state="COMPLETED" if results else "EMPTY", reason=f"backend:{backend}")
         except DDGSException as exc:
             message = str(exc).lower()
             if "no results" in message:
+                runtime.complete_free_physical_attempt(physical.attempt_id, True)
                 had_non_error_response = True
                 LOGGER.debug("DDGS backend '%s' no results for '%s'", backend, query)
-                continue
+                return SearchResults([], "live", "ddgs", result_state="EMPTY", reason=f"backend:{backend}:empty")
+            runtime.complete_free_physical_attempt(physical.attempt_id, False, type(exc).__name__)
             LOGGER.debug("DDGS backend '%s' error for '%s': %s", backend, query, exc)
             last_hard_error = exc
         except Exception as exc:
+            if isinstance(exc, checkpoint.SchedulerInvariantError):
+                raise
+            runtime.complete_free_physical_attempt(physical.attempt_id, False, type(exc).__name__)
             LOGGER.debug("DDGS backend '%s' failed for '%s': %s", backend, query, exc)
             last_hard_error = exc
 
     if last_hard_error and not had_non_error_response:
-        raise SearchBackendError(f"All DDGS backends failed for '{query}': {last_hard_error}")
-    return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="all_backends_empty")
+        return SearchResults([], "error", "ddgs", result_state="FAILED", reason=f"all_backends_failed:{type(last_hard_error).__name__}")
+    return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="empty_response")
 
 
 def _decode_brightdata_response(response: requests.Response) -> dict:
@@ -404,30 +568,58 @@ def _decode_brightdata_response(response: requests.Response) -> dict:
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError as exc:
-            preview = response.text[:500].replace("\n", " ")
-            raise BrightDataSearchError(f"Bright Data returned non-JSON body: {preview}") from exc
+            raise BrightDataSearchError("Bright Data returned non-JSON body") from exc
 
     if isinstance(data, dict) and isinstance(data.get("body"), str):
         try:
             data = json.loads(data["body"])
         except json.JSONDecodeError as exc:
-            preview = data["body"][:500].replace("\n", " ")
-            raise BrightDataSearchError(f"Bright Data returned non-JSON body: {preview}") from exc
+            raise BrightDataSearchError("Bright Data returned non-JSON wrapped body") from exc
     if not isinstance(data, dict):
         raise BrightDataSearchError(f"Bright Data returned unexpected payload type: {type(data).__name__}")
     return data
 
 
-def _brightdata_post(url: str, *, _attempt_ordinal: int = 1, **kwargs) -> requests.Response:
+def _brightdata_header_error(response: requests.Response) -> tuple[bool, str, str, bool]:
+    headers = {str(key).casefold(): str(value) for key, value in response.headers.items()}
+    code = str(headers.get("x-brd-err-code") or headers.get("x-brd-error-code") or "").strip()
+    message = str(headers.get("x-brd-error") or headers.get("x-brd-err-msg") or "").strip()
+    proxy_status = str(headers.get("proxy-status") or "").strip()
+    proxy_fields = {key.casefold(): value.strip(' "') for key, value in re.findall(r"(?:^|;)\s*([A-Za-z-]+)=([^;]+)", proxy_status)}
+    received_status = proxy_fields.get("received-status", "")
+    proxy_error = bool(proxy_fields.get("error") or proxy_fields.get("details") or received_status and not received_status.startswith("2") or re.search(r"(?:error|denied|timeout|refused|rate.?limit|unavailable|failed)", proxy_status, re.IGNORECASE))
+    has_error = bool(code or message or proxy_error)
+    safe_code = re.sub(r"[^A-Za-z0-9_.:-]", "_", code)[:80]
+    safe_message = re.sub(r"[\r\n\t]+", " ", message or proxy_status).strip()[:300]
+    combined = f"{safe_code} {safe_message}".casefold()
+    retryable = int(response.status_code) == 429 or int(response.status_code) >= 500 or any(token in combined for token in ("rate", "timeout", "tempor", "unavailable", "capacity"))
+    return has_error, safe_code, safe_message, retryable
+
+
+def _definite_pre_send_error(exc: BaseException) -> bool:
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    message = str(exc).casefold()
+    return isinstance(exc, requests.ConnectionError) and any(token in message for token in ("name resolution", "dns", "failed to establish", "connection refused", "connect timeout", "tls handshake"))
+
+
+def _brightdata_post(url: str, *, _attempt_ordinal: int = 1, _flight: dict | None = None, _lease_keeper: FlightLeaseKeeper | None = None, **kwargs) -> tuple[requests.Response, runtime.Reservation]:
     request_body = {"url": url, "json": kwargs.get("json", {}), "ordinal": int(_attempt_ordinal)}
-    reservation = runtime.reserve_api("brightdata", operation=f"search.attempt_{_attempt_ordinal}", request_fingerprint=runtime.request_fingerprint("brightdata", "search", request_body))
+    reservation = runtime.reserve_api(
+        "brightdata", operation=f"search.attempt_{_attempt_ordinal}",
+        request_fingerprint=runtime.request_fingerprint("brightdata", "search", request_body),
+        flight_fingerprint=str((_flight or {}).get("fingerprint") or ""),
+        execution_generation=int((_flight or {}).get("execution_generation") or 0),
+    )
     if not reservation:
-        rejected = runtime.rejected_provider_result(reservation)
-        if "duplicate" in str(reservation.reason or ""):
-            raise BrightDataProviderRejected(rejected)
-        error = SearchBudgetExhausted(f"Bright Data request rejected: {reservation.reason or 'budget_exhausted'}")
-        error.result_reason = reservation.reason or "budget_exhausted"
-        raise error
+        raise BrightDataProviderRejected(runtime.rejected_provider_result(reservation))
+    runtime.start_api(reservation)
+    if _flight:
+        checkpoint.bind_provider_query_flight_call(
+            run_id=_flight["run_id"], provider="brightdata",
+            query_fingerprint=_flight["fingerprint"], owner_token=_flight["owner_token"],
+            provider_call_id=reservation.call_id,
+        )
     global _BRIGHTDATA_NEXT_REQUEST_AT
     requests_per_minute = max(config.BRIGHTDATA_REQUESTS_PER_MINUTE, 0.0)
     if requests_per_minute:
@@ -439,26 +631,93 @@ def _brightdata_post(url: str, *, _attempt_ordinal: int = 1, **kwargs) -> reques
                 now, _BRIGHTDATA_NEXT_REQUEST_AT,
             ) + interval
         if wait:
-            time.sleep(wait)
-    runtime.wait_for_request_slot()
+            _paid_wait(wait, _lease_keeper)
+    runtime.wait_for_request_slot(waiter=lambda seconds: _paid_wait(seconds, _lease_keeper))
+    runtime.mark_api_http_started(reservation, _attempt_ordinal, _flight["fingerprint"] if _flight else "")
     try:
-        response = requests.post(url, timeout=config.BRIGHTDATA_TIMEOUT_SEC, **kwargs)
-    except Exception as exc:
-        state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+        envelope = runtime.transport_envelope(
+            reservation, endpoint=url, attempt_ordinal=_attempt_ordinal,
+            flight_fingerprint=_flight["fingerprint"] if _flight else "",
+            request_shape={"method": "POST", "json": kwargs.get("json", {})},
+            timeout=config.BRIGHTDATA_TIMEOUT_SEC,
+        )
+        response = runtime.invoke_paid_transport(
+            envelope, lambda: requests.post(url, timeout=config.BRIGHTDATA_TIMEOUT_SEC, **kwargs)
+        )
+    except requests.RequestException as exc:
+        state = "FAILED" if _definite_pre_send_error(exc) else "UNKNOWN"
         runtime.complete_api(reservation, state)
         exc.provider_call_id = getattr(reservation, "call_id", "")
         exc.request_fingerprint = runtime.request_fingerprint("brightdata", "search", request_body)
         raise
-    runtime.complete_api(reservation, "FAILED" if response.status_code >= 400 else "DONE")
     response.provider_call_id = getattr(reservation, "call_id", "")
     response.request_fingerprint = runtime.request_fingerprint("brightdata", "search", request_body)
-    return response
+    return response, reservation
 
 
-def _brightdata_text(query: str) -> list[dict]:
+def _brightdata_text(query: str) -> SearchResults:
     if not config.BRIGHTDATA_API_KEY:
         raise BrightDataSearchError("BRIGHTDATA_API_KEY is not set")
     runtime.record("api.brightdata.queries")
+
+    flight_payload = {
+        "provider": "brightdata", "endpoint": config.BRIGHTDATA_ENDPOINT,
+        "zone": config.BRIGHTDATA_ZONE, "country": config.BRIGHTDATA_COUNTRY,
+        "google_domain": config.BRIGHTDATA_GOOGLE_DOMAIN,
+        "gl": config.BRIGHTDATA_GOOGLE_GL, "hl": config.BRIGHTDATA_GOOGLE_HL,
+        "query": " ".join(str(query).split()).casefold(),
+        "cache_schema_version": config.CACHE_SCHEMA_VERSION,
+    }
+    flight_fingerprint = hashlib.sha256(json.dumps(flight_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+    flight_owner = uuid.uuid4().hex
+    logical_execution_id = uuid.uuid4().hex
+    flight_leader = False
+    flight_terminalized = False
+    lease_keeper: FlightLeaseKeeper | None = None
+    execution_generation = 0
+    http_attempted = False
+    durable_run_id = runtime.durable_run_id()
+    if durable_run_id:
+        flight = checkpoint.claim_provider_query_flight(run_id=durable_run_id, provider="brightdata", query_fingerprint=flight_fingerprint, owner_token=flight_owner, lease_seconds=_flight_lease_seconds())
+        flight_leader = bool(flight["leader"])
+        execution_generation = int(flight.get("execution_generation", 1))
+        if not flight_leader:
+            inherited = checkpoint.wait_provider_query_flight(run_id=durable_run_id, provider="brightdata", query_fingerprint=flight_fingerprint, owner_token=flight_owner)
+            if inherited.get("leader"):
+                flight_leader = True
+                execution_generation = int(inherited.get("execution_generation", execution_generation or 1))
+                inherited = None
+        if not flight_leader:
+            state = str(inherited["state"])
+            if state == "DONE" and inherited.get("result"):
+                result = _coerce_search_results(inherited["result"], cache_status="singleflight_inherited", provider="brightdata")
+                result.result_reason = "singleflight_inherited_done"
+                result.inherited_call_ids = tuple(inherited.get("call_ids") or ())
+                result.origin = SearchOrigin.SINGLEFLIGHT_FOLLOWER
+                result.flight_fingerprint = flight_fingerprint
+                result.call_ids = tuple(inherited.get("call_ids") or ())
+                result.call_relations = {call_id: "INHERITED" for call_id in result.call_ids}
+                runtime.record_provider_outcome(state=result.result_state, reason=result.result_reason, call_ids=result.call_ids, provider="brightdata", origin=result.origin.value, flight_fingerprint=flight_fingerprint, call_relations=result.call_relations)
+                return result
+            mapped = "FAILED" if state == "FAILED" else "UNKNOWN"
+            inherited_ids = tuple(inherited.get("call_ids") or ())
+            result = SearchResults([], "singleflight_inherited", "brightdata", result_state=mapped, reason=f"singleflight_inherited_{state.casefold()}", call_ids=inherited_ids, stop_scope="MANUAL_AUTHORIZATION" if mapped == "UNKNOWN" else "PAID_PROVIDER", origin=SearchOrigin.SINGLEFLIGHT_FOLLOWER, flight_fingerprint=flight_fingerprint, call_relations={call_id: "INHERITED" for call_id in inherited_ids})
+            result.inherited_call_ids = tuple(inherited.get("call_ids") or ())
+            return result
+        lease_keeper = FlightLeaseKeeper(run_id=durable_run_id, provider="brightdata", query_fingerprint=flight_fingerprint, owner_token=flight_owner, lease_seconds=_flight_lease_seconds(), interval=_flight_heartbeat_interval())
+        lease_keeper.start()
+
+    def finish(result: SearchResults) -> SearchResults:
+        result.origin = SearchOrigin.LIVE_OWNER
+        result.flight_fingerprint = flight_fingerprint
+        result.call_relations = {call_id: "OWNER" for call_id in result.call_ids if call_id in call_ids}
+        if durable_run_id and flight_leader and not flight_terminalized:
+            flight_state = "DONE" if result.result_state in {"COMPLETED", "EMPTY"} else "UNKNOWN" if result.result_state == "UNKNOWN" else "FAILED"
+            operation = lambda: checkpoint.finish_provider_query_flight(run_id=durable_run_id, provider="brightdata", query_fingerprint=flight_fingerprint, owner_token=flight_owner, state=flight_state, result=_cache_search_value(result), call_ids=list(call_ids))
+            lease_keeper.terminalize(operation)
+        _observe_brightdata_owner(flight_fingerprint=flight_fingerprint, state=result.result_state, http_attempted=http_attempted, logical_execution_id=logical_execution_id, execution_generation=execution_generation)
+        runtime.record_provider_outcome(state=result.result_state, reason=result.result_reason, call_ids=result.call_ids, provider="brightdata", origin=result.origin.value, flight_fingerprint=flight_fingerprint, call_relations=result.call_relations, stop_scope=result.stop_scope)
+        return result
 
     search_url = (
         f"https://{config.BRIGHTDATA_GOOGLE_DOMAIN}/search"
@@ -476,122 +735,89 @@ def _brightdata_text(query: str) -> list[dict]:
         "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
         "Content-Type": "application/json",
     }
-    response = None
     call_ids: list[str] = []
-    last_error: requests.RequestException | None = None
-    for attempt in range(config.MAX_RETRIES + 2):
+    max_attempts = 1 + max(0, int(config.MAX_RETRIES))
+    for attempt in range(max_attempts):
         try:
-            response = _brightdata_post(
+            response, reservation = _brightdata_post(
                 config.BRIGHTDATA_ENDPOINT,
                 _attempt_ordinal=attempt + 1,
+                _flight={"run_id": durable_run_id, "fingerprint": flight_fingerprint, "owner_token": flight_owner, "execution_generation": execution_generation} if durable_run_id and flight_leader else None,
+                _lease_keeper=lease_keeper,
                 json=payload,
                 headers=headers,
             )
+            http_attempted = True
             if getattr(response, "provider_call_id", ""):
                 call_ids.append(response.provider_call_id)
-            break
         except BrightDataProviderRejected as exc:
             rejected = exc.provider_result
-            return SearchResults([], "live", "brightdata", result_state=rejected.result_state, reason=rejected.result_reason, call_ids=rejected.call_ids)
+            all_call_ids = tuple(dict.fromkeys((*call_ids, *rejected.call_ids)))
+            return finish(SearchResults([], "live", "brightdata", result_state=rejected.result_state, reason=rejected.result_reason, call_ids=all_call_ids, stop_scope="PAID_PROVIDER"))
         except requests.RequestException as exc:
-            last_error = exc
-            if runtime.is_unknown_transport_error(exc):
-                raise BrightDataSearchError(f"Bright Data physical attempt is UNKNOWN: {exc}") from exc
-            if attempt >= config.MAX_RETRIES + 1:
-                raise BrightDataSearchError(f"Bright Data request timed out/failed after retries: {exc}") from exc
-            time.sleep(_retry_delay(None, attempt))
-        except Exception as exc:
-            raise BrightDataSearchError(
-                f"Bright Data physical attempt is {'UNKNOWN' if runtime.is_unknown_transport_error(exc) else 'FAILED'}: {exc}"
-            ) from exc
-    if response is None:
-        raise BrightDataSearchError(f"Bright Data request failed: {last_error}")
-    if response.status_code == 401:
-        raise BrightDataSearchError("Bright Data authentication failed; check BRIGHTDATA_API_KEY")
-    if response.status_code in {429, 500, 502, 503, 504}:
-        last_detail = response.text[:500].replace("\n", " ")
-        for attempt in range(config.MAX_RETRIES + 1):
-            time.sleep(_retry_delay(response, attempt))
+            http_attempted = True
+            call_id = str(getattr(exc, "provider_call_id", ""))
+            if call_id:
+                call_ids.append(call_id)
+            if not _definite_pre_send_error(exc):
+                return finish(SearchResults([], "error", "brightdata", result_state="UNKNOWN", reason=f"uncertain_transport:{type(exc).__name__}", call_ids=tuple(call_ids), stop_scope="MANUAL_AUTHORIZATION"))
+            if attempt + 1 >= max_attempts:
+                return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason=f"transport:{type(exc).__name__}", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
             runtime.record("api.brightdata.retries")
-            response = _brightdata_post(
-                config.BRIGHTDATA_ENDPOINT,
-                _attempt_ordinal=attempt + 2,
-                json=payload,
-                headers=headers,
-            )
-            if getattr(response, "provider_call_id", ""):
-                call_ids.append(response.provider_call_id)
-            if response.status_code not in {429, 500, 502, 503, 504}:
-                break
-            last_detail = response.text[:500].replace("\n", " ")
-        if response.status_code in {429, 500, 502, 503, 504}:
-            raise BrightDataSearchError(
-                f"Bright Data transient failure after retries: HTTP {response.status_code}; "
-                f"zone={config.BRIGHTDATA_ZONE!r}; response={last_detail}"
-            )
-    if response.status_code >= 400:
-        detail = response.text[:1000].replace("\n", " ")
-        raise BrightDataSearchError(
-            f"Bright Data request failed: HTTP {response.status_code}; "
-            f"zone={config.BRIGHTDATA_ZONE!r}; url={search_url!r}; response={detail}"
-        )
-    decode_error: BrightDataSearchError | None = None
-    data = None
-    for parse_attempt in range(config.BRIGHTDATA_MAX_DECODE_RETRIES + 1):
+            _paid_wait(_retry_delay(None, attempt), lease_keeper)
+            continue
+        status = int(response.status_code)
+        header_error, header_code, header_message, header_retryable = _brightdata_header_error(response)
+        if header_error:
+            runtime.complete_api(reservation, "FAILED", f"brightdata_header:{header_code}:{header_message}"[:300])
+            if header_retryable and attempt + 1 < max_attempts:
+                runtime.record("api.brightdata.retries")
+                _paid_wait(min(_retry_delay(response, attempt), float(config.MAX_RETRY_AFTER_SEC)), lease_keeper)
+                continue
+            reason = f"provider_header_error:{header_code or 'unspecified'}:{header_message}"[:300]
+            return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason=reason, call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
+        if status >= 400:
+            runtime.complete_api(reservation, "FAILED")
+            retryable = status == 429 or 500 <= status <= 599
+            if retryable and attempt + 1 < max_attempts:
+                runtime.record("api.brightdata.retries")
+                _paid_wait(min(_retry_delay(response, attempt), float(config.MAX_RETRY_AFTER_SEC)), lease_keeper)
+                continue
+            return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason=f"http_{status}", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
         try:
             data = _decode_brightdata_response(response)
-            break
-        except BrightDataSearchError as exc:
-            decode_error = exc
-            if parse_attempt >= config.BRIGHTDATA_MAX_DECODE_RETRIES:
-                raise
-            retry_delay = _retry_delay(response, parse_attempt)
-            if not response.text.strip():
-                retry_delay = max(
-                    retry_delay, config.BRIGHTDATA_EMPTY_BODY_RETRY_SEC,
-                )
-                runtime.record("api.brightdata.empty_body_retries")
-            cooldown = re.search(
-                r"minimum\s+of\s+(\d+(?:\.\d+)?)\s+seconds?",
-                str(exc),
-                re.IGNORECASE,
-            )
-            if cooldown:
-                retry_delay = max(
-                    retry_delay,
-                    min(float(cooldown.group(1)), config.MAX_RETRY_AFTER_SEC),
-                )
-                runtime.record("api.brightdata.cooldown_retries")
-            time.sleep(retry_delay)
-            runtime.record("api.brightdata.retries")
-            response = _brightdata_post(
-                config.BRIGHTDATA_ENDPOINT,
-                _attempt_ordinal=config.MAX_RETRIES + 3 + parse_attempt,
-                json=payload,
-                headers=headers,
-            )
-            if response.status_code >= 400:
-                detail = response.text[:500].replace("\n", " ")
-                raise BrightDataSearchError(f"Bright Data retry failed: HTTP {response.status_code}; response={detail}")
-    if data is None:
-        raise decode_error or BrightDataSearchError("Bright Data response could not be decoded")
-    if os.getenv("BRIGHTDATA_DEBUG"):
-        LOGGER.warning("Bright Data response keys: %s", sorted(data.keys()))
-        LOGGER.warning("Bright Data response preview: %s", str(data)[:2000])
-    organic = data.get("organic") or data.get("organic_results") or data.get("results") or []
-    results = []
-    for item in organic[: config.SEARCH_RESULTS_PER_QUERY]:
-        link = item.get("link") or item.get("url") or ""
-        if not link:
-            continue
-        results.append(
-            {
-                "href": link,
-                "title": item.get("title", ""),
-                "body": item.get("description", "") or item.get("snippet", ""),
-            }
-        )
-    return SearchResults(results, "live", "brightdata", result_state="COMPLETED" if results else "EMPTY", reason="results" if results else "empty_response", call_ids=tuple(call_ids))
+        except BrightDataSearchError:
+            runtime.complete_api(reservation, "FAILED")
+            return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason="invalid_json_or_body", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
+        provider_status = str(data.get("status", "")).casefold()
+        has_error = bool(data.get("error") or data.get("errors")) or provider_status in {"error", "failed", "failure"}
+        organic_key = next((key for key in ("organic", "organic_results", "results") if key in data), None)
+        valid_general = isinstance(data.get("general"), dict) and isinstance(data.get("input"), (dict, str))
+        organic = data.get(organic_key) if organic_key else []
+        if has_error or (organic_key is not None and not isinstance(organic, list)) or (organic_key is None and not valid_general):
+            runtime.complete_api(reservation, "FAILED")
+            return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason="provider_error_or_invalid_schema", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
+        results = []
+        for item in organic[: config.SEARCH_RESULTS_PER_QUERY]:
+            if not isinstance(item, dict):
+                runtime.complete_api(reservation, "FAILED")
+                return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason="malformed_organic_row", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
+            for field in ("link", "url", "title", "description", "snippet"):
+                if field in item and not isinstance(item.get(field), str):
+                    runtime.complete_api(reservation, "FAILED")
+                    return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason=f"malformed_organic_{field}", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
+            link = item.get("link") or item.get("url") or ""
+            if link:
+                results.append({"href": link, "title": item.get("title", ""), "body": item.get("description", "") or item.get("snippet", "")})
+        semantic_result = SearchResults(results, "live", "brightdata", result_state="COMPLETED" if results else "EMPTY", reason="results" if results else "empty_response", call_ids=tuple(call_ids))
+        if durable_run_id and flight_leader:
+            operation = lambda: checkpoint.complete_provider_call_and_flight_success(run_id=durable_run_id, provider="brightdata", query_fingerprint=flight_fingerprint, owner_token=flight_owner, provider_call_id=reservation.call_id, result=_cache_search_value(semantic_result), call_ids=call_ids)
+            lease_keeper.terminalize(operation)
+            flight_terminalized = True
+        else:
+            runtime.complete_api(reservation, "DONE")
+        return finish(semantic_result)
+    return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason="attempt_cap_exhausted", call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))
 
 
 def _search_text_live(query: str) -> SearchResults:
@@ -622,13 +848,25 @@ def _search_cache_key(query: str, provider: str | None = None) -> str:
     )
 
 
-def _coerce_search_results(value, *, cache_status: str, provider: str) -> SearchResults:
+def _coerce_search_results(value, *, cache_status: str, provider: str, origin: SearchOrigin | None = None) -> SearchResults:
     if isinstance(value, SearchResults):
         return SearchResults(
             value, cache_status, value.provider or provider,
             result_state=value.result_state,
             reason=value.result_reason,
             call_ids=value.call_ids,
+            primary_provider=value.primary_provider,
+            primary_result_state=value.primary_result_state,
+            primary_result_reason=value.primary_result_reason,
+            primary_call_ids=value.primary_call_ids,
+            fallback_provider=value.fallback_provider,
+            fallback_result_state=value.fallback_result_state,
+            fallback_result_reason=value.fallback_result_reason,
+            fallback_call_ids=value.fallback_call_ids,
+            stop_scope=value.stop_scope,
+            origin=origin or value.origin,
+            flight_fingerprint=value.flight_fingerprint,
+            call_relations=value.call_relations,
         )
     if isinstance(value, dict) and value.get("__search_result_state"):
         return SearchResults(
@@ -637,6 +875,18 @@ def _coerce_search_results(value, *, cache_status: str, provider: str) -> Search
             result_state=str(value.get("__search_result_state") or "UNKNOWN"),
             reason=str(value.get("result_reason") or ""),
             call_ids=tuple(value.get("call_ids") or ()),
+            primary_provider=str(value.get("primary_provider") or ""),
+            primary_result_state=str(value.get("primary_result_state") or ""),
+            primary_result_reason=str(value.get("primary_result_reason") or ""),
+            primary_call_ids=tuple(value.get("primary_call_ids") or ()),
+            fallback_provider=str(value.get("fallback_provider") or ""),
+            fallback_result_state=str(value.get("fallback_result_state") or ""),
+            fallback_result_reason=str(value.get("fallback_result_reason") or ""),
+            fallback_call_ids=tuple(value.get("fallback_call_ids") or ()),
+            stop_scope=str(value.get("stop_scope") or "NONE"),
+            origin=origin or str(value.get("origin") or ("REPLAY" if "replay" in cache_status else "CROSS_RUN_CACHE")),
+            flight_fingerprint=str(value.get("flight_fingerprint") or ""),
+            call_relations=dict(value.get("call_relations") or {}),
         )
     return SearchResults(
         value or [], cache_status, provider,
@@ -652,6 +902,18 @@ def _cache_search_value(results: SearchResults) -> dict:
         "provider": results.provider,
         "result_reason": results.result_reason,
         "call_ids": list(results.call_ids),
+        "primary_provider": results.primary_provider,
+        "primary_result_state": results.primary_result_state,
+        "primary_result_reason": results.primary_result_reason,
+        "primary_call_ids": list(results.primary_call_ids),
+        "fallback_provider": results.fallback_provider,
+        "fallback_result_state": results.fallback_result_state,
+        "fallback_result_reason": results.fallback_result_reason,
+        "fallback_call_ids": list(results.fallback_call_ids),
+        "stop_scope": results.stop_scope.value,
+        "origin": results.origin.value,
+        "flight_fingerprint": results.flight_fingerprint,
+        "call_relations": results.call_relations,
     }
 
 
@@ -659,6 +921,7 @@ def _search_text(query: str) -> SearchResults:
     """Search live or replay a provider response from the persistent cache."""
     mode = config.SEARCH_CACHE_MODE
     cache_key = _search_cache_key(query)
+    cached_hint: list = []
     if mode in {"use", "replay"}:
         cached = cache_store.load(
             config.SEARCH_CACHE_DIR,
@@ -675,7 +938,11 @@ def _search_text(query: str) -> SearchResults:
                     return SearchResults([], "replay_legacy_empty", config.SEARCH_PROVIDER, result_state="UNKNOWN", reason="unknown_legacy_empty")
                 cached = None
             else:
-                return _coerce_search_results(cached, cache_status="cache_hit", provider=config.SEARCH_PROVIDER)
+                if mode == "replay":
+                    return _coerce_search_results(cached, cache_status="cache_hit", provider=config.SEARCH_PROVIDER, origin=SearchOrigin.REPLAY)
+                if runtime.phase() != "PAID":
+                    return _coerce_search_results(cached, cache_status="cache_hit", provider=config.SEARCH_PROVIDER, origin=SearchOrigin.CROSS_RUN_CACHE)
+                cached_hint = list(cached.get("values", []) if isinstance(cached, dict) else cached)
         if mode == "replay":
             # Offline reranking must not depend on which provider is enabled
             # in the interactive prompt. This fallback never runs in a mode
@@ -698,11 +965,18 @@ def _search_text(query: str) -> SearchResults:
                     )
                     if isinstance(cached, list) and not cached:
                         return SearchResults([], "replay_legacy_empty", provider, result_state="UNKNOWN", reason="unknown_legacy_empty")
-                    return _coerce_search_results(cached, cache_status="replay_fallback_hit", provider=provider)
+                    return _coerce_search_results(cached, cache_status="replay_fallback_hit", provider=provider, origin=SearchOrigin.REPLAY)
             LOGGER.warning("Search replay cache miss: %s", query)
             return SearchResults([], "replay_miss", config.SEARCH_PROVIDER, result_state="UNKNOWN", reason="replay_miss")
 
     results = _coerce_search_results(_search_text_live(query), cache_status="live", provider=config.SEARCH_PROVIDER)
+    if cached_hint:
+        seen = {str(item.get("href") or item.get("url") or "") for item in results if isinstance(item, dict)}
+        for item in cached_hint:
+            key = str(item.get("href") or item.get("url") or "") if isinstance(item, dict) else repr(item)
+            if key not in seen:
+                results.append(item)
+                seen.add(key)
     if mode in {"use", "refresh"} and results.result_state in {"COMPLETED", "EMPTY"}:
         cache_store.save(
             config.SEARCH_CACHE_DIR,
@@ -714,45 +988,57 @@ def _search_text(query: str) -> SearchResults:
     return results
 
 
-def _safe_search_text(query: str) -> list[dict]:
+def _with_fallback_audit(primary: SearchResults, fallback: SearchResults | None, *, blocked: bool = False) -> SearchResults:
+    return SearchResults(
+        list(fallback or ()), getattr(fallback, "cache_status", primary.cache_status),
+        getattr(fallback, "provider", "ddgs") if fallback is not None else primary.provider, result_state=primary.result_state,
+        reason=primary.result_reason, call_ids=primary.call_ids,
+        primary_provider=primary.provider, primary_result_state=primary.result_state,
+        primary_result_reason=primary.result_reason, primary_call_ids=primary.call_ids,
+        fallback_provider="ddgs", fallback_result_state="BLOCKED_BUDGET" if blocked else getattr(fallback, "result_state", ""),
+        fallback_result_reason="free_fallback_capacity_exhausted" if blocked else getattr(fallback, "result_reason", ""),
+        fallback_call_ids=getattr(fallback, "call_ids", ()),
+        stop_scope=primary.stop_scope,
+        origin=primary.origin,
+        flight_fingerprint=primary.flight_fingerprint,
+        call_relations=primary.call_relations,
+    )
+
+
+def _safe_search_text(query: str) -> SearchResults:
     """A single provider timeout must not discard every result for a firm."""
     if config.SEARCH_PROVIDER == "brightdata" and _brightdata_circuit_open():
-        try:
-            fallback = _ddgs_text(query)
-            runtime.record(
-                "search.circuit_fallback.success" if fallback
-                else "search.circuit_fallback.empty"
-            )
-            return _coerce_search_results(fallback, cache_status="circuit_fallback", provider="ddgs")
-        except SearchBudgetExhausted:
-            runtime.record("search.circuit_fallback.budget_blocked")
-            return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="fallback_budget_exhausted")
+        primary = SearchResults([], "circuit_open", "brightdata", result_state="FAILED", reason="circuit_open", stop_scope="PAID_PROVIDER", origin=SearchOrigin.CIRCUIT_BLOCK)
+        if not runtime.free_search_capacity(runtime.search_bucket()):
+            return _with_fallback_audit(primary, None, blocked=True)
+        return _with_fallback_audit(primary, _ddgs_text(query))
     try:
         results = _search_text(query)
-        if config.SEARCH_PROVIDER == "brightdata" and getattr(results, "provider", "") == "brightdata" and getattr(results, "result_state", "") in {"COMPLETED", "EMPTY"}:
-            _record_brightdata_result(True)
+        if config.SEARCH_PROVIDER == "brightdata" and results.result_state == "UNKNOWN":
+            return results
+        if config.SEARCH_PROVIDER == "brightdata" and results.result_state in {"FAILED", "UNKNOWN", "BLOCKED_BUDGET"}:
+            if not runtime.free_search_capacity(runtime.search_bucket()):
+                return _with_fallback_audit(results, None, blocked=True)
+            return _with_fallback_audit(results, _ddgs_text(query))
         return results
     except Exception as exc:
-        LOGGER.warning("Search query failed; continuing with remaining queries: %s (%s)", query, exc)
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
+        if not isinstance(exc, SearchBudgetExhausted):
+            LOGGER.warning("Search query failed; continuing with remaining queries: %s (%s)", query, exc)
         if not isinstance(exc, SearchBudgetExhausted):
             runtime.record("search.provider_failures")
         if config.SEARCH_PROVIDER == "brightdata":
-            if not isinstance(exc, SearchBudgetExhausted):
-                _record_brightdata_result(False)
+            state = "BLOCKED_BUDGET" if isinstance(exc, SearchBudgetExhausted) else "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
+            primary = SearchResults([], "budget_blocked" if state == "BLOCKED_BUDGET" else "error", "brightdata", result_state=state, reason=str(getattr(exc, "result_reason", type(exc).__name__)), stop_scope="MANUAL_AUTHORIZATION" if state == "UNKNOWN" else "PAID_PROVIDER")
+            if not runtime.free_search_capacity(runtime.search_bucket()):
+                return _with_fallback_audit(primary, None, blocked=True)
             try:
-                fallback = _ddgs_text(query)
-                runtime.record(
-                    "search.fallback.success" if fallback
-                    else "search.fallback.empty"
-                )
-                return _coerce_search_results(fallback, cache_status="live_fallback", provider="ddgs")
-            except SearchBudgetExhausted as fallback_exc:
-                LOGGER.warning("Free search fallback budget exhausted: %s (%s)", query, fallback_exc)
-                runtime.record("search.fallback.budget_blocked")
-                return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason="fallback_budget_exhausted")
+                return _with_fallback_audit(primary, _ddgs_text(query))
             except Exception as fallback_exc:
-                LOGGER.warning("Free search fallback also failed: %s (%s)", query, fallback_exc)
-                runtime.record("search.fallback.error")
+                if isinstance(fallback_exc, checkpoint.SchedulerInvariantError):
+                    raise
+                return _with_fallback_audit(primary, None)
         if isinstance(exc, SearchBudgetExhausted):
             return SearchResults([], "budget_blocked", config.SEARCH_PROVIDER, result_state="BLOCKED_BUDGET", reason=str(getattr(exc, "result_reason", "budget_exhausted")))
         state = "UNKNOWN" if isinstance(exc, (TimeoutError, requests.Timeout)) or "timeout" in type(exc).__name__.casefold() or getattr(exc, "result_state", "") == "UNKNOWN" else "FAILED"
@@ -1204,6 +1490,10 @@ def _domain_has_address(domain: str) -> bool:
 
 
 def _primary_queries(company_name: str, metadata: dict | None) -> list[str]:
+    if runtime.phase() == "PAID" and runtime.durable_run_id() and runtime.current_item_index() >= 0:
+        frozen = checkpoint.load_paid_query_plan(runtime.durable_run_id(), runtime.current_item_index())
+        if frozen:
+            return frozen
     return discovery_rules.primary_queries(
         company_name,
         metadata,
@@ -1801,6 +2091,10 @@ def find_profile_candidates(
         sorted(candidates_by_domain.values(), key=_candidate_rank_key, reverse=True),
         trace,
         source_health,
+        stop_scope=runtime.item_stop_state().scope,
+        stopped_provider=runtime.item_stop_state().provider,
+        stop_reason=runtime.item_stop_state().reason,
+        stop_call_ids=runtime.item_stop_state().call_ids,
     )
 
 
@@ -1931,6 +2225,9 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     bridge_sources: dict[str, dict] = {}
     expanded_bridge_urls: set[str] = set()
     executed_queries: set[str] = set()
+    blocked_buckets: set[str] = set()
+    paid_provider_stopped = False
+    manual_authorization_stopped = False
     related_name_hints: list[str] = []
     full_identity_query_with_results = False
 
@@ -1955,15 +2252,29 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         phase: str,
         evidence_gaps: set[str] | None = None,
     ) -> list[dict]:
+        nonlocal paid_provider_stopped, manual_authorization_stopped
+        bucket = "targeted" if phase == "evidence_completion" else "discovery"
+        if manual_authorization_stopped:
+            return SearchResults([], "manual_authorization", config.SEARCH_PROVIDER, result_state="UNKNOWN", reason="manual_authorization_already_required", stop_scope="MANUAL_AUTHORIZATION")
+        if paid_provider_stopped and config.SEARCH_PROVIDER == "brightdata":
+            return SearchResults([], "provider_stopped", "brightdata", result_state="FAILED", reason="paid_provider_already_stopped", stop_scope="PAID_PROVIDER")
+        if bucket in blocked_buckets:
+            return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=f"{bucket}_already_blocked", stop_scope="FREE_CURRENT_BUCKET")
         if not query or query in executed_queries:
             return []
         executed_queries.add(query)
         previous_bucket = runtime.search_bucket()
-        runtime.set_search_bucket("targeted" if phase == "evidence_completion" else "discovery")
+        runtime.set_search_bucket(bucket)
         try:
             results = _safe_search_text(query)
         finally:
             runtime.set_search_bucket(previous_bucket)
+        if getattr(results, "stop_scope", "NONE") == "FREE_CURRENT_BUCKET":
+            blocked_buckets.add(bucket)
+        elif getattr(results, "stop_scope", "NONE") == "PAID_PROVIDER":
+            paid_provider_stopped = True
+        elif getattr(results, "stop_scope", "NONE") == "MANUAL_AUTHORIZATION":
+            manual_authorization_stopped = True
         observed_gaps = evidence_gaps or _adaptive_discovery_gaps(
             company_name, candidates_by_domain, related_name_hints,
         )
@@ -1984,6 +2295,11 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             "result_state": getattr(results, "result_state", "UNKNOWN"),
             "result_reason": getattr(results, "result_reason", ""),
             "call_ids": list(getattr(results, "call_ids", ())),
+            "primary_provider": getattr(results, "primary_provider", ""),
+            "primary_result_state": getattr(results, "primary_result_state", ""),
+            "fallback_provider": getattr(results, "fallback_provider", ""),
+            "fallback_result_state": getattr(results, "fallback_result_state", ""),
+            "stop_scope": getattr(results, "stop_scope", "NONE"),
             "result_count": len(results), "results": results,
         })
         for result in results:
@@ -2001,7 +2317,14 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         remove_mirror_candidates()
         return results
 
-    primary_queries = _primary_queries(company_name, metadata)
+    if runtime.phase() == "PAID" and runtime.durable_run_id() and runtime.current_item_index() >= 0:
+        primary_queries = checkpoint.load_paid_query_plan(
+            runtime.durable_run_id(), runtime.current_item_index(),
+        )
+        if not primary_queries:
+            raise checkpoint.ResumeInvariant("durable paid primary query plan is missing")
+    else:
+        primary_queries = _primary_queries(company_name, metadata)
     paid_total_limit = 0
     if (
         config.SEARCH_PROVIDER == "brightdata"
@@ -2024,6 +2347,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         primary_queries = primary_queries[: config.DEFAULT_PAID_SEARCH_QUERY_LIMIT]
     for query in primary_queries:
         results = run_query(query, "primary")
+        if "discovery" in blocked_buckets or paid_provider_stopped or manual_authorization_stopped:
+            break
         if results and _query_covers_full_identity(company_name, query):
             full_identity_query_with_results = True
         best = _best_candidate(candidates_by_domain)
@@ -2058,6 +2383,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             adaptive_queries.append(query)
             adaptive_states.append({"query": query, "evidence_gaps": sorted(gaps)})
             results = run_query(query, "adaptive", gaps)
+            if "discovery" in blocked_buckets or paid_provider_stopped or manual_authorization_stopped:
+                break
             hint_queries = {
                 f'"{hint}" Turkiye official website': hint
                 for hint in related_name_hints if hint
@@ -2085,6 +2412,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     best = _best_candidate(candidates_by_domain)
     if not best or best["score"] < config.MIN_ACCEPT_SCORE:
         for query in _fallback_queries(company_name, metadata):
+            if paid_provider_stopped or manual_authorization_stopped:
+                break
             if paid_total_limit > 0 and len(executed_queries) >= paid_total_limit:
                 break
             run_query(
@@ -2103,6 +2432,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
 
     best = _best_candidate(candidates_by_domain)
     if (
+        not manual_authorization_stopped
+        and
         _discovery_needs_expansion(company_name, candidates_by_domain, metadata)
         and (
             config.ENABLE_BRANDFETCH_DOMAIN_SEARCH
@@ -2112,7 +2443,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         _add_resolver_candidates(candidates_by_domain, company_name, trace)
         best = _best_candidate(candidates_by_domain)
 
-    if config.ENABLE_GOOGLE_PLACES:
+    if config.ENABLE_GOOGLE_PLACES and not manual_authorization_stopped:
         _add_google_places_results(candidates_by_domain, company_name)
         remove_mirror_candidates()
         trace.append({
@@ -2153,6 +2484,10 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         sorted(candidates_by_domain.values(), key=_candidate_rank_key, reverse=True),
         trace,
         source_health,
+        stop_scope=runtime.item_stop_state().scope,
+        stopped_provider=runtime.item_stop_state().provider,
+        stop_reason=runtime.item_stop_state().reason,
+        stop_call_ids=runtime.item_stop_state().call_ids,
     )
 
 
@@ -2161,6 +2496,7 @@ def find_targeted_candidates(
     metadata: dict | None,
     queries: list[str] | tuple[str, ...],
     *,
+    round_ordinal: int,
     limit: int = 2,
     already_run: set[str] | tuple[str, ...] | list[str] = (),
 ) -> CandidateList:
@@ -2170,14 +2506,28 @@ def find_targeted_candidates(
     source_record_id = str((metadata or {}).get("source_record_id", "") or "").strip()
     original_index = (metadata or {}).get("original_index")
     attempted = {str(value).strip() for value in already_run if str(value).strip()}
-    planned_queries = [query for query in dict.fromkeys(queries) if query not in attempted]
+    proposed_queries = list(dict.fromkeys(queries))
+    if runtime.phase() == "PAID" and runtime.durable_run_id() and runtime.current_item_index() >= 0:
+        if isinstance(round_ordinal, bool) or int(round_ordinal) < 1:
+            raise checkpoint.ResumeInvariant("paid targeted query round ordinal must be explicit and positive")
+        proposed_queries = checkpoint.freeze_paid_query_plan(
+            run_id=runtime.durable_run_id(), item_index=runtime.current_item_index(),
+            queries=proposed_queries[:max(0, min(int(limit), _effective_paid_query_limit()))],
+            query_kind="targeted", round_ordinal=int(round_ordinal),
+        )
+    planned_queries = [query for query in proposed_queries if query not in attempted]
+    blocked = False
     for query in planned_queries[:max(0, int(limit))]:
+        if blocked:
+            break
         previous_bucket = runtime.search_bucket()
         runtime.set_search_bucket("targeted")
         try:
             results = _safe_search_text(query)
         finally:
             runtime.set_search_bucket(previous_bucket)
+        if getattr(results, "stop_scope", "NONE") in {"FREE_CURRENT_BUCKET", "PAID_PROVIDER", "MANUAL_AUTHORIZATION"}:
+            blocked = True
         discovery_coverage.record_query(
             company_name,
             query,
@@ -2206,6 +2556,7 @@ def find_targeted_candidates(
             "result_state": getattr(results, "result_state", "UNKNOWN"),
             "result_reason": getattr(results, "result_reason", ""),
             "call_ids": list(getattr(results, "call_ids", ())),
+            "stop_scope": getattr(results, "stop_scope", "NONE"),
             "result_count": len(results),
         })
         runtime.record("autonomy.targeted_queries")
@@ -2216,6 +2567,10 @@ def find_targeted_candidates(
             reverse=True,
         ),
         trace,
+        stop_scope=runtime.item_stop_state().scope,
+        stopped_provider=runtime.item_stop_state().provider,
+        stop_reason=runtime.item_stop_state().reason,
+        stop_call_ids=runtime.item_stop_state().call_ids,
     )
 
 

@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
-from modules import cache_store, runtime, scorer
+from modules import cache_store, checkpoint, runtime, scorer
 
 
 _VERDICTS = {"match", "no_match", "uncertain"}
@@ -62,6 +62,25 @@ def _decode_json_object(text: str) -> dict:
     return payload
 
 
+def _validate_structured_verdict(result: dict) -> dict:
+    if not isinstance(result, dict):
+        raise ValueError("invalid_structured_verdict")
+    verdict = str(result.get("verdict", "")).strip().lower()
+    reason = " ".join(str(result.get("reason", "") or "").split())[:500]
+    detected = " ".join(str(result.get("detected_sector", "") or "").split())[:300]
+    expected = " ".join(str(result.get("expected_sector", "") or "").split())[:300]
+    usage = result.get("usage", {})
+    if verdict not in _VERDICTS or len(reason) < 20 or not detected or not expected or not isinstance(usage, dict):
+        raise ValueError("invalid_structured_verdict")
+    normalized_usage = {}
+    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("invalid_structured_verdict_usage")
+        normalized_usage[field] = value
+    return {**result, "verdict": verdict, "reason": reason, "detected_sector": detected, "expected_sector": expected, "usage": normalized_usage}
+
+
 class OpenRouterClient:
     """Small REST client so unit tests can inject a network-free fake."""
 
@@ -84,13 +103,11 @@ class OpenRouterClient:
                 raise ProviderRejected(runtime.rejected_provider_result(reservation))
             call_ids.append(reservation.call_id)
             try:
-                response = requests.post(
-                f"{config.OPENROUTER_API_BASE_URL}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
+                runtime.start_api(reservation)
+                runtime.wait_for_request_slot()
+                runtime.mark_api_http_started(reservation, attempt + 1)
+                endpoint = f"{config.OPENROUTER_API_BASE_URL}/chat/completions"
+                request_payload = {
                     "model": self.model,
                     "messages": [
                         {
@@ -107,16 +124,25 @@ class OpenRouterClient:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": 0,
-                    "max_tokens": 260,
+                    "temperature": 0, "max_tokens": 260,
                     "response_format": {"type": "json_object"},
+                }
+                envelope = runtime.transport_envelope(reservation, endpoint=endpoint, attempt_ordinal=attempt + 1, request_shape={"method": "POST", "json": request_payload}, timeout=self.timeout_sec)
+                response = runtime.invoke_paid_transport(envelope, lambda: requests.post(
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
                 },
+                json=request_payload,
                     timeout=self.timeout_sec,
-                )
+                ))
             except (TimeoutError, requests.Timeout, requests.ConnectionError):
                 runtime.complete_api(reservation, "UNKNOWN")
                 raise
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, checkpoint.SchedulerInvariantError):
+                    raise
                 runtime.complete_api(reservation, "FAILED")
                 raise
             if 400 <= response.status_code < 500 and response.status_code != 429:
@@ -124,7 +150,6 @@ class OpenRouterClient:
                 runtime.complete_api(reservation, "FAILED", result_ref=f"http_{response.status_code}")
                 response.raise_for_status()
             if response.status_code != 429 and response.status_code < 500:
-                runtime.complete_api(reservation, "DONE")
                 break
             runtime.complete_api(reservation, "FAILED")
             if attempt < 2:
@@ -137,11 +162,19 @@ class OpenRouterClient:
                 time.sleep(delay)
         assert response is not None
         response.raise_for_status()
-        payload = response.json()
-        text = str(payload["choices"][0]["message"]["content"])
-        result = _decode_json_object(text)
-        result["usage"] = payload.get("usage", {})
-        result["provider_call_ids"] = call_ids
+        try:
+            payload = response.json()
+            text = str(payload["choices"][0]["message"]["content"])
+            result = _decode_json_object(text)
+            result["usage"] = payload.get("usage", {})
+            result["provider_call_ids"] = call_ids
+            result = _validate_structured_verdict(result)
+        except checkpoint.SchedulerInvariantError:
+            raise
+        except Exception:
+            runtime.complete_api(reservation, "FAILED", result_ref="invalid_structured_verdict")
+            raise
+        runtime.complete_api(reservation, "DONE")
         return result
 
 
@@ -221,10 +254,11 @@ def arbitrate(
     ))
     persistent_key = "|".join(cache_key)
     if client is None and config.SEARCH_CACHE_MODE in {"use", "replay"}:
-        cached = cache_store.load(
-            config.SEARCH_CACHE_DIR, "llm_arbiter", persistent_key,
-            config.SEARCH_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION,
-        )
+        try:
+            cached = cache_store.load(config.SEARCH_CACHE_DIR, "llm_arbiter", persistent_key, config.SEARCH_CACHE_TTL_DAYS, config.CACHE_SCHEMA_VERSION)
+        except Exception:
+            runtime.record("api.llm_arbiter.cache_read_error")
+            cached = None
         if isinstance(cached, dict):
             runtime.record("api.llm_arbiter.persistent_cache_hits")
             return dict(cached)
@@ -258,21 +292,11 @@ def arbitrate(
             ),
             _RESPONSE_SCHEMA,
         )
-        verdict = str(result.get("verdict", "")).strip().lower()
-        reason = " ".join(str(result.get("reason", "") or "").split())[:500]
-        detected_sector = " ".join(
-            str(result.get("detected_sector", "") or "").split()
-        )[:300]
-        expected_sector = " ".join(
-            str(result.get("expected_sector", "") or "").split()
-        )[:300]
-        if (
-            verdict not in _VERDICTS
-            or len(reason) < 20
-            or not detected_sector
-            or not expected_sector
-        ):
-            raise ValueError("invalid_structured_verdict")
+        result = _validate_structured_verdict(result)
+        verdict = result["verdict"]
+        reason = result["reason"]
+        detected_sector = result["detected_sector"]
+        expected_sector = result["expected_sector"]
         usage = result.get("usage", {}) if isinstance(result.get("usage"), dict) else {}
         input_tokens = int(usage.get("prompt_tokens", 0) or 0)
         output_tokens = int(usage.get("completion_tokens", 0) or 0)
@@ -298,14 +322,16 @@ def arbitrate(
         if client is None:
             _DECISION_CACHE[cache_key] = dict(decision)
             if config.SEARCH_CACHE_MODE in {"use", "refresh"}:
-                cache_store.save(
-                    config.SEARCH_CACHE_DIR, "llm_arbiter", persistent_key,
-                    decision, config.CACHE_SCHEMA_VERSION,
-                )
+                try:
+                    cache_store.save(config.SEARCH_CACHE_DIR, "llm_arbiter", persistent_key, decision, config.CACHE_SCHEMA_VERSION)
+                except Exception:
+                    runtime.record("api.llm_arbiter.cache_write_error")
         if reservation is not None:
             runtime.complete_api(reservation, "DONE")
         return decision
     except Exception as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         rejected = getattr(exc, "provider_result", None)
         if rejected is not None:
             return {

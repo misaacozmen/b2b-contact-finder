@@ -111,6 +111,17 @@ class ResolverSetupTests(unittest.TestCase):
                     "hunter_domain_finder": False,
                 })
 
+    def test_saved_resolver_configuration_loads_primary_paid_keys(self):
+        with patch.object(config, "GOOGLE_PLACES_API_KEY", ""), patch.object(
+            config, "BRIGHTDATA_API_KEY", "",
+        ):
+            main._apply_saved_resolver_configuration({
+                "google_places": "saved-google",
+                "brightdata": "saved-bright",
+            })
+            self.assertEqual(config.GOOGLE_PLACES_API_KEY, "saved-google")
+            self.assertEqual(config.BRIGHTDATA_API_KEY, "saved-bright")
+
 
 if __name__ == "__main__":
     unittest.main()

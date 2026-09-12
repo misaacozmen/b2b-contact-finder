@@ -1,13 +1,16 @@
 """Compare a pipeline contacts.xlsx directly with the manual golden workbook."""
 
 import argparse
+import hashlib
+import json
 import re
 from pathlib import Path
 from urllib.parse import urlparse
 
 from openpyxl import load_workbook
 
-from modules import phone, scorer
+import config
+from modules import phone, run_context, scorer
 
 
 FIELDS = ("website", "email", "phone")
@@ -24,6 +27,10 @@ VERIFICATION_COLUMNS = {
 PRESENT_VALUES = {"yes", "present", "var", "evet"}
 ABSENT_VALUES = {"no", "absent", "yok", "hayir", "hayır"}
 UNKNOWN_VALUES = {"unknown", "unverified", "bilinmiyor", "bilinmiyor/unknown", "dogrulanamadi", "doğrulanamadı"}
+SOURCE_ID_COLUMNS = {
+    "source_record_id", "source id", "source_id", "record_id", "record id",
+    "sourcerecordid", "kaynak_kayit_id", "kaynak kayıt id",
+}
 
 
 def _verification_state(value: object) -> str:
@@ -92,6 +99,100 @@ def _sheet_rows(path: Path, sheet_name: str | None = None) -> list[dict]:
         workbook.close()
 
 
+def _row_source_id(row: dict) -> str:
+    for key, value in row.items():
+        if str(key or "").strip().casefold() in SOURCE_ID_COLUMNS:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _indexed_rows(rows: list[dict], role: str) -> tuple[dict[str, dict], str]:
+    rows = [row for row in rows if str(row.get("Company", row.get("company", "")) or "").strip()]
+    ids = [_row_source_id(row) for row in rows]
+    if any(ids):
+        if any(not value for value in ids):
+            raise ValueError(f"{role}: partial source_record_id coverage")
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"{role}: duplicate source_record_id")
+        return dict(zip(ids, rows)), "id"
+    names = [scorer.normalize_text(str(row.get("Company", row.get("company", "")) or "").strip()) for row in rows]
+    if len(names) != len(set(names)):
+        raise ValueError(f"{role}: company names must be unique for name fallback")
+    return dict(zip(names, rows)), "name"
+
+
+def _align_rows(*, expected: list[dict], actual: list[dict], candidates: list[dict] | None = None) -> tuple[dict[str, dict[str, dict]], str]:
+    datasets = {"expected": expected, "actual": actual}
+    if candidates is not None:
+        datasets["candidates"] = candidates
+    indexed: dict[str, dict[str, dict]] = {}
+    modes: dict[str, str] = {}
+    for role, rows in datasets.items():
+        indexed[role], modes[role] = _indexed_rows(rows, role)
+        if role != "expected" and not indexed[role]:
+            modes[role] = modes.get("expected", modes[role])
+    if any(mode == "id" for mode in modes.values()):
+        if any(mode != "id" for mode in modes.values()):
+            raise ValueError("all golden datasets must use source_record_id when any dataset has IDs")
+        expected_ids = set(indexed["expected"])
+        for role, rows in indexed.items():
+            extra = set(rows) - expected_ids
+            if extra:
+                raise ValueError(f"{role}: unexpected source_record_id")
+            if role == "expected":
+                continue
+            # contacts.xlsx is intentionally sparse: a missing expected ID is
+            # an abstention/FN, not a malformed artifact.
+            rows.update({key: {} for key in expected_ids - set(rows)})
+        return indexed, "id"
+    expected_names = set(indexed["expected"])
+    for role, rows in indexed.items():
+        extra = set(rows) - expected_names
+        if extra:
+            raise ValueError(f"{role}: unexpected company identity")
+        if role != "expected":
+            rows.update({key: {} for key in expected_names - set(rows)})
+    return indexed, "name"
+
+
+def validate_artifact_contract(
+    expected_path: Path, actual_path: Path, all_results_path: Path
+) -> dict[str, int | str]:
+    """Fail closed on IDs while allowing contacts to be a publication subset."""
+    expected_rows = _sheet_rows(expected_path, "Manual Report")
+    actual_rows = _sheet_rows(actual_path)
+    all_rows = _sheet_rows(all_results_path)
+    for role, rows in (("expected", expected_rows), ("actual", actual_rows), ("all_results", all_rows)):
+        for index, row in enumerate(rows, start=2):
+            if not str(row.get("Company", row.get("company", "")) or "").strip():
+                raise ValueError(f"{role}: row {index} has no company")
+            if not _row_source_id(row):
+                raise ValueError(f"{role}: row {index} has no source_record_id")
+    expected_map, mode = _indexed_rows(expected_rows, "expected")
+    actual_map, actual_mode = _indexed_rows(actual_rows, "actual")
+    all_map, all_mode = _indexed_rows(all_rows, "all_results")
+    if mode != "id" or (actual_map and actual_mode != "id") or all_mode != "id":
+        raise ValueError("expected, actual and all_results must use source_record_id")
+    expected_ids = list(expected_map)
+    all_ids = list(all_map)
+    if all_ids != expected_ids:
+        raise ValueError("all_results: ordered source_record_id population does not match expected")
+    unexpected = set(actual_map) - set(expected_map)
+    if unexpected:
+        raise ValueError("actual: unexpected source_record_id")
+    return {
+        "expected": len(expected_ids),
+        "published": len(actual_map),
+        "abstained": len(expected_ids) - len(actual_map),
+        "all_results": len(all_ids),
+        "ordered_source_record_ids_sha256": hashlib.sha256(
+            "\n".join(expected_ids).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 def readiness_issues(expected_path: Path, companies: set[str] | None = None) -> list[str]:
     issues = []
     selected = {scorer.normalize_text(value) for value in companies} if companies else None
@@ -119,20 +220,20 @@ def readiness_issues(expected_path: Path, companies: set[str] | None = None) -> 
 def evaluate(expected_path: Path, actual_path: Path, companies: set[str] | None = None) -> tuple[dict, list[str]]:
     expected_rows = _sheet_rows(expected_path, "Manual Report")
     actual_rows = _sheet_rows(actual_path)
-    actual_by_company = {
-        scorer.normalize_text(str(row.get("company") or "").strip()): row for row in actual_rows
-    }
+    aligned, key_mode = _align_rows(expected=expected_rows, actual=actual_rows)
+    expected_by_key = aligned["expected"]
+    actual_by_key = aligned["actual"]
     metrics = {field: {"tp": 0, "fp": 0, "fn": 0} for field in FIELDS}
     complete_matches: list[str] = []
     selected = {scorer.normalize_text(value).strip() for value in companies} if companies else None
 
-    for expected in expected_rows:
+    for expected_key, expected in expected_by_key.items():
         company = str(expected.get("Company") or "").strip()
         if not company:
             continue
         if selected is not None and scorer.normalize_text(company).strip() not in selected:
             continue
-        actual = actual_by_company.get(scorer.normalize_text(company), {})
+        actual = actual_by_key[expected_key]
         expected_values = {
             "website": _hosts(expected.get("Expected Website")),
             "email": _emails(expected.get("Expected Email")),
@@ -208,14 +309,14 @@ def assertion_coverage(expected_path: Path) -> dict[str, dict[str, int]]:
 def evaluate_stages(expected_path: Path, actual_path: Path, candidates_path: Path) -> dict:
     """Measure discovery, selection, publication and extraction as separate stages."""
     expected_rows = _sheet_rows(expected_path, "Manual Report")
-    actual_by_company = {
-        scorer.normalize_text(str(row.get("company") or "").strip()): row
-        for row in _sheet_rows(actual_path)
-    }
-    candidates_by_company = {
-        scorer.normalize_text(str(row.get("company") or "").strip()): row
-        for row in _sheet_rows(candidates_path)
-    }
+    aligned, key_mode = _align_rows(
+        expected=expected_rows,
+        actual=_sheet_rows(actual_path),
+        candidates=_sheet_rows(candidates_path),
+    )
+    expected_by_key = aligned["expected"]
+    actual_by_key = aligned["actual"]
+    candidates_by_key = aligned["candidates"]
     counts = {
         "expected_websites": 0, "website_asserted_rows": 0,
         "website_unknown_rows": 0, "candidate_top1_hits": 0, "candidate_top3_hits": 0,
@@ -226,12 +327,11 @@ def evaluate_stages(expected_path: Path, actual_path: Path, candidates_path: Pat
         "email_on_correct_site": 0, "phone_on_correct_site": 0,
     }
     total = 0
-    for expected in expected_rows:
+    for key, expected in expected_by_key.items():
         company = str(expected.get("Company") or "").strip()
         if not company:
             continue
         total += 1
-        key = scorer.normalize_text(company)
         expected_hosts = set(_hosts(expected.get("Expected Website")))
         website_state = _verification_state(expected.get(VERIFICATION_COLUMNS["website"]))
         email_state = _verification_state(expected.get(VERIFICATION_COLUMNS["email"]))
@@ -245,8 +345,8 @@ def evaluate_stages(expected_path: Path, actual_path: Path, candidates_path: Pat
             email_state = "present" if _emails(expected.get("Expected Email")) else "absent"
         if not phone_state:
             phone_state = "present" if _phones(expected.get("Expected Phone")) else "absent"
-        actual = actual_by_company.get(key, {})
-        candidate_row = candidates_by_company.get(key, {})
+        actual = actual_by_key[key]
+        candidate_row = candidates_by_key[key]
         published_host = _host(actual.get("website"))
         selected_host = _host(candidate_row.get("selected_website"))
         if website_state not in {"present", "absent"}:
@@ -295,6 +395,7 @@ def evaluate_stages(expected_path: Path, actual_path: Path, candidates_path: Pat
         "candidate_recall_at_3": ratio(counts["candidate_top3_hits"], counts["expected_websites"]),
         "selection_accuracy": ratio(counts["selected_correct"], counts["selected_count"]),
         "publication_precision": ratio(counts["published_correct"], counts["published_count"]),
+        "publication_recall": ratio(counts["published_correct"], counts["expected_websites"]),
         "abstention_rate": ratio(counts["abstained"], counts["website_asserted_rows"]),
         "email_recall_given_correct_site": ratio(
             counts["email_on_correct_site"],
@@ -312,27 +413,87 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Manual golden XLSX ile pipeline sonucunu karsilastirir.")
     parser.add_argument("--expected", type=Path, required=True)
     parser.add_argument("--actual", type=Path, required=True)
-    parser.add_argument("--candidates", type=Path)
+    parser.add_argument("--candidates", type=Path, required=True)
+    parser.add_argument("--all-results", type=Path, required=True)
+    parser.add_argument("--json-output", type=Path, required=True)
     args = parser.parse_args()
-    metrics, complete_matches = evaluate(args.expected, args.actual)
+    report = {
+        "status": "FAIL",
+        "files": {},
+        "code_sha256": run_context.source_tree_sha256(),
+        "config_sha256": hashlib.sha256(Path(config.__file__).read_bytes()).hexdigest(),
+        "records": {},
+        "fields": {},
+        "stages": {},
+        "gates": {},
+        "issues": [],
+    }
+    exit_code = 0
+    try:
+        for role, path in {
+            "expected": args.expected, "actual": args.actual,
+            "candidates": args.candidates, "all_results": args.all_results,
+        }.items():
+            if not path.is_file():
+                raise ValueError(f"{role}: artifact missing: {path}")
+            report["files"][role] = {
+                "path": str(path.resolve()),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        readiness = readiness_issues(args.expected)
+        if readiness:
+            raise ValueError("ground truth incomplete: " + "; ".join(readiness))
+        report["records"] = validate_artifact_contract(
+            args.expected, args.actual, args.all_results
+        )
+        metrics, complete_matches = evaluate(args.expected, args.actual)
+        stages = evaluate_stages(args.expected, args.actual, args.candidates)
+        report["stages"] = stages
+        report["records"]["complete_matches"] = len(complete_matches)
+        for field in FIELDS:
+            values = metrics[field]
+            precision_denominator = values["tp"] + values["fp"]
+            recall_denominator = values["tp"] + values["fn"]
+            if not precision_denominator or not recall_denominator:
+                raise ValueError(f"{field}: zero metric denominator")
+            report["fields"][field] = {
+                **values,
+                "precision": round(values["tp"] / precision_denominator, 6),
+                "recall": round(values["tp"] / recall_denominator, 6),
+            }
+        for name, denominator in {
+            "publication_precision": stages["published_count"],
+            "publication_recall": stages["expected_websites"],
+            "candidate_recall": stages["expected_websites"],
+            "selection_accuracy": stages["selected_count"],
+        }.items():
+            if not denominator:
+                raise ValueError(f"{name}: zero metric denominator")
+        report["gates"] = {
+            "artifacts_present": "PASS",
+            "ground_truth_complete": "PASS",
+            "identity_contract": "PASS",
+            "nonzero_denominators": "PASS",
+            "no_false_publication": "PASS" if metrics["website"]["fp"] == 0 else "FAIL",
+        }
+        if "FAIL" in report["gates"].values():
+            raise ValueError("quality gate failed")
+        report["status"] = "PASS"
+    except Exception as exc:
+        exit_code = 2
+        report["issues"].append(str(exc))
+    args.json_output.parent.mkdir(parents=True, exist_ok=True)
+    args.json_output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if exit_code:
+        print(f"validation failed: {report['issues'][0]}")
+        raise SystemExit(exit_code)
     for field in FIELDS:
-        values = metrics[field]
-        denominator = values["tp"] + values["fp"]
-        precision = values["tp"] / denominator * 100 if denominator else 0.0
+        values = report["fields"][field]
         print(
             f"{field}: TP {values['tp']}, FP {values['fp']}, FN {values['fn']}, "
-            f"precision %{precision:.1f}"
+            f"precision %{values['precision'] * 100:.1f}, recall %{values['recall'] * 100:.1f}"
         )
-    print(f"tam firma eslesmesi: {len(complete_matches)}/{len(_sheet_rows(args.expected, 'Manual Report'))}")
-    if args.candidates:
-        stages = evaluate_stages(args.expected, args.actual, args.candidates)
-        print("--- asama metrikleri ---")
-        for key in (
-            "candidate_recall_at_1", "candidate_recall_at_3", "selection_accuracy",
-            "publication_precision", "abstention_rate",
-            "email_recall_given_correct_site", "phone_recall_given_correct_site",
-        ):
-            print(f"{key}: %{stages[key] * 100:.1f}")
+    print(f"json_report: {args.json_output.resolve()}")
 
 
 if __name__ == "__main__":

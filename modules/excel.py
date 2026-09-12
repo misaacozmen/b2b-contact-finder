@@ -130,8 +130,10 @@ def read_company_records(path: Path) -> list[dict]:
                 "profile_url": value_for(row, ("profile_url", "profil", "profile"), None),
                 "listing_url": value_for(row, ("listing_url", "liste_url", "liste url"), None),
                 "listed_phone": value_for(row, ("listed_phone", "fair_phone", "fuar telefonu"), None),
+                "listed_phone_status": value_for(row, ("listed_phone_status", "phone_observation"), None),
                 "listed_email": value_for(row, ("listed_email", "fair_email", "fuar e-posta"), None),
                 "listed_address": value_for(row, ("listed_address", "fair_address", "fuar adresi"), None),
+                "listed_address_status": value_for(row, ("listed_address_status", "address_observation"), None),
                 "listed_legal_name": value_for(row, ("listed_legal_name", "legal_name", "ticari unvan", "ticari unvanı"), None),
                 "source_detail_status": value_for(row, ("source_detail_status", "detail_status"), None),
                 "source_detail_url": value_for(row, ("source_detail_url", "detail_url"), None),
@@ -143,7 +145,6 @@ def read_company_records(path: Path) -> list[dict]:
                 "representations": value_for(row, ("representations", "temsilcilikler"), None),
                 "sector": value_for(row, ("sector", "sektor", "sektör", "urun grubu", "ürün grubu"), None),
                 "description": value_for(row, ("description", "aciklama", "açıklama"), None),
-                "source_record_id": value_for(row, ("source_record_id", "source_id", "kaynak_kayit_id"), None),
                 "_id": value_for(row, ("_id", "id"), None),
             }
         )
@@ -300,6 +301,7 @@ def write_failed(path: Path, rows: Iterable[dict], *, frozen_timestamp: str = _F
 def write_website_candidates(path: Path, rows: Iterable[dict], *, frozen_timestamp: str = _FROZEN_XLSX_TIMESTAMP) -> None:
     headers = [
         "company",
+        "source_record_id",
         "selected_website",
         "status",
         "confidence",
@@ -334,11 +336,11 @@ def write_company_records(path: Path, rows: Iterable[dict]) -> None:
         path,
         [
             "company", "website", "listed_website", "source", "country",
-            "profile_url", "listing_url", "listed_phone", "listed_email",
-            "listed_address", "hall", "stand", "brands", "representations",
+            "profile_url", "listing_url", "listed_phone", "listed_email", "listed_address",
+            "hall", "stand", "brands", "representations",
             "listed_legal_name", "source_detail_status", "source_detail_url",
             "source_detail_content_sha256", "source_evidence", "sector", "description",
-            "source_record_id", "_id",
+            "source_record_id", "_id", "listed_phone_status", "listed_address_status",
         ],
         rows,
     )

@@ -126,8 +126,8 @@ class GeneralizationGuardrailTests(unittest.TestCase):
         }
         candidates = [candidate]
         with patch("main.search.find_candidate_domains", return_value=candidates), patch(
-            "main._evaluate_candidate", return_value=evaluation
-        ), patch("main.random_delay"):
+            "main.search.find_targeted_candidates", return_value=[]
+        ), patch("main._evaluate_candidate", return_value=evaluation), patch("main.random_delay"):
             _, row = main.process_company(0, "BRAND MAKİNA", Mock())
         self.assertEqual(row["website"], "")
         self.assertEqual(row["email"], "")

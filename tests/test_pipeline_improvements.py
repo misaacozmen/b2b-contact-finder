@@ -186,7 +186,7 @@ class PipelineImprovementTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory, patch.object(config, "SEARCH_CACHE_DIR", Path(directory)), patch.object(
             config, "SEARCH_CACHE_MODE", "use"
-        ), patch.object(google_places, "is_enabled", return_value=True), patch(
+        ), patch.object(config, "GOOGLE_PLACES_REQUEST_BUDGET", 1), patch.object(google_places, "is_enabled", return_value=True), patch(
             "modules.google_places.requests.post", return_value=response
         ) as post:
             first = google_places.search_company("Example")

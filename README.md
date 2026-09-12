@@ -198,7 +198,7 @@ Remove-Item Env:\BRIGHTDATA_API_KEY
 
 Ücretli sağlayıcılar yalnızca açık `--allow-paid` ile kullanılır. İşlem yarıda kalırsa önce immutable run bundle handoff hazırlanır; yetkilendirme dosyası doğrulandıktan sonra yeni child continuation oluşturulur ve yalnız child run devam eder. Replay export yalnızca ayrı `export_replay.py` komutuyla üretilir.
 
-API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Varsayılan koşu bütçeleri Bright Data için 500, Google Places için 100 istektir. Ana komutta değiştirilebilir:
+API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Bright Data, Google Places ve Hunter bütçeleri firma nüfusu ile sırasıyla 3.9, 0.25 ve 0.10 oranlarıyla hesaplanır; ilgili `*_REQUEST_BUDGET` değeri açıkça verilirse azami sınırdır, `0` sağlayıcıyı kapatır. Brandfetch mevcut sabit üst sınır davranışını korur. Ana komutta tavanlar değiştirilebilir:
 
 ```powershell
 python main.py --brightdata-budget 300 --google-places-budget 50

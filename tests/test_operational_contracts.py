@@ -52,7 +52,7 @@ def _bundle(tmp_path: Path, *, paid_pending: bool = False, quarantine: bool = Fa
     with patch.object(config, "PROGRESS_DB_FILE", db):
         checkpoint.seed_recovered_run(
             path=db, run_id=root.name, input_hash="input-hash", run_signature="test",
-            context={"phase": "PAID" if paid_pending else "FREE"}, budgets=PROVIDERS,
+            context={"phase": "PAID" if paid_pending else "FREE", "paid_query_limit_per_company": 3}, budgets=PROVIDERS,
             items=items, results=results,
         )
     return root, root.name, source_ids, results
@@ -63,6 +63,7 @@ def _write_manifest(root: Path, run_id: str, source_ids: list[str], *, paid_enab
     manifest = {
         "run_id": run_id, "input_sha256": "input-hash", "config_sha256": run_config.sha256,
         "complete": False, "phase": phase, "paid_enabled": paid_enabled,
+        "paid_query_limit_per_company": 3,
         "run_config": run_config.as_dict(),
         "provisional": provisional, "item_count": len(source_ids),
         "ordered_source_record_ids": source_ids, "files": files or {},
@@ -90,7 +91,7 @@ def test_active_resume_allows_unprocessed_missing_payload_but_detects_payload_id
             connection.execute("DELETE FROM results WHERE run_id=? AND item_index=1", (run_id,))
             connection.execute("UPDATE run_items SET payload_sha256=? WHERE run_id=? AND item_index=0", ("wrong", run_id))
             connection.commit()
-        with pytest.raises(ValueError, match="payload hash mismatch"):
+        with pytest.raises(checkpoint.ResumeInvariant, match="payload hash mismatch"):
             run_context.validate_run_bundle(root, profile="ACTIVE_RESUME")
 
 
@@ -180,8 +181,8 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
     input_file = tmp_path / "input.xlsx"
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["company", "source_record_id"])
-    sheet.append(["Acme", "input:0"])
+    sheet.append(["company", "source_record_id", "website"])
+    sheet.append(["Acme", "input:0", "https://acme.example"])
     workbook.save(input_file)
     workbook.close()
 
@@ -217,13 +218,13 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
     child_manifest = prepare_paid_continuation(run_root, auth, tmp_path / "child")
     child_root = tmp_path / "child" / "runs" / child_manifest["run_id"]
 
-    def final_writer(rows, _elapsed):
-        return output_artifacts.write_outputs(rows, _elapsed)
+    def final_writer(rows, _elapsed, *, telemetry_snapshot=None):
+        return output_artifacts.write_outputs(rows, _elapsed, telemetry_snapshot=telemetry_snapshot)
 
     with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(config, "PROGRESS_DB_FILE", config.STATE_DIR / "handoff-test.sqlite3"):
         completed = pipeline_runner.run_pipeline(
             input_file, resume_run_dir=child_root, allow_paid=True,
-                process_company_fn=lambda _index, company, _logger, _website, record: (0, _payload(record["source_record_id"], company=company, status="OK_HIGH_CONFIDENCE", publication_eligible=True)),
+            process_company_fn=lambda _index, company, _logger, _website, record: (0, dict(_payload(record["source_record_id"], company=company, status="OK_HIGH_CONFIDENCE", publication_eligible=True, website="https://acme.example"), known_website_evaluation={"status": "OK_HIGH_CONFIDENCE", "website": "https://acme.example"}, paid_attempt_result="NO_CALL_NEEDED", paid_attempt_reason="supplied_website_publishable_at_paid_entry", paid_evidence_ref="test:supplied-site")),
             write_outputs_fn=final_writer,
             set_output_dir_fn=lambda path: setattr(config, "OUTPUT_DIR", Path(path)),
             empty_result_fn=lambda company, status, reason: _payload(company, status=status, reason=reason),
@@ -275,8 +276,8 @@ def test_provider_fingerprint_duplicate_and_unknown_consume_durable_budget(tmp_p
         checkpoint.complete_provider_call(call_id=first.call_id, state="UNKNOWN")
         checkpoint.complete_provider_call(call_id=second.call_id, state="DONE")
         with sqlite3.connect(db) as connection:
-            usage = connection.execute("SELECT reserved,completed,failed FROM provider_usage WHERE run_id=? AND provider='brightdata'", (run_id,)).fetchone()
-        assert usage == (0, 1, 1)
+            usage = connection.execute("SELECT reserved,completed,failed,unknown FROM provider_usage WHERE run_id=? AND provider='brightdata'", (run_id,)).fetchone()
+        assert usage == (0, 1, 0, 1)
 
 
 def test_provider_ledger_mismatch_stops_before_new_reservation(tmp_path: Path):
@@ -303,7 +304,7 @@ def test_seed_rejects_item_payload_quarantine_mismatch(tmp_path: Path):
     db = tmp_path / "progress.sqlite3"
     with patch.object(config, "PROGRESS_DB_FILE", db):
         payload = _payload_text(_payload("input:0", quarantine_state="OTHER", quarantine_status="blocked", publication_eligible=False, publication_blockers="legacy_recovery_provisional"))
-        with pytest.raises(ValueError, match="quarantine_state mismatch"):
+        with pytest.raises(checkpoint.ResumeInvariant, match="quarantine_state mismatch"):
             checkpoint.seed_recovered_run(
                 path=db, run_id="1" * 64, input_hash="h", run_signature="s",
                 context={"phase": "FREE", "provisional": True}, budgets=PROVIDERS,
@@ -319,7 +320,7 @@ def test_resume_rejects_payloadless_done_item(tmp_path: Path):
         with sqlite3.connect(config.PROGRESS_DB_FILE) as connection:
             connection.execute("DELETE FROM results WHERE run_id=? AND item_index=0", (run_id,))
             connection.commit()
-        with pytest.raises(ValueError, match="missing payload"):
+        with pytest.raises(checkpoint.ResumeInvariant, match="missing payload"):
             run_context.validate_run_bundle(root, profile="ACTIVE_RESUME")
 
 
@@ -332,7 +333,7 @@ def test_resume_rejects_payload_with_wrong_source_id(tmp_path: Path):
             connection.execute("UPDATE results SET payload=? WHERE run_id=? AND item_index=0", (bad_payload, run_id))
             connection.execute("UPDATE run_items SET payload_sha256=? WHERE run_id=? AND item_index=0", (hashlib.sha256(bad_payload.encode()).hexdigest(), run_id))
             connection.commit()
-        with pytest.raises(ValueError, match="source ID mismatch"):
+        with pytest.raises(checkpoint.ResumeInvariant, match="source ID mismatch"):
             run_context.validate_run_bundle(root, profile="ACTIVE_RESUME")
 
 
@@ -344,9 +345,9 @@ def test_resume_config_resolver_inherits_recorded_values_and_rejects_explicit_ov
     manifest = {"run_config": recorded.as_dict()}
     resolved = pipeline_runner.resolve_run_config(manifest)
     assert resolved.as_dict() == recorded.as_dict()
-    with pytest.raises(ValueError, match="search-cache override"):
+    with pytest.raises(checkpoint.ResumeInvariant, match="search-cache override"):
         pipeline_runner.resolve_run_config(manifest, search_cache="replay")
-    with pytest.raises(ValueError, match="paid-mode override"):
+    with pytest.raises(checkpoint.ResumeInvariant, match="paid-mode override"):
         pipeline_runner.resolve_run_config(manifest, allow_paid=True)
 
 
@@ -356,7 +357,7 @@ def test_google_places_adapter_distinguishes_timeout_budget_and_duplicate_offlin
 
     runtime.reset()
     google_places.reset()
-    with patch.object(config, "ENABLE_GOOGLE_PLACES", True), patch.object(config, "GOOGLE_PLACES_API_KEY", "test-key"), patch.object(config, "SEARCH_CACHE_MODE", "off"):
+    with patch.object(config, "ENABLE_GOOGLE_PLACES", True), patch.object(config, "GOOGLE_PLACES_API_KEY", "test-key"), patch.object(config, "GOOGLE_PLACES_REQUEST_BUDGET", 1), patch.object(config, "SEARCH_CACHE_MODE", "off"):
         with patch.object(google_places.requests, "post", side_effect=TimeoutError("transport timeout")):
             timeout_result = google_places.search_company("Acme")
         assert timeout_result.result_state == "UNKNOWN"
@@ -438,21 +439,22 @@ def test_finalization_atomic_commit_records_empty_plan_and_run_scoped_receipts(t
             results=[{"item_index": 0, "payload": payload}],
         )
         checkpoint.transition_phase(run_id, "FINALIZING", expected_count=1)
+        telemetry = checkpoint.canonical_scheduler_receipt(run_id)
         checkpoint.begin_finalization_intent(
             run_id=run_id, generation="g", input_snapshot_sha256="r",
-            result_snapshot_sha256="r", telemetry_snapshot={"generated_at": "frozen"},
+            result_snapshot_sha256="r", telemetry_snapshot=telemetry,
         )
         plan = checkpoint.mark_finalization_artifact_and_outbox(
             run_id=run_id, generation="g", result_snapshot_sha256="r",
             artifact_set_sha256="a", artifacts={"artifact_set_sha256": "a", "files": {}},
             memory_rows=[], counts={"input_count": 1},
-            telemetry_snapshot={"generated_at": "frozen"},
+            telemetry_snapshot=telemetry,
         )
         intent = checkpoint.load_finalization_intent(run_id)
         assert plan == {"memory_plan_sha256": plan["memory_plan_sha256"], "memory_plan_count": 0, "memory_plan_committed": True}
         assert intent["memory_plan_committed"] == 1
         assert intent["memory_plan_count"] == 0
-        assert intent["telemetry_snapshot_json"] == '{"generated_at": "frozen"}'
+        assert json.loads(intent["telemetry_snapshot_json"]) == telemetry
         assert checkpoint.load_memory_outbox_entries(run_id) == []
 
 

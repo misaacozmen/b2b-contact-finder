@@ -294,9 +294,18 @@ def prepare_remaining_run(
     plan_temp = output_dir / f".remaining_159_plan.{os.getpid()}.json"
     workbook_path = output_dir / "remaining_159_fresh.xlsx"
     plan_path = output_dir / "remaining_159_plan.json"
+    created_workbook = False
     try:
         _write_remaining_workbook(workbook_temp, bundle["headers"], bundle["rows"])
         workbook_hash = _sha256(workbook_temp)
+        workbook_bytes = workbook_temp.stat().st_size
+        if workbook_path.exists() and _sha256(workbook_path) != workbook_hash:
+            raise FileExistsError("remaining_159_fresh.xlsx exists with a different hash")
+        if not workbook_path.exists():
+            workbook_temp.replace(workbook_path)
+            created_workbook = True
+        else:
+            workbook_temp.unlink(missing_ok=True)
         provisional_tokens = _command_tokens(input_path=workbook_path, run_root=destination / "runs" / "pending")
         provisional_config = _parse_exact_command(_command_text(provisional_tokens))[1]["effective_config"]
         expected_run_id = run_context.canonical_run_id(
@@ -327,7 +336,7 @@ def prepare_remaining_run(
             "parent": {"manifest": str(parent_manifest), "manifest_sha256": _sha256(parent_manifest), "run_id": manifest["run_id"], "artifact_set_sha256": manifest["artifact_set_sha256"], "recovery_db_sha256": _sha256(recovery_db)},
             "sources": {"original_input": str(original_input), "original_input_sha256": _sha256(original_input), "source_mapping": str(source_mapping), "source_mapping_sha256": mapping_hash, "recovery_db": str(recovery_db), "recovery_db_sha256": _sha256(recovery_db)},
             "selection": {"count": len(bundle["id_index"]), "free_count": sum(1 for row in bundle["mapping_rows"] if row["free_state"] == "PENDING"), "paid_count": sum(1 for row in bundle["mapping_rows"] if row["paid_required"] == 1 and row["paid_state"] == "PENDING"), "ordered_index_id": bundle["id_index"], "ordered_index_id_sha256": selected_digest, "row_sha256": row_hashes},
-            "workbook": {"relative_path": "input/remaining_159_fresh.xlsx", "bytes": workbook_temp.stat().st_size, "sha256": workbook_hash, "row_count": len(bundle["rows"]), "column_count": len(bundle["headers"])},
+            "workbook": {"relative_path": "input/remaining_159_fresh.xlsx", "bytes": workbook_bytes, "sha256": workbook_hash, "row_count": len(bundle["rows"]), "column_count": len(bundle["headers"])},
             "effective_config": effective_config,
             "paid_budgets": {provider: 0 for provider in PAID_PROVIDERS},
             "runtime_source_tree_sha256": runtime_tree_hash,
@@ -342,19 +351,18 @@ def prepare_remaining_run(
         }
         plan["plan_payload_sha256"] = hashlib.sha256(_canonical(plan).encode("utf-8")).hexdigest()
         plan_temp.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
-        validate_remaining_plan(workbook_temp, plan_temp)
-        if workbook_path.exists() and _sha256(workbook_path) != workbook_hash:
-            raise FileExistsError("remaining_159_fresh.xlsx exists with a different hash")
+        validate_remaining_plan(workbook_path, plan_temp)
         if plan_path.exists() and _sha256(plan_path) != _sha256(plan_temp):
             raise FileExistsError("remaining_159_plan.json exists with a different hash")
         verify_only = workbook_path.exists() and plan_path.exists()
         if not verify_only:
-            workbook_temp.replace(workbook_path)
             plan_temp.replace(plan_path)
         return {"verify_only": verify_only, "workbook": str(workbook_path), "plan": str(plan_path), "workbook_sha256": workbook_hash, "plan_sha256": _sha256(plan_path if plan_path.exists() else plan_temp)}
     finally:
         workbook_temp.unlink(missing_ok=True)
         plan_temp.unlink(missing_ok=True)
+        if created_workbook and not plan_path.exists():
+            workbook_path.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:

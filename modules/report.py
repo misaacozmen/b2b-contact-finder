@@ -1,6 +1,7 @@
 from datetime import timedelta
+import json
 from statistics import mean
-from modules import discovery_coverage, runtime
+from modules import checkpoint, discovery_coverage, runtime
 from modules.publication_policy import OK_STATUSES, is_publishable_row
 
 
@@ -24,6 +25,8 @@ def _pct(count: int, total: int) -> str:
 
 
 def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_snapshot: dict | None = None) -> str:
+    if runtime_snapshot is None:
+        runtime_snapshot = runtime.snapshot()
     total = len(rows)
     website_count = sum(1 for row in rows if row.get("website"))
     email_count = sum(1 for row in rows if row.get("email"))
@@ -119,8 +122,61 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
     static_skips = int(counters.get("recovery.static_skips", 0))
     host_variant_attempts = int(counters.get("recovery.host_variant_attempts", 0))
     host_variant_successes = int(counters.get("recovery.host_variant_successes", 0))
-    paid_query_limit = int(counters.get("search.paid_query_limit_per_company", 0))
+    durable_scheduler = (
+        runtime_snapshot if (runtime_snapshot or {}).get("receipt_schema_version")
+        else (runtime_snapshot or {}).get("durable_scheduler")
+    )
+    paid_query_limit = (
+        int(durable_scheduler["paid_query_limit_per_company"])
+        if isinstance(durable_scheduler, dict) and "paid_query_limit_per_company" in durable_scheduler
+        else "UNAVAILABLE"
+    )
+    unique_counts = (runtime_snapshot or {}).get("unique_counts", {})
+    browser_recovered_companies = int(unique_counts.get("recovery.browser_recovered_companies", 0))
+    browser_publication_companies = int(unique_counts.get("recovery.browser_publication_companies", 0))
+    interstitial_live_pages_rejected = int(counters.get("live.site.security_interstitial_rejected", 0))
+    interstitial_cache_pages_rejected = int(counters.get("cache.site.security_interstitial_rejected", 0))
+    interstitial_hosts = int(unique_counts.get("recovery.security_interstitial_hosts", 0))
+    browser_root_attempts = int(counters.get("recovery.browser.root.attempts", 0))
+    browser_root_successes = int(counters.get("recovery.browser.root.successes", 0))
+    browser_root_errors = int(counters.get("recovery.browser.root.errors", 0))
+    browser_identity_attempts = int(counters.get("recovery.browser.identity.attempts", 0))
+    browser_identity_successes = int(counters.get("recovery.browser.identity.successes", 0))
+    browser_identity_errors = int(counters.get("recovery.browser.identity.errors", 0))
+    browser_contact_attempts = int(counters.get("recovery.browser.contact.attempts", 0))
+    browser_contact_successes = int(counters.get("recovery.browser.contact.successes", 0))
+    browser_contact_errors = int(counters.get("recovery.browser.contact.errors", 0))
+    durable_scheduler = (
+        runtime_snapshot if (runtime_snapshot or {}).get("receipt_schema_version")
+        else (runtime_snapshot or {}).get("durable_scheduler", {})
+    )
+    provider_budgets = durable_scheduler.get("provider_budgets", {})
+    if not provider_budgets:
+        provider_budgets = (runtime_snapshot or {}).get("provider_budgets", {})
+    durable_claim = bool((runtime_snapshot or {}).get("receipt_schema_version")) or "durable_scheduler" in (runtime_snapshot or {})
+    if durable_claim and set(provider_budgets) != checkpoint.CANONICAL_PROVIDERS:
+        raise checkpoint.EvidenceInvariant("durable provider telemetry set is missing or extra")
+    budget_lines = []
+    required_provider_fields = {
+        "population_count", "ratio", "explicit_cap", "effective_limit", "reserved_total",
+        "done", "failed", "unknown", "reserved", "running", "physical_http_attempts",
+        "retry_attempts", "inherited_uses", "budget_blocked_items",
+    }
+    for provider, details in sorted(provider_budgets.items()):
+        missing = required_provider_fields.difference(details)
+        if missing:
+            raise checkpoint.EvidenceInvariant(f"durable provider telemetry fields missing for {provider}: {sorted(missing)}")
+        budget_lines.append(
+            f"Butce {provider}: population={details.get('population_count', 0)}; "
+            f"ratio={details['ratio']}; explicit_cap={details['explicit_cap']}; "
+            f"effective_limit={details['effective_limit']}; reserved_total={details['reserved_total']}; "
+            f"done={details['done']}; failed={details['failed']}; unknown={details['unknown']}; "
+            f"reserved={details['reserved']}; running={details['running']}; "
+            f"physical_http_attempts={details['physical_http_attempts']}; retry_attempts={details['retry_attempts']}; "
+            f"inherited_uses={details['inherited_uses']}; budget_blocked_items={details['budget_blocked_items']}"
+        )
 
+    scheduler_receipt = json.dumps(durable_scheduler or {"provider_budgets": provider_budgets}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "\n".join(
         [
             "================================",
@@ -147,6 +203,7 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
             f"P3 dusuk/kontrollu riskli yayin: {low_risk_publications}/{controlled_risk_publications}",
             f"LLM hakem istek/butce engeli/token: {llm_arbiter_requests}/{llm_arbiter_blocked}/{llm_arbiter_tokens}",
             "--------------------------------",
+            f"SCHEDULER_RECEIPT_JSON={scheduler_receipt}",
             f"Ortalama skor: {average_score:.1f}",
             f"Kesfedilen aday/firma: {(candidate_count / total):.1f}" if total else "Kesfedilen aday/firma: 0.0",
             f"Hafif kimlik taramasi/firma: {(identity_evaluations / total):.1f}" if total else "Hafif kimlik taramasi/firma: 0.0",
@@ -156,6 +213,11 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
             f"P4 statik kurtarma: {static_successes}/{static_attempts}; gereksiz deneme atlamasi={static_skips}",
             f"P4 host varyanti: {host_variant_successes}/{host_variant_attempts}",
             f"P4 browser kurtarma: {browser_successes}/{browser_attempts}",
+            f"JS interstitial reddi: canlı_sayfa={interstitial_live_pages_rejected}; cache_sayfa={interstitial_cache_pages_rejected}; benzersiz_host={interstitial_hosts}",
+            f"JS root deneme/basari/hata: {browser_root_attempts}/{browser_root_successes}/{browser_root_errors}",
+            f"JS identity deneme/basari/hata: {browser_identity_attempts}/{browser_identity_successes}/{browser_identity_errors}",
+            f"JS contact deneme/basari/hata: {browser_contact_attempts}/{browser_contact_successes}/{browser_contact_errors}",
+            f"Browser kurtarilan benzersiz firma: {browser_recovered_companies}; sonrasinda yayinlanabilir: {browser_publication_companies}",
             f"P4 PDF metin kurtarma: {pdf_successes}/{pdf_attempts}",
             f"P4 replay snapshot: yuklenen={snapshot_loaded}; isabet={snapshot_hits}; eski-cache-isabeti={stale_hits}",
             f"P5 aday e-posta alan karari: izin={email_field_allowed}; baskilanan={email_field_suppressed}",
@@ -170,6 +232,7 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
                 f"edinim-plani={len(coverage['acquisition_plan'])}"
             ),
             f"Firma basi ucretli sorgu siniri: {paid_query_limit}",
+            *budget_lines,
             f"Bright Data: sorgu={brightdata_queries}; HTTP={brightdata_requests}; retry={brightdata_retries}; cooldown={brightdata_cooldowns}; butce-engeli={brightdata_blocked}; saglayici-hatasi={search_provider_failures}",
             f"LinkedIn Company: eslesme={linkedin_company_matches}; HTTP={linkedin_company_requests}; butce-engeli={linkedin_company_blocked}",
             f"Crawler butce engeli: {crawler_blocked}",

@@ -249,7 +249,7 @@ class MaktekScraperTests(unittest.TestCase):
     def test_profile_parser_extracts_reference_fields(self):
         details = _maktek_profile_details(PROFILE_HTML)
         self.assertEqual(details["website"], "https://ornek.com.tr")
-        self.assertEqual(details["listed_phone"], "+90 212 555 12 34")
+        self.assertEqual(details["listed_phone"], "02125551234")
         self.assertEqual(details["listed_email"], "info@ornek.com.tr")
         self.assertEqual(details["listed_address"], "İstanbul")
         self.assertEqual(details["brands"], "Örnek CNC")

@@ -1,6 +1,10 @@
 import argparse
 import getpass
+import hashlib
+import json
 import re
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -42,9 +46,40 @@ from modules import (
     run_context,
     scorer,
     search,
+    selection,
     secrets_store,
 )
 from modules.utils import close_logging, ensure_directories, random_delay, setup_logging
+
+
+def _ensure_safe_project_runtime(argv: list[str] | None = None) -> None:
+    """Transparently hand a live CLI run to the repository's pinned runtime."""
+    try:
+        pipeline_runner.require_safe_sqlite_for_live()
+        return
+    except RuntimeError as unsafe_runtime:
+        runtime_python = (
+            Path(__file__).resolve().parent
+            / ".runtime" / "python3147-sqlite3534" / "python.exe"
+        )
+        if not runtime_python.is_file():
+            raise RuntimeError(
+                f"{unsafe_runtime}. Proje runtime bulunamadı: {runtime_python}"
+            ) from unsafe_runtime
+        try:
+            if runtime_python.resolve() == Path(sys.executable).resolve():
+                raise
+        except OSError:
+            pass
+        command = [
+            str(runtime_python), str(Path(__file__).resolve()),
+            *(list(sys.argv[1:]) if argv is None else list(argv)),
+        ]
+        print(
+            f"SQLite {__import__('sqlite3').sqlite_version} güvenli değil; "
+            f"koşu proje runtime'ına aktarılıyor: {runtime_python}"
+        )
+        raise SystemExit(subprocess.run(command).returncode) from unsafe_runtime
 
 
 def _empty_result(company: str, status: str, reason: str = "", score: int = 0) -> dict:
@@ -393,6 +428,135 @@ def _fair_phone_reference_reasons(
     return ["fair_phone_reference_only_not_published"]
 
 
+_ADDRESS_NOISE = {
+    "adres", "address", "mah", "mahallesi", "mh", "cad", "caddesi",
+    "cd", "sok", "sokak", "sk", "bulvar", "bulvari", "blv", "no",
+    "numara", "kat", "daire", "apt", "suite", "street", "road", "rd",
+    "avenue", "ave", "osb", "organize", "sanayi", "turkiye", "turkey",
+}
+
+
+def _address_tokens(value: object) -> set[str]:
+    tokens = re.findall(r"[a-z0-9]+", scorer.normalize_text(str(value or "")))
+    return {
+        token for token in tokens
+        if len(token) >= 3 and token not in _ADDRESS_NOISE and not token.isdigit()
+    }
+
+
+def _normalized_source_field(field: str, value: object) -> str:
+    if field == "listed_phone":
+        return phone.normalize_phone(str(value or ""))
+    return " ".join(scorer.normalize_text(str(value or "")).split())
+
+
+def _validated_source_evidence(metadata: dict | None) -> dict[str, set[str]]:
+    """Return only source claims with a complete, same-record evidence envelope."""
+    metadata = metadata or {}
+    source_id = str(metadata.get("source_record_id", "") or "").strip()
+    source_status = str(metadata.get("source_detail_status", "") or "").strip().upper()
+    source_url = str(metadata.get("source_detail_url", "") or "").strip()
+    source_hash = str(metadata.get("source_detail_content_sha256", "") or "").strip().casefold()
+    if (
+        source_status != "COMPLETED"
+        or not source_id
+        or not source_url
+        or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+    ):
+        return {}
+    raw_evidence = metadata.get("source_evidence", [])
+    if isinstance(raw_evidence, str):
+        try:
+            raw_evidence = json.loads(raw_evidence)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(raw_evidence, list):
+        return {}
+    valid: dict[str, set[str]] = {}
+    for claim in raw_evidence:
+        if not isinstance(claim, dict):
+            continue
+        field = str(claim.get("field", "") or "").strip()
+        if field not in {"listed_phone", "listed_address"}:
+            continue
+        if str(claim.get("source_record_id", "") or "").strip() != source_id:
+            continue
+        if str(claim.get("url", "") or "").strip() != source_url:
+            continue
+        if str(claim.get("content_sha256", "") or "").strip().casefold() != source_hash:
+            continue
+        if not str(claim.get("observed_at", "") or "").strip():
+            continue
+        value = str(claim.get("value", "") or "").strip()
+        normalized = str(claim.get("normalized_value", "") or "").strip()
+        if not normalized or normalized != _normalized_source_field(field, value):
+            continue
+        valid.setdefault(field, set()).add(normalized)
+    return valid
+
+
+def _source_metadata_match_reasons(
+    metadata: dict | None,
+    pages: list[dict],
+    observed_phones: list[str],
+    structured_identity: dict,
+    identity_reasons: list[str],
+) -> list[str]:
+    """Return non-authoritative source-profile corroboration reasons."""
+    metadata = metadata or {}
+    if not any(str(reason).startswith((
+        "page_identity_strong:", "page_identity_medium:",
+        "structured_identity_strong:", "structured_identity_medium:",
+        "legal_name_phrase_match:", "legal_name_full_match:",
+        "legal_name_ownership_match:",
+    )) for reason in identity_reasons):
+        return []
+
+    evidence = _validated_source_evidence(metadata)
+    if not evidence:
+        return []
+    reasons: list[str] = []
+    phone_matched = False
+    source_phone = phone.normalize_phone(str(metadata.get("listed_phone", "") or ""))
+    if source_phone and source_phone in evidence.get("listed_phone", set()) and source_phone in {
+        phone.normalize_phone(str(value or ""))
+        for value in observed_phones
+    }:
+        phone_matched = True
+        reasons.append("source_listing_phone_match")
+
+    address_matched = False
+    source_address = str(metadata.get("listed_address", "") or "").strip()
+    source_tokens = _address_tokens(source_address)
+    normalized_source_address = _normalized_source_field("listed_address", source_address)
+    if source_tokens and normalized_source_address in evidence.get("listed_address", set()):
+        source_postal_codes = set(re.findall(r"(?<!\d)\d{5}(?!\d)", source_address))
+        address_values = list(structured_identity.get("addresses", []))
+        if not address_values:
+            address_values = [
+                page.get("address", "") for page in pages if page.get("address")
+            ]
+        for observed_address in address_values:
+            observed_text = str(observed_address or "")
+            observed_tokens = _address_tokens(observed_text)
+            shared_tokens = source_tokens & observed_tokens
+            observed_postal_codes = set(re.findall(r"(?<!\d)\d{5}(?!\d)", observed_text))
+            if source_postal_codes:
+                matched = bool(source_postal_codes & observed_postal_codes) and len(shared_tokens) >= 2
+            else:
+                matched = len(shared_tokens) >= 3
+            if matched:
+                address_matched = True
+                reasons.append("source_listing_address_match")
+                break
+    source_id = str(metadata.get("source_record_id", "") or "").strip()
+    if source_id and (phone_matched or address_matched):
+        # Phone and address matches from one verified source record form one
+        # corroboration package, not two independent evidence sources.
+        reasons.append(f"source_profile:{source_id}")
+    return reasons
+
+
 def _is_ambiguous_company_name(company: str) -> bool:
     tokens = scorer.distinctive_tokens(company)
     if not tokens:
@@ -532,12 +696,16 @@ def _apply_risk_caps(
     return min(score, config.REVIEW_SCORE)
 
 
-def _score_candidate_with_site(company: str, candidate: dict, crawl_result: dict, selected_email: str, normalized_phones: list[str], metadata: dict | None = None) -> tuple[int, list[str]]:
+def _score_candidate_with_site(
+    company: str, candidate: dict, crawl_result: dict, selected_email: str,
+    normalized_phones: list[str], metadata: dict | None = None,
+    observed_phones: list[str] | None = None,
+) -> tuple[int, list[str]]:
     reasons = [candidate.get("reason", "")]
     page_bonus, page_reason = _page_identity_score(company, crawl_result["pages"])
     context_bonus, context_reason = _page_context_score(company, crawl_result["pages"], metadata)
     email_bonus, email_reason = _email_domain_bonus(crawl_result["url"], selected_email)
-    structured_bonus, structured_reason, _ = _structured_identity_score(company, crawl_result["pages"])
+    structured_bonus, structured_reason, structured_identity = _structured_identity_score(company, crawl_result["pages"])
     legal_name_bonus, legal_name_reason = _legal_name_identity_score(company, crawl_result["pages"])
     country_bonus, country_reason = _country_identity_score(crawl_result, normalized_phones)
     exact_compound_identity = (
@@ -556,6 +724,10 @@ def _score_candidate_with_site(company: str, candidate: dict, crawl_result: dict
         context_bonus = 0
         context_reason = "metadata_context_conflict_overridden_by_exact_compound_identity"
     reasons.extend([page_reason, context_reason, email_reason, structured_reason, legal_name_reason, country_reason])
+    reasons.extend(_source_metadata_match_reasons(
+        metadata, crawl_result["pages"], observed_phones or normalized_phones,
+        structured_identity, [page_reason, structured_reason, legal_name_reason],
+    ))
     if crawl_result.get("tls_insecure"):
         reasons.append("tls_insecure_transport")
     # Website selection is identity-first. Email-domain agreement describes
@@ -591,6 +763,11 @@ def _evaluate_candidate(
         profile=crawl_profile, evidence_scopes=evidence_scopes,
         identity_seed_urls=candidate.get("_identity_seed_urls", []),
     )
+    if any(
+        page.get("retrieval_method") == "browser_render"
+        for page in crawl_result.get("pages", [])
+    ):
+        runtime.record_unique("recovery.browser_recovered_companies", company)
     if not crawl_result["pages"]:
         redirect_target = crawl_result.get("redirect_target", "")
         if redirect_target and not candidate.get("_redirect_depth"):
@@ -687,7 +864,10 @@ def _evaluate_candidate(
     phone_source = "website" if normalized_phones else ""
     # Contact values must come from the crawled official site.  Third-party
     # directory data (such as Google Places or Hunter) is not published.
-    final_score, reasons = _score_candidate_with_site(company, candidate, crawl_result, selected_email, normalized_phones, metadata)
+    final_score, reasons = _score_candidate_with_site(
+        company, candidate, crawl_result, selected_email, normalized_phones, metadata,
+        observed_phones=[record["value"] for record in ranked_phone_records],
+    )
     reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
     places_phone = phone.normalize_phone(
         str(candidate.get("external_phone", "") or "")
@@ -826,6 +1006,8 @@ def _try_linkedin_company_corroboration(
         and not entity_resolution.fingerprint(profile, item).candidate_ready
     ]
     for target in targets:
+        if runtime.item_stop_state().scope == runtime.StopScope.MANUAL_AUTHORIZATION:
+            break
         linkedin_evidence = linkedin_company.corroborate(company, target)
         if not linkedin_evidence:
             continue
@@ -927,6 +1109,8 @@ def _try_llm_arbitration(
     legal_title, sector_context = _llm_arbiter_metadata(metadata, company)
     decisions: list[dict] = []
     for evaluation, triggers in targets.values():
+        if runtime.item_stop_state().scope == runtime.StopScope.MANUAL_AUTHORIZATION:
+            break
         candidate = evaluation.get("candidate", {})
         domain = scorer.normalize_domain(candidate.get("url", ""))
         result = llm_arbiter.arbitrate(
@@ -1975,6 +2159,14 @@ def _finalize_selected_evaluation(
         "reason": "; ".join(reason for reason in reasons if reason),
         "__evaluation": _evaluation_evidence(evaluation),
     }
+    if (
+        row.get("publication_eligible")
+        and any(
+            page.get("retrieval_method") == "browser_render"
+            for page in crawl_result.get("pages", [])
+        )
+    ):
+        runtime.record_unique("recovery.browser_publication_companies", company)
     if status == "WEBSITE_NOT_FOUND":
         _clear_unpublished_contacts(row)
     elif not identity_verified:
@@ -1984,17 +2176,36 @@ def _finalize_selected_evaluation(
     return row
 
 
-def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None) -> tuple[int, dict]:
+def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
+    execution_phase = str(execution_phase).upper()
+    if execution_phase not in {"FREE", "PAID"}:
+        raise ValueError(f"invalid execution phase: {execution_phase}")
+    known_website_evaluation = None
+    def finish(row: dict, candidates: list[dict]) -> tuple[int, dict]:
+        result = _attach_candidates(row, candidates)
+        if known_website_evaluation is not None:
+            result["known_website_evaluation"] = known_website_evaluation
+        return index, result
     runtime.record("pipeline.companies")
     logger.info("Processing %s: %s", index + 1, company)
     if known_website:
         try:
             known_result = _process_known_website(index, company, known_website, logger, metadata)
             if known_result:
-                random_delay()
-                return known_result
+                if execution_phase == "FREE":
+                    random_delay()
+                    return known_result
+                known_website_evaluation = dict(known_result[1])
+                if execution_phase == "PAID" and output_artifacts.is_publishable_row(known_result[1]):
+                    row = known_result[1]
+                    row["known_website_evaluation"] = dict(known_result[1])
+                    row["paid_attempt_result"] = "NO_CALL_NEEDED"
+                    row["paid_attempt_reason"] = "supplied_website_publishable_at_paid_entry"
+                    return index, row
             logger.info("Supplied website failed, falling back to search: %s", company)
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, checkpoint.SchedulerInvariantError):
+                raise
             logger.exception("Supplied website evaluation failed for %s, falling back to search", company)
 
     profile_candidates = search.find_profile_candidates(company, metadata)
@@ -2040,15 +2251,21 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
                     f"{profile_resolution.reason}; {row['reason']}"
                 ).strip("; ")
                 random_delay()
-                return index, _attach_candidates(row, profile_candidates)
+                if execution_phase == "FREE":
+                    return finish(row, profile_candidates)
+                known_website_evaluation = dict(row)
 
     try:
         candidates = search.find_candidate_domains(company, metadata)
     except Exception as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         logger.exception("Search failed for %s", company)
         random_delay()
-        return index, _attach_candidates(_empty_result(company, "SEARCH_FAILED", str(exc)), [])
+        return finish(_empty_result(company, "SEARCH_FAILED", str(exc)), [])
 
+    paid_stop = getattr(candidates, "stop_scope", runtime.StopScope.NONE)
+    manual_paid_stop = paid_stop == runtime.StopScope.MANUAL_AUTHORIZATION
     runtime.record("pipeline.candidates_discovered", len(candidates))
     source_health = getattr(candidates, "source_health", {})
     if source_health.get("status") in {"degraded", "circuit_open", "unavailable"}:
@@ -2074,7 +2291,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     if not best:
         random_delay()
         row = _empty_result(company, "WEBSITE_NOT_FOUND", "No candidate passed score threshold")
-        return index, _attach_candidates(row, candidates)
+        return finish(row, candidates)
 
     eligible_candidates = [
         candidate
@@ -2134,9 +2351,9 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             row["website_source"] = authoritative["query"]
             row["confidence"] = "review"
             row["email_verification_reason"] = "website_unreachable"
-            return index, _attach_candidates(row, candidates)
+            return finish(row, candidates)
         row = _empty_result(company, "WEBSITE_FETCH_FAILED", identity_evaluations[0]["reasons"][0], best["score"])
-        return index, _attach_candidates(row, candidates)
+        return finish(row, candidates)
 
     ranked_identity = sorted(
         successful_identity,
@@ -2168,7 +2385,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             ) not in full_candidate_domains
         )
     ][:2])
-    if not full_candidates:
+    if not full_candidates and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
         automation_state = evidence_acquisition.analyze(
             company,
             ranked_identity,
@@ -2183,6 +2400,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             company,
             metadata,
             automation_state.search_queries,
+            round_ordinal=1,
             limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
         )
         known_domains = {
@@ -2253,7 +2471,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             "automation_terminal_reason": automation_state.terminal_reason,
         }
         random_delay()
-        return index, _attach_candidates(row, candidates)
+        return finish(row, candidates)
     full_candidate_domains = {
         scorer.normalize_domain(candidate.get("url", ""))
         for candidate in full_candidates
@@ -2316,6 +2534,8 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         query_limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
     )
     if (
+        runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
+        and
         resolution.status != "resolved"
         and all("identity_assessment" in item for item in ranked_evaluations)
     ):
@@ -2328,13 +2548,14 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
                 resolution,
             )
         )
-    if resolution.status == "unresolved":
+    if resolution.status == "unresolved" and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
         resolution = _try_linkedin_company_corroboration(
             company, ranked_evaluations, resolution,
         )
-    resolution = _try_llm_arbitration(
-        company, metadata, ranked_evaluations, resolution,
-    )
+    if runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
+        resolution = _try_llm_arbitration(
+            company, metadata, ranked_evaluations, resolution,
+        )
     if any(item.get("_llm_arbiter_rejected") for item in ranked_evaluations):
         ranked_evaluations = _evaluate_llm_rejection_fallbacks(
             company, metadata, ranked_identity, ranked_evaluations,
@@ -2342,9 +2563,10 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         resolution = entity_resolution.resolve_candidates(
             company, ranked_evaluations,
         )
-        resolution = _try_llm_arbitration(
-            company, metadata, ranked_evaluations, resolution,
-        )
+        if runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
+            resolution = _try_llm_arbitration(
+                company, metadata, ranked_evaluations, resolution,
+            )
     if resolution.status == "ambiguous":
         row = _empty_result(
             company,
@@ -2368,7 +2590,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             "automation_terminal_reason": automation_state.terminal_reason,
         }
         random_delay()
-        return index, _attach_candidates(row, candidates)
+        return finish(row, candidates)
     if resolution.status != "resolved" or resolution.selected is None:
         row = _empty_result(
             company,
@@ -2389,7 +2611,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             "automation_terminal_reason": automation_state.terminal_reason,
         }
         random_delay()
-        return index, _attach_candidates(row, candidates)
+        return finish(row, candidates)
     best_eval = resolution.selected
     best_eval["_identity_resolution"] = resolution.reason
     ranked_evaluations.remove(best_eval)
@@ -2411,7 +2633,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             "homonym_assessment": unreachable_homonym,
         }
         random_delay()
-        return index, _attach_candidates(row, candidates)
+        return finish(row, candidates)
     _merge_official_family_contacts(best_eval, ranked_evaluations[1:], company)
     unsafe_identity = _unsafe_context_identity(company, best_eval)
     hard_context_failure = _is_hard_context_failure(best_eval)
@@ -2437,15 +2659,15 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             row["confidence"] = "review"
             row["email_verification_reason"] = "website_unreachable"
             random_delay()
-            return index, _attach_candidates(row, candidates)
+            return finish(row, candidates)
 
     row = _finalize_selected_evaluation(company, best_eval, metadata)
     random_delay()
-    return index, _attach_candidates(row, candidates)
+    return finish(row, candidates)
 
 
-def _write_outputs(rows: list[dict], elapsed_seconds: float) -> str:
-    return output_artifacts.write_outputs(rows, elapsed_seconds)
+def _write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapshot: dict | None = None) -> str:
+    return output_artifacts.write_outputs(rows, elapsed_seconds, telemetry_snapshot=telemetry_snapshot)
 
 
 def _set_output_dir(output_dir: Path) -> None:
@@ -2570,7 +2792,7 @@ def run(
     run_dir: Path | None = None,
     resume_run: Path | None = None,
     from_run_manifest: Path | None = None,
-) -> str:
+) -> pipeline_runner.PipelineOutcome:
     """Run the pipeline without leaking per-run config into later calls."""
     with _RUN_LOCK:
         previous_config = {
@@ -2654,13 +2876,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_cli_run_config(argv=None):
-    """Resolve effective run config through the CLI option/resolver path only."""
-    args = parse_args(argv)
+def _apply_cli_options(args: argparse.Namespace) -> None:
     if args.search_cache is not None:
         config.SEARCH_CACHE_MODE = args.search_cache
     if args.crawl_cache is not None:
         config.CRAWL_CACHE_MODE = args.crawl_cache
+    if args.rerank_cache:
+        config.SEARCH_CACHE_MODE = "replay"
+        config.CRAWL_CACHE_MODE = "replay"
+        config.MIN_DELAY_SEC = 0
+        config.MAX_DELAY_SEC = 0
     budget_args = {
         "brightdata_budget": "BRIGHTDATA_REQUEST_BUDGET",
         "linkedin_company_budget": "LINKEDIN_COMPANY_REQUEST_BUDGET",
@@ -2673,61 +2898,115 @@ def resolve_cli_run_config(argv=None):
         value = getattr(args, arg_name)
         if value is not None:
             setattr(config, config_name, max(0, int(value)))
-    if args.non_interactive:
+            hard_cap_name = config_name.replace("_BUDGET", "_HARD_CAP")
+            if hasattr(config, hard_cap_name):
+                setattr(config, hard_cap_name, max(0, int(value)))
+    config.REPLAY_SNAPSHOT_INPUT = args.replay_snapshot
+    config.REPLAY_MANIFEST_INPUT = args.replay_manifest
+
+
+def _cli_selected_values(args: argparse.Namespace) -> tuple[set[str], set[str]]:
+    selected_companies = {value.strip() for value in args.companies.split(",") if value.strip()}
+    selected_statuses = {value.strip() for value in args.only_status.split(",") if value.strip()}
+    return selected_companies, selected_statuses
+
+
+def resolve_cli_run_config(argv=None):
+    """Resolve a CLI run config after selecting the exact pipeline population."""
+    args = argv if isinstance(argv, argparse.Namespace) else parse_args(argv)
+    if args.resume_run and (args.replay_snapshot is not None or args.replay_manifest is not None):
+        raise checkpoint.ResumeInvariant("resume rejects external replay input override; use the durable run store")
+    _apply_cli_options(args)
+    if args.non_interactive and not args.resume_run:
         _apply_saved_resolver_configuration()
-    return run_context.RunConfig.from_config(paid_enabled=bool(args.allow_paid))
+    selected_companies, selected_statuses = _cli_selected_values(args)
+    if args.resume_run:
+        manifest_path = Path(args.resume_run) / "manifest.json"
+        if not manifest_path.exists():
+            raise checkpoint.ResumeInvariant("resume requires run_root/manifest.json")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise checkpoint.ResumeInvariant("resume manifest is unreadable or invalid") from exc
+        return pipeline_runner.resolve_run_config(
+            manifest,
+            allow_paid=args.allow_paid,
+            search_cache=args.search_cache,
+            crawl_cache=args.crawl_cache,
+            brightdata_budget=args.brightdata_budget,
+            google_places_budget=args.google_places_budget,
+            hunter_budget=args.hunter_budget,
+            brandfetch_budget=args.brandfetch_budget,
+            linkedin_budget=args.linkedin_company_budget, llm_budget=args.llm_budget,
+            rerank_cache=args.rerank_cache,
+        )
+    records, _ = selection.select_company_records(
+        args.input,
+        companies=selected_companies or None,
+        only_statuses=selected_statuses or None,
+        from_run_manifest=args.from_run_manifest,
+    )
+    calculated_budgets = run_budget.calculate_paid_api_budgets(
+        len(records), run_budget.explicit_paid_api_caps(),
+    )
+    return run_context.RunConfig.from_config(
+        paid_enabled=bool(args.allow_paid),
+        budgets={
+            **calculated_budgets,
+            "linkedin": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
+            "llm": config.LLM_ARBITER_BUDGET,
+        },
+    )
 
 
 def cli(argv=None) -> int:
+    _ensure_safe_project_runtime(argv)
     args = parse_args(argv)
-    if args.search_cache is not None:
-        config.SEARCH_CACHE_MODE = args.search_cache
-    if args.crawl_cache is not None:
-        config.CRAWL_CACHE_MODE = args.crawl_cache
-    if args.rerank_cache:
-        config.SEARCH_CACHE_MODE = "replay"
-        config.CRAWL_CACHE_MODE = "replay"
-    if args.brightdata_budget is not None:
-        config.BRIGHTDATA_REQUEST_HARD_CAP = max(0, args.brightdata_budget)
-        config.BRIGHTDATA_REQUEST_BUDGET = config.BRIGHTDATA_REQUEST_HARD_CAP
-    if args.linkedin_company_budget is not None:
-        config.LINKEDIN_COMPANY_REQUEST_HARD_CAP = max(0, args.linkedin_company_budget)
-        config.LINKEDIN_COMPANY_REQUEST_BUDGET = config.LINKEDIN_COMPANY_REQUEST_HARD_CAP
-    if args.google_places_budget is not None:
-        config.GOOGLE_PLACES_REQUEST_HARD_CAP = max(0, args.google_places_budget)
-        config.GOOGLE_PLACES_REQUEST_BUDGET = config.GOOGLE_PLACES_REQUEST_HARD_CAP
-    if args.brandfetch_budget is not None:
-        config.BRANDFETCH_REQUEST_BUDGET = max(0, args.brandfetch_budget)
-    if args.hunter_budget is not None:
-        config.HUNTER_REQUEST_BUDGET = max(0, args.hunter_budget)
-    if args.llm_budget is not None:
-        config.LLM_ARBITER_BUDGET = max(0, args.llm_budget)
-    config.REPLAY_SNAPSHOT_INPUT = args.replay_snapshot
-    config.REPLAY_MANIFEST_INPUT = args.replay_manifest
-    if args.rerank_cache:
-        config.MIN_DELAY_SEC = 0
-        config.MAX_DELAY_SEC = 0
-    selected_companies = {value.strip() for value in args.companies.split(",") if value.strip()}
-    selected_statuses = {value.strip() for value in args.only_status.split(",") if value.strip()}
-    if args.run_dir and args.resume_run:
-        raise SystemExit("--run-dir and --resume-run are mutually exclusive")
-    if selected_statuses and not args.from_run_manifest:
-        raise SystemExit("--only-status requires --from-run-manifest")
-    if args.resume_run:
-        pipeline_runner.validate_resume_before_credentials(
-            args.input, args.resume_run, allow_paid=args.allow_paid,
-            companies=selected_companies or None, only_statuses=selected_statuses or None,
-            from_run_manifest=args.from_run_manifest, search_cache=args.search_cache,
-            crawl_cache=args.crawl_cache, brightdata_budget=args.brightdata_budget,
-            google_places_budget=args.google_places_budget,
-            linkedin_budget=args.linkedin_company_budget, rerank_cache=args.rerank_cache,
-        )
-    if args.non_interactive:
-        _apply_saved_resolver_configuration()
-    else:
-        configure_apis_interactively()
-    print(run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest))
-    return 0
+    try:
+        _apply_cli_options(args)
+        resolve_cli_run_config(args)
+        selected_companies, selected_statuses = _cli_selected_values(args)
+        if args.run_dir and args.resume_run:
+            raise SystemExit("--run-dir and --resume-run are mutually exclusive")
+        if selected_statuses and not args.from_run_manifest:
+            raise SystemExit("--only-status requires --from-run-manifest")
+        if args.resume_run:
+            pipeline_runner.validate_resume_before_credentials(
+                args.input, args.resume_run, allow_paid=args.allow_paid,
+                companies=selected_companies or None, only_statuses=selected_statuses or None,
+                from_run_manifest=args.from_run_manifest, search_cache=args.search_cache,
+                crawl_cache=args.crawl_cache, brightdata_budget=args.brightdata_budget,
+                google_places_budget=args.google_places_budget,
+                hunter_budget=args.hunter_budget, brandfetch_budget=args.brandfetch_budget,
+                linkedin_budget=args.linkedin_company_budget, llm_budget=args.llm_budget,
+                rerank_cache=args.rerank_cache,
+            )
+        if args.non_interactive:
+            _apply_saved_resolver_configuration()
+        else:
+            configure_apis_interactively()
+        outcome = run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest)
+    except checkpoint.SchedulerInvariantError:
+        print("SCHEDULER_INVARIANT_VIOLATION")
+        return 22
+    except Exception as exc:
+        print(f"UNEXPECTED_ERROR:{type(exc).__name__}")
+        return 1
+    if not isinstance(outcome, pipeline_runner.PipelineOutcome):
+        print("INVALID_PIPELINE_OUTCOME")
+        return 22
+    if not isinstance(outcome.status, pipeline_runner.PipelineOutcomeStatus):
+        print("INVALID_PIPELINE_OUTCOME_STATUS")
+        return 22
+    print(outcome.payload or outcome.status.value)
+    return {
+        pipeline_runner.PipelineOutcomeStatus.COMPLETE: 0,
+        pipeline_runner.PipelineOutcomeStatus.COMPLETE_RESUME_VERIFIED: 0,
+        pipeline_runner.PipelineOutcomeStatus.FINALIZATION_RESUME_RECONCILED: 0,
+        pipeline_runner.PipelineOutcomeStatus.PAID_PENDING_APPROVAL: 20,
+        pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED: 21,
+        pipeline_runner.PipelineOutcomeStatus.FINALIZATION_INVARIANT: 22,
+    }.get(outcome.status, 22)
 
 
 if __name__ == "__main__":

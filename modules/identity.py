@@ -133,6 +133,25 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
             "strong",
         ))
 
+    source_profile_matches = [
+        reason for reason in reasons
+        if reason in {"source_listing_phone_match", "source_listing_address_match"}
+        or reason.startswith("source_profile:")
+    ]
+    source_profile_ids = [
+        reason.split(":", 1)[1].strip()
+        for reason in source_profile_matches
+        if reason.startswith("source_profile:") and reason.split(":", 1)[1].strip()
+    ]
+    if source_profile_ids:
+        # Phone and address from one source_record_id are one evidence
+        # package, never two independent identity sources.
+        signals.append(_signal(
+            "source_profile_metadata_match", "support", "source_profile",
+            f"source_profile:{source_profile_ids[0]}",
+            ",".join(source_profile_matches), "medium",
+        ))
+
     page_identity_strong = _has_reason(reasons, ("page_identity_strong:",))
     page_identity_medium = _has_reason(reasons, ("page_identity_medium:",))
     page_identity = page_identity_medium or page_identity_strong

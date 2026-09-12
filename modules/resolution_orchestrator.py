@@ -49,6 +49,7 @@ def complete_resolution_evidence(
             company,
             metadata,
             current.search_queries,
+            round_ordinal=round_number + 1,
             limit=config.MAX_TARGETED_QUERIES_PER_ROUND,
             already_run=attempted_queries,
         )

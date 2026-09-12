@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 import sqlite3
+from contextlib import closing
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,30 +26,55 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _read_parent(parent: Path) -> tuple[dict, list[str], list[dict], list[dict]]:
+def _read_parent(parent: Path) -> tuple[dict, list[str], list[dict], list[dict], set[str]]:
     manifest_path = parent / "manifest.json"
     if not manifest_path.exists():
         raise ValueError("parent run manifest is missing or has the wrong run ID")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if parent.name != manifest.get("run_id"):
         raise ValueError("parent run manifest is missing or has the wrong run ID")
-    if manifest.get("complete") or manifest.get("paid_enabled") is not False:
-        raise ValueError("parent must be an incomplete paid-disabled run")
+    frozen_paid_query_limit = manifest.get("paid_query_limit_per_company")
+    if not isinstance(frozen_paid_query_limit, int) or isinstance(frozen_paid_query_limit, bool) or frozen_paid_query_limit < 0:
+        raise checkpoint.SchedulerInvariantError("parent manifest has no valid frozen paid query limit")
+    paid_handoff = not manifest.get("complete") and manifest.get("paid_enabled") is False
+    budget_extension = bool(
+        not manifest.get("complete")
+        and manifest.get("paid_enabled") is True
+        and manifest.get("phase") == "PAID"
+        and manifest.get("manual_authorization_review_required") is True
+    )
+    if not paid_handoff and not budget_extension:
+        raise ValueError("parent must be an incomplete paid handoff or manual budget-review run")
     if manifest.get("provisional") or (manifest.get("lineage") or {}).get("type") == "legacy_recovery":
         raise ValueError("legacy recovery runs remain quarantined and cannot be continued")
-    run_context.validate_run_bundle(parent, profile="FROZEN_RECOVERY")
-    artifact_dir = parent / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
-    if not artifact_dir.is_dir() or not manifest.get("files"):
-        raise ValueError("parent artifact set is missing")
-    for name, info in manifest["files"].items():
-        artifact = artifact_dir / str(name)
-        if not artifact.is_file() or _sha256(artifact) != info.get("sha256"):
-            raise ValueError(f"parent artifact hash mismatch: {name}")
-    checkpoint_name = "recovery_state.sqlite3"
-    checkpoint_info = manifest.get("files", {}).get(checkpoint_name)
-    db_path = artifact_dir / checkpoint_name
-    if not checkpoint_info or not db_path.exists():
-        raise ValueError("parent manifest does not point to an immutable checkpoint artifact")
+    if paid_handoff:
+        run_context.validate_run_bundle(parent, profile="FROZEN_RECOVERY")
+        artifact_dir = parent / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
+        if not artifact_dir.is_dir() or not manifest.get("files"):
+            raise ValueError("parent artifact set is missing")
+        for name, info in manifest["files"].items():
+            artifact = artifact_dir / str(name)
+            if not artifact.is_file() or _sha256(artifact) != info.get("sha256"):
+                raise ValueError(f"parent artifact hash mismatch: {name}")
+        checkpoint_name = "recovery_state.sqlite3"
+        checkpoint_info = manifest.get("files", {}).get(checkpoint_name)
+        db_path = artifact_dir / checkpoint_name
+        if not checkpoint_info or not db_path.exists():
+            raise ValueError("parent manifest does not point to an immutable checkpoint artifact")
+        resumable_paid_states = {"PENDING"}
+    else:
+        lease = run_context.RunLease(parent)
+        lease.acquire()
+        lease.release()
+        run_context.validate_run_bundle(parent, profile="ACTIVE_RESUME", require_artifacts=False)
+        db_path = parent / "state" / "progress.sqlite3"
+        if any(
+            Path(f"{db_path}{suffix}").exists() and Path(f"{db_path}{suffix}").stat().st_size > 0
+            for suffix in ("-wal", "-journal")
+        ):
+            raise RuntimeError("manual budget continuation requires an idle checkpoint")
+        manifest["_continuation_checkpoint_sha256"] = _sha256(db_path)
+        resumable_paid_states = {"BLOCKED_BUDGET", "UNKNOWN"}
     with sqlite3.connect(f"file:{db_path.resolve()}?mode=ro&immutable=1", uri=True) as connection:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise ValueError("parent SQLite integrity check failed")
@@ -67,7 +93,12 @@ def _read_parent(parent: Path) -> tuple[dict, list[str], list[dict], list[dict]]
         raise ValueError("parent payload hash mismatch")
     if any(item["free_state"] not in {"DONE", "FAILED"} for item in items):
         raise ValueError("all free work must be terminal before paid continuation")
-    return manifest, ids, items, results
+    if budget_extension and not any(
+        item["paid_required"] and item["paid_state"] in resumable_paid_states
+        for item in items
+    ):
+        raise ValueError("parent has no budget-blocked paid work")
+    return manifest, ids, items, results, resumable_paid_states
 
 
 def _sha256_bytes(value: str) -> str:
@@ -107,7 +138,9 @@ def _mark_authorization_published(path: Path, auth_sha256: str) -> None:
 
 def _validate_authorization(path: Path, *, parent_root: Path, parent: dict, source_ids: list[str], paid_source_ids: list[str]) -> tuple[dict, str]:
     auth_sha256 = _sha256(path)
-    approval = json.loads(path.read_text(encoding="utf-8"))
+    # Windows PowerShell may emit an UTF-8 BOM even when the user requests
+    # UTF-8. Accept it without weakening the authorization schema checks.
+    approval = json.loads(path.read_text(encoding="utf-8-sig"))
     if approval.get("approved") is not True:
         raise PermissionError("authorization JSON must contain approved=true")
     required = {"brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm"}
@@ -119,7 +152,7 @@ def _validate_authorization(path: Path, *, parent_root: Path, parent: dict, sour
     bindings = {
         "parent_run_id": parent.get("run_id"),
         "parent_manifest_sha256": _sha256(parent_root / "manifest.json"),
-        "checkpoint_sha256": parent.get("checkpoint_sha256") or parent.get("files", {}).get("recovery_state.sqlite3", {}).get("sha256"),
+        "checkpoint_sha256": parent.get("_continuation_checkpoint_sha256") or parent.get("checkpoint_sha256") or parent.get("files", {}).get("recovery_state.sqlite3", {}).get("sha256"),
         "paid_source_ids_sha256": hashlib.sha256(run_context.canonical_json(paid_source_ids).encode("utf-8")).hexdigest(),
     }
     for key, expected in bindings.items():
@@ -130,8 +163,19 @@ def _validate_authorization(path: Path, *, parent_root: Path, parent: dict, sour
 
 def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destination: Path) -> dict:
     parent = Path(parent_run_dir).resolve()
-    manifest, source_ids, parent_items, results = _read_parent(parent)
-    paid_source_ids = [item["source_record_id"] for item in parent_items if item["paid_required"] and item["paid_state"] == "PENDING"]
+    manifest, source_ids, parent_items, results, resumable_paid_states = _read_parent(parent)
+    parent_checkpoint = parent / "state" / "progress.sqlite3"
+    with closing(sqlite3.connect(f"file:{parent_checkpoint.resolve()}?mode=ro", uri=True)) as parent_db:
+        input_snapshots = {
+            int(item_index): json.loads(str(snapshot_json))
+            for item_index, snapshot_json in parent_db.execute(
+                "SELECT item_index,snapshot_json FROM immutable_input_snapshots ORDER BY item_index"
+            ).fetchall()
+        }
+        paid_query_plan_rows = parent_db.execute(
+            "SELECT item_index,plan_version,query_kind,round_ordinal,query_ordinal,normalized_query,query_sha256 FROM paid_query_plan_entries ORDER BY item_index,plan_version,query_kind,round_ordinal,query_ordinal"
+        ).fetchall()
+    paid_source_ids = [item["source_record_id"] for item in parent_items if item["paid_required"] and item["paid_state"] in resumable_paid_states]
     if not paid_source_ids:
         raise ValueError("parent has no PENDING paid work")
     approval, auth_sha256 = _validate_authorization(Path(authorization), parent_root=parent, parent=manifest, source_ids=source_ids, paid_source_ids=paid_source_ids)
@@ -149,7 +193,7 @@ def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destina
         effective_settings=base.effective_settings,
     )
     lineage = {
-        "type": "paid_continuation",
+        "type": "paid_budget_continuation" if resumable_paid_states != {"PENDING"} else "paid_continuation",
         "parent_run_id": parent.name,
         "parent_manifest_sha256": _sha256(parent / "manifest.json"),
         "authorization_sha256": auth_sha256,
@@ -196,18 +240,33 @@ def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destina
     output_dir.mkdir()
     artifact_stage.mkdir()
     items = []
+    result_payloads = {
+        int(result["item_index"]): json.loads(str(result["payload"]))
+        for result in results
+    }
     for item in parent_items:
         copied = dict(item)
-        if copied["paid_required"] and copied["paid_state"] == "PENDING":
+        payload = result_payloads.get(int(copied["item_index"]), {})
+        for field in ("quarantine_state", "quarantine_status", "publication_blockers"):
+            copied[field] = str(payload.get(field, "") or "")
+        if copied["paid_required"] and copied["paid_state"] in resumable_paid_states:
             copied["paid_state"] = "PENDING"
         items.append(copied)
     checkpoint.seed_recovered_run(
         path=state_dir / "progress.sqlite3", run_id=run_id,
         input_hash=manifest["input_sha256"], run_signature=f"continuation:{parent.name}:{auth_sha256}",
-        context={"run_id": run_id, "input_hash": manifest["input_sha256"], "phase": "PAID", "lineage": lineage, "paid_queue_frozen": True, "seed_timestamp": "2000-01-01T00:00:00+00:00"},
-        budgets=limits, items=items, results=results,
+        context={"run_id": run_id, "input_hash": manifest["input_sha256"], "phase": "PAID", "lineage": lineage, "paid_queue_frozen": True, "paid_query_limit_per_company": manifest["paid_query_limit_per_company"], "seed_timestamp": "2000-01-01T00:00:00+00:00"},
+        budgets=limits, items=items, results=results, input_snapshots=input_snapshots,
     )
-    parent_artifact_dir = parent / "output" / "artifacts" / str(manifest["artifact_set_sha256"])
+    with closing(sqlite3.connect(state_dir / "progress.sqlite3")) as child_db:
+        child_db.executemany(
+            "INSERT INTO paid_query_plan_entries(run_id,item_index,plan_version,query_kind,round_ordinal,query_ordinal,normalized_query,query_sha256) VALUES(?,?,?,?,?,?,?,?)",
+            [(run_id, *row) for row in paid_query_plan_rows],
+        )
+        child_db.commit()
+    plan_material = json.dumps([list(row) for row in paid_query_plan_rows], ensure_ascii=False, separators=(",", ":"))
+    plan_receipt = {"plan_version": 1, "paid_query_plan_count": len(paid_query_plan_rows), "paid_query_plan_sha256": hashlib.sha256(plan_material.encode()).hexdigest()}
+    parent_artifact_dir = parent / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
     if (parent_artifact_dir / "all_results.xlsx").exists():
         shutil.copy2(parent_artifact_dir / "all_results.xlsx", artifact_stage / "all_results.xlsx")
     shutil.copy2(state_dir / "progress.sqlite3", artifact_stage / "recovery_state.sqlite3")
@@ -228,6 +287,8 @@ def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destina
         "manifest_schema_version": 4, "complete": False, "provisional": bool(manifest.get("provisional", False)), "quarantine_state": manifest.get("quarantine_state"), "phase": "PAID", "paid_enabled": True,
         "run_id": run_id, "input_sha256": manifest["input_sha256"], "config_sha256": effective.sha256,
         "run_config": effective.as_dict(), "runtime_source_tree_sha256": run_context.source_tree_sha256(), "item_count": len(source_ids),
+        "paid_query_limit_per_company": manifest["paid_query_limit_per_company"],
+        **plan_receipt,
         "ordered_source_record_ids": source_ids, "lineage": lineage,
         "counts": {"input": len(source_ids), "paid_pending": sum(1 for item in items if item["paid_required"] and item["paid_state"] == "PENDING")},
         "artifact_set_sha256": artifact_set_sha256, "files": files,

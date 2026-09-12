@@ -8,6 +8,8 @@ import os
 import sqlite3
 import shutil
 import time
+from dataclasses import dataclass
+from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import closing
 from pathlib import Path
@@ -25,7 +27,9 @@ from modules import (
     report,
     runtime,
     runtime_paths,
+    run_budget,
     run_context,
+    selection,
     scorer,
     search,
 )
@@ -44,6 +48,37 @@ SAFE_SQLITE_MINIMUM = (3, 51, 3)
 PATCHED_SAFE_SQLITE_BUILDS = frozenset({(3, 50, 7), (3, 44, 6)})
 
 
+class PipelineOutcomeStatus(str, Enum):
+    COMPLETE = "COMPLETE"
+    COMPLETE_RESUME_VERIFIED = "COMPLETE_RESUME_VERIFIED"
+    FINALIZATION_RESUME_RECONCILED = "FINALIZATION_RESUME_RECONCILED"
+    PAID_PENDING_APPROVAL = "PAID_PENDING_APPROVAL"
+    PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED = "PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED"
+    FINALIZATION_INVARIANT = "FINALIZATION_INVARIANT"
+
+
+@dataclass(frozen=True)
+class PipelineOutcome:
+    status: PipelineOutcomeStatus
+    payload: str = ""
+
+    def __str__(self) -> str:
+        return self.payload or self.status.value
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.status.value == other or self.payload == other
+        if isinstance(other, PipelineOutcome):
+            return (self.status, self.payload) == (other.status, other.payload)
+        return False
+
+    def __contains__(self, value: object) -> bool:
+        return str(value) in str(self)
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+
 def require_safe_sqlite_for_live() -> None:
     """Reject live runs on SQLite builds without the required handoff fixes."""
     version = tuple(int(part) for part in sqlite3.sqlite_version.split(".")[:3])
@@ -51,13 +86,14 @@ def require_safe_sqlite_for_live() -> None:
         return
     raise RuntimeError(
         "live run requires SQLite >= 3.51.3 or patched 3.50.7/3.44.6; "
-        f"runtime is {sqlite3.sqlite_version}"
+        f"runtime is {sqlite3.sqlite_version}. Start with "
+        r".runtime\python3147-sqlite3534\python.exe main.py"
     )
 
 
 def require_complete_manifest_phase(manifest: dict) -> None:
     if manifest.get("complete") and manifest.get("phase") != "COMPLETE":
-        raise RuntimeError("complete manifest phase must be exactly COMPLETE")
+        raise checkpoint.ResumeInvariant("complete manifest phase must be exactly COMPLETE")
 
 
 def paid_attempt_result(row: dict | None = None, *, exception: BaseException | None = None) -> str:
@@ -74,7 +110,10 @@ def paid_attempt_result(row: dict | None = None, *, exception: BaseException | N
         anonymous_states: list[str] = []
         for value in provider_results:
             if isinstance(value, dict):
-                state = str(value.get("result_state", value.get("provider_result", value.get("state", "")))).upper()
+                provider = str(value.get("primary_provider", value.get("provider", ""))).casefold()
+                if provider == "ddgs":
+                    continue
+                state = str(value.get("primary_result_state", value.get("result_state", value.get("provider_result", value.get("state", ""))))).upper()
                 ids = value.get("call_ids", value.get("provider_call_ids", [])) or []
             else:
                 state = str(getattr(value, "result_state", getattr(value, "state", value))).upper()
@@ -90,10 +129,10 @@ def paid_attempt_result(row: dict | None = None, *, exception: BaseException | N
             return "UNKNOWN"
         if "UNKNOWN" in states:
             return "UNKNOWN"
-        if "BLOCKED_BUDGET" in states:
-            return "BLOCKED_BUDGET"
         if any(state in _SUCCESSFUL_PROVIDER_STATES for state in states):
             return "COMPLETED"
+        if states and all(state == "BLOCKED_BUDGET" for state in states):
+            return "BLOCKED_BUDGET"
         if "FAILED" in states:
             return "FAILED"
         if states and all(state in _SUCCESSFUL_PROVIDER_STATES | {"NO_CALL_NEEDED"} for state in states):
@@ -109,7 +148,7 @@ def paid_attempt_result(row: dict | None = None, *, exception: BaseException | N
         return "NO_CALL_NEEDED"
     if row.get("status") in report.OK_STATUSES:
         return "FAILED"
-    return "FAILED"
+    return "UNKNOWN"
 
 
 def classify_scheduler_states(row: dict, *, attempt_number: int, publication_gate: bool | None = None) -> dict[str, object]:
@@ -145,7 +184,7 @@ def _inherited_paid_result(row: dict) -> tuple[str, str]:
         reason = str(value.get("result_reason", value.get("reason", ""))) if isinstance(value, dict) else str(getattr(value, "result_reason", getattr(value, "reason", "")))
         ids = value.get("call_ids", value.get("provider_call_ids", [])) if isinstance(value, dict) else getattr(value, "call_ids", ())
         reference = str((ids or [""])[0])
-        if state == "CACHE_HIT" or ("duplicate" in reason.casefold() and state in {"COMPLETED", "DONE"}):
+        if state == "CACHE_HIT" or (("duplicate" in reason.casefold() or "singleflight_inherited" in reason.casefold()) and state in {"COMPLETED", "DONE", "EMPTY"}):
             return "NO_CALL_NEEDED", reference or ("cache:" + reason if state == "CACHE_HIT" else reason)
     return "", ""
 
@@ -153,11 +192,11 @@ def _inherited_paid_result(row: dict) -> tuple[str, str]:
 def _verify_complete_artifacts(run_root: Path, manifest: dict) -> None:
     artifact_dir = run_root / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
     if not artifact_dir.is_dir() or not manifest.get("files"):
-        raise RuntimeError("complete run manifest has no immutable artifact set")
+        raise checkpoint.EvidenceInvariant("complete run manifest has no immutable artifact set")
     for name, info in manifest["files"].items():
         path = artifact_dir / str(name)
         if not path.is_file() or checkpoint.file_hash(path) != info.get("sha256"):
-            raise RuntimeError(f"complete artifact hash mismatch: {name}")
+            raise checkpoint.EvidenceInvariant(f"complete artifact hash mismatch: {name}")
 
 
 def _verify_artifact_metadata(run_root: Path, artifacts: dict) -> None:
@@ -165,18 +204,18 @@ def _verify_artifact_metadata(run_root: Path, artifacts: dict) -> None:
     files = artifacts.get("files")
     artifact_dir = run_root / "output" / "artifacts" / artifact_set
     if not artifact_set or not isinstance(files, dict) or not files or not artifact_dir.is_dir():
-        raise RuntimeError("finalization artifact metadata is invalid")
+        raise checkpoint.EvidenceInvariant("finalization artifact metadata is invalid")
     aggregate = []
     for name, info in sorted(files.items()):
         path = artifact_dir / str(name)
         if path.parent != artifact_dir or not path.is_file():
-            raise RuntimeError(f"finalization artifact is missing: {name}")
+            raise checkpoint.EvidenceInvariant(f"finalization artifact is missing: {name}")
         digest = checkpoint.file_hash(path)
         if digest != str(info.get("sha256", "")) or int(info.get("bytes", -1)) != path.stat().st_size:
-            raise RuntimeError(f"finalization artifact hash mismatch: {name}")
+            raise checkpoint.EvidenceInvariant(f"finalization artifact hash mismatch: {name}")
         aggregate.append(f"{path.name}:{digest}\n")
     if hashlib.sha256("".join(aggregate).encode("utf-8")).hexdigest() != artifact_set:
-        raise RuntimeError("finalization aggregate artifact hash mismatch")
+        raise checkpoint.EvidenceInvariant("finalization aggregate artifact hash mismatch")
 
 
 def _call_writer(writer: Callable[..., Any], rows: list[dict], elapsed: float,
@@ -211,53 +250,61 @@ def _validate_resume_identity(*, run_root: Path, manifest: dict, input_hash: str
             phase_row = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_root.name,)).fetchone()
             resume_phase = str(phase_row[0]) if phase_row else None
     validation_profile = "COMPLETE" if manifest.get("complete") and resume_phase != "FINALIZING" else "FINALIZING" if resume_phase == "FINALIZING" else "ACTIVE_RESUME"
-    run_context.validate_run_bundle(
-        run_root,
-        expected_input_hash=input_hash,
-        expected_config_hash=run_config.sha256,
-        expected_source_ids=ordered_source_record_ids,
-        profile=validation_profile,
-    )
+    try:
+        run_context.validate_run_bundle(
+            run_root,
+            expected_input_hash=input_hash,
+            expected_config_hash=run_config.sha256,
+            expected_source_ids=ordered_source_record_ids,
+            profile=validation_profile,
+        )
+    except checkpoint.SchedulerInvariantError:
+        raise
+    except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as exc:
+        raise checkpoint.ResumeInvariant("resume bundle validation failed") from exc
     for key, value in expected.items():
         if manifest.get(key) != value:
-            raise RuntimeError(f"resume identity mismatch: {key}")
+            raise checkpoint.ResumeInvariant(f"resume identity mismatch: {key}")
     if not db_path.exists():
-        raise RuntimeError("resume SQLite is missing")
+        raise checkpoint.ResumeInvariant("resume SQLite is missing")
     uri = f"file:{db_path.resolve()}?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as connection:
         row = connection.execute("SELECT run_id,input_hash FROM runs WHERE run_id=?", (run_root.name,)).fetchone()
         if not row or row[0] != run_root.name or row[1] != input_hash:
-            raise RuntimeError("resume SQLite identity mismatch")
+            raise checkpoint.ResumeInvariant("resume SQLite identity mismatch")
         db_ids = [row[0] for row in connection.execute("SELECT source_record_id FROM run_items WHERE run_id=? ORDER BY item_index", (run_root.name,))]
         if db_ids != ordered_source_record_ids:
-            raise RuntimeError("resume source_record_id list mismatch")
+            raise checkpoint.ResumeInvariant("resume source_record_id list mismatch")
         if connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=?", (run_root.name,)).fetchone()[0] != len(ordered_source_record_ids):
-            raise RuntimeError("resume item count mismatch")
+            raise checkpoint.ResumeInvariant("resume item count mismatch")
 
 
 def resolve_run_config(manifest: dict | None = None, *, allow_paid: bool | None = None,
                        search_cache: str | None = None, crawl_cache: str | None = None,
                        brightdata_budget: int | None = None, google_places_budget: int | None = None,
-                       linkedin_budget: int | None = None, rerank_cache: bool = False) -> run_context.RunConfig:
+                       hunter_budget: int | None = None, brandfetch_budget: int | None = None,
+                       linkedin_budget: int | None = None, llm_budget: int | None = None,
+                       rerank_cache: bool = False) -> run_context.RunConfig:
     if manifest is None:
         return run_context.RunConfig.from_config(paid_enabled=bool(allow_paid))
     recorded = run_context.RunConfig.from_dict(manifest.get("run_config", {}))
     if allow_paid is not None and bool(allow_paid) != recorded.paid_enabled:
-        raise ValueError("resume rejects behavioral paid-mode override")
+        raise checkpoint.ResumeInvariant("resume rejects behavioral paid-mode override")
     if search_cache is not None and search_cache != recorded.search_cache_mode:
-        raise ValueError("resume rejects behavioral search-cache override")
+        raise checkpoint.ResumeInvariant("resume rejects behavioral search-cache override")
     if crawl_cache is not None and crawl_cache != recorded.crawl_cache_mode:
-        raise ValueError("resume rejects behavioral crawl-cache override")
+        raise checkpoint.ResumeInvariant("resume rejects behavioral crawl-cache override")
     if rerank_cache and (recorded.search_cache_mode != "replay" or recorded.crawl_cache_mode != "replay"):
-        raise ValueError("resume rejects behavioral replay override")
+        raise checkpoint.ResumeInvariant("resume rejects behavioral replay override")
     requested_budgets = {
         "brightdata": brightdata_budget, "google_places": google_places_budget,
-        "linkedin": linkedin_budget,
+        "hunter": hunter_budget, "brandfetch": brandfetch_budget,
+        "linkedin": linkedin_budget, "llm": llm_budget,
     }
     recorded_budgets = recorded.as_dict()["budgets"]
     for provider, value in requested_budgets.items():
         if value is not None and int(value) != int(recorded_budgets[provider]):
-            raise ValueError(f"resume rejects behavioral budget override: {provider}")
+            raise checkpoint.ResumeInvariant(f"resume rejects behavioral budget override: {provider}")
     recorded.apply_effective_settings()
     return recorded
 
@@ -266,39 +313,32 @@ def validate_resume_before_credentials(input_file: Path, resume_run_dir: Path, *
                                        companies: set[str] | None = None, only_statuses: set[str] | None = None,
                                        from_run_manifest: Path | None = None, search_cache: str | None = None,
                                        crawl_cache: str | None = None, brightdata_budget: int | None = None,
-                                       google_places_budget: int | None = None, linkedin_budget: int | None = None,
+                                       google_places_budget: int | None = None, hunter_budget: int | None = None,
+                                       brandfetch_budget: int | None = None, linkedin_budget: int | None = None,
+                                       llm_budget: int | None = None,
                                        rerank_cache: bool = False) -> None:
     """Read-only identity gate used before any credential setup or provider code."""
     run_root = Path(resume_run_dir).resolve()
     manifest_path = run_root / "manifest.json"
     if not manifest_path.exists():
-        raise ValueError("resume requires run_root/manifest.json")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raise checkpoint.ResumeInvariant("resume requires run_root/manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise checkpoint.ResumeInvariant("resume manifest is unreadable or invalid") from exc
     run_config = resolve_run_config(
         manifest, allow_paid=allow_paid, search_cache=search_cache,
         crawl_cache=crawl_cache, brightdata_budget=brightdata_budget,
-        google_places_budget=google_places_budget, linkedin_budget=linkedin_budget,
+        google_places_budget=google_places_budget, hunter_budget=hunter_budget,
+        brandfetch_budget=brandfetch_budget, linkedin_budget=linkedin_budget, llm_budget=llm_budget,
         rerank_cache=rerank_cache,
     )
     if manifest.get("paid_enabled") is False and bool(allow_paid):
         raise PermissionError("paid-disabled parent requires prepare_paid_continuation.py")
-    records, _ = deduplicate_company_records(excel.read_company_records(Path(input_file)))
-    if companies:
-        wanted = {value.casefold() for value in companies}
-        records = [record for record in records if record["company"].casefold() in wanted]
-    if only_statuses:
-        if not from_run_manifest:
-            raise ValueError("--only-status requires --from-run-manifest")
-        source_manifest = json.loads(Path(from_run_manifest).read_text(encoding="utf-8"))
-        source_root = Path(from_run_manifest).resolve().parent
-        artifact_dir = source_root / "output" / "artifacts" / str(source_manifest.get("artifact_set_sha256", ""))
-        artifact = artifact_dir / "all_results.xlsx"
-        info = source_manifest.get("files", {}).get("all_results.xlsx", {})
-        if not source_manifest.get("complete") or not artifact.is_file() or checkpoint.file_hash(artifact) != info.get("sha256"):
-            raise ValueError("source run manifest artifact hash mismatch")
-        statuses = excel.read_result_statuses_by_source_id(artifact)
-        allowed = {value.casefold() for value in only_statuses}
-        records = [record for record in records if statuses.get(record["source_record_id"], "").casefold() in allowed]
+    records, _ = selection.select_company_records(
+        Path(input_file), companies=companies, only_statuses=only_statuses,
+        from_run_manifest=from_run_manifest,
+    )
     input_hash = checkpoint.file_hash(Path(input_file))
     _validate_resume_identity(
         run_root=run_root, manifest=manifest, input_hash=input_hash,
@@ -309,23 +349,7 @@ def validate_resume_before_credentials(input_file: Path, resume_run_dir: Path, *
 
 
 def deduplicate_company_records(records: list[dict]) -> tuple[list[dict], int]:
-    """Keep distinct source records; only an identical source ID may merge."""
-    unique: dict[str, dict] = {}
-    result: list[dict] = []
-    for index, record in enumerate(records):
-        current = dict(record)
-        source_id, quality = run_context.source_record_identity(current)
-        current["source_record_id"] = source_id
-        current["source_record_id_quality"] = quality
-        existing = unique.get(source_id)
-        if existing is None:
-            unique[source_id] = current
-            result.append(current)
-            continue
-        for field, value in current.items():
-            if not existing.get(field) and value:
-                existing[field] = value
-    return result, len(records) - len(result)
+    return selection.deduplicate_company_records(records)
 
 
 def needs_paid_escalation(row: dict) -> bool:
@@ -485,14 +509,15 @@ def _run_pipeline_impl_body(
     logger = logging.getLogger("contact_finder")
     discovery_coverage.reset()
     replay_snapshot.reset()
+    search.reset_run_state()
     search.reset_candidate_host_observations()
     linkedin_company.reset()
     google_places.reset()
     start_time = time.monotonic()
-    company_records = excel.read_company_records(input_file)
-    for original_index, record in enumerate(company_records):
-        record.setdefault("original_index", original_index)
-    company_records, duplicate_count = deduplicate_company_records(company_records)
+    company_records, duplicate_count = selection.select_company_records(
+        Path(input_file), companies=companies, only_statuses=only_statuses,
+        from_run_manifest=from_run_manifest, require_nonempty=True,
+    )
     for record in company_records:
         if not record.get("source_record_id"):
             source_id, quality = run_context.source_record_identity(record)
@@ -507,31 +532,6 @@ def _run_pipeline_impl_body(
     if duplicate_count:
         runtime.record("input.duplicates_removed", duplicate_count)
         logger.info("Removed %s duplicate company rows before processing", duplicate_count)
-    if companies:
-        wanted = {value.casefold() for value in companies}
-        company_records = [record for record in company_records if record["company"].casefold() in wanted]
-    if only_statuses:
-        if not from_run_manifest:
-            raise ValueError("--only-status requires a verified --from-run-manifest")
-        manifest = json.loads(Path(from_run_manifest).read_text(encoding="utf-8"))
-        if not manifest.get("complete") or not manifest.get("files"):
-            raise ValueError("source run manifest is not complete")
-        source_root = Path(from_run_manifest).resolve().parent
-        artifact_dir = source_root / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
-        all_results_source = artifact_dir / "all_results.xlsx"
-        file_info = manifest.get("files", {}).get("all_results.xlsx", {})
-        if not all_results_source.exists() or not file_info or checkpoint.file_hash(all_results_source) != file_info.get("sha256"):
-            raise ValueError("source run manifest artifact hash mismatch")
-        previous_statuses = excel.read_result_statuses_by_source_id(
-            all_results_source
-        )
-        allowed = {value.casefold() for value in only_statuses}
-        company_records = [
-            record for record in company_records
-            if previous_statuses.get(record.get("source_record_id", ""), "").casefold() in allowed
-        ]
-    if not company_records:
-        raise RuntimeError(f"No companies matched the requested selection in {input_file}")
     scorer.configure_company_token_frequencies([
         record["company"] for record in company_records
     ])
@@ -539,16 +539,59 @@ def _run_pipeline_impl_body(
     if resume_run_dir:
         resume_manifest_path = Path(resume_run_dir) / "manifest.json"
         if not resume_manifest_path.exists():
-            raise ValueError("resume requires run_root/manifest.json")
-        resume_manifest = json.loads(resume_manifest_path.read_text(encoding="utf-8"))
+            raise checkpoint.ResumeInvariant("resume requires run_root/manifest.json")
+        try:
+            resume_manifest = json.loads(resume_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise checkpoint.ResumeInvariant("resume manifest is unreadable or invalid") from exc
+        require_complete_manifest_phase(resume_manifest)
         if resume_manifest.get("paid_enabled") is False and bool(allow_paid):
             raise PermissionError("complete paid-disabled runs require prepare_paid_continuation.py")
         run_config = resolve_run_config(resume_manifest, allow_paid=allow_paid)
         allow_paid = run_config.paid_enabled
+        budget_details = resume_manifest.get("budget_details")
+        if not isinstance(budget_details, dict):
+            # Legacy manifests do not carry the ratio/cap calculation.  Keep
+            # the recorded effective budgets without deriving new values from
+            # today's population or environment.
+            recorded_budgets = run_config.as_dict().get("budgets", {})
+            budget_details = {
+                provider: {
+                    "population_count": len(company_records),
+                    "ratio": None,
+                    "explicit_cap": None,
+                    "effective_budget": int(recorded_budgets.get(provider, 0)),
+                    "reserved": 0,
+                    "completed": 0,
+                    "blocked": 0,
+                }
+                for provider in run_budget.PAID_API_PROVIDERS
+            }
     else:
         allow_paid = bool(allow_paid)
-        run_config = resolve_run_config(None, allow_paid=allow_paid)
-    paid_query_limit = search.configure_run_budget(len(company_records))
+        caps = run_budget.explicit_paid_api_caps()
+        calculated_budgets = run_budget.calculate_paid_api_budgets(
+            len(company_records), caps,
+        )
+        run_config = run_context.RunConfig.from_config(
+            paid_enabled=allow_paid,
+            budgets={
+                **calculated_budgets,
+                "linkedin": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
+                "llm": config.LLM_ARBITER_BUDGET,
+            },
+        )
+        run_config.apply_effective_settings()
+        budget_details = run_budget.budget_details(
+            len(company_records), caps, run_config.as_dict().get("budgets", {}),
+        )
+    if resume_manifest is None:
+        paid_query_limit = search.configure_run_budget(len(company_records))
+    else:
+        frozen_paid_query_limit = resume_manifest.get("paid_query_limit_per_company")
+        if not isinstance(frozen_paid_query_limit, int) or isinstance(frozen_paid_query_limit, bool):
+            raise checkpoint.SchedulerInvariantError("resume manifest has no frozen paid query limit")
+        paid_query_limit = search.configure_frozen_paid_query_limit(frozen_paid_query_limit)
     paid_settings = {
         "search_provider": config.SEARCH_PROVIDER,
         "google_places": config.ENABLE_GOOGLE_PLACES,
@@ -623,7 +666,10 @@ def _run_pipeline_impl_body(
     # Durable host preflight is the first network-capable operation after the
     # run lease.  This also makes the free-only handoff safe before approval.
     checkpoint.initialize_schema(run_root / "state" / "progress.sqlite3")
-    runtime.configure_durable_run(context.run_id, run_config.as_dict().get("budgets", {}))
+    runtime.configure_durable_run(
+        context.run_id, run_config.as_dict().get("budgets", {}),
+        budget_metadata=budget_details,
+    )
     # Resume identity is a local, fail-closed check and must precede every
     # physical source probe or provider-capable operation.
     if resume_manifest:
@@ -634,6 +680,10 @@ def _run_pipeline_impl_body(
             ordered_source_record_ids=[record["source_record_id"] for record in company_records],
             lineage=(resume_manifest or {}).get("lineage", {"type": "fresh"}),
         )
+        durable_resume_state = checkpoint.load_run_state_by_id(context.run_id)
+        durable_limit = ((durable_resume_state or {}).get("context") or {}).get("paid_query_limit_per_company")
+        if durable_limit != paid_query_limit:
+            raise checkpoint.SchedulerInvariantError("resume paid query limit differs between manifest and checkpoint")
     # Load/configure replay identity before source preflight.  A replay miss
     # must fail locally before any source probe can become physical I/O.
     if config.REPLAY_SNAPSHOT_INPUT:
@@ -662,7 +712,7 @@ def _run_pipeline_impl_body(
             )
             intent = checkpoint.load_finalization_intent(context.run_id)
             if intent and intent.get("artifact_set_sha256") and intent.get("artifact_set_sha256") != resume_manifest.get("artifact_set_sha256"):
-                raise RuntimeError("complete finalization intent artifact identity mismatch")
+                raise checkpoint.OutcomeInvariant("complete finalization intent artifact identity mismatch")
             if not intent or not intent.get("memory_plan_committed"):
                 checkpoint.mark_legacy_no_memory_plan(
                     context.run_id,
@@ -684,7 +734,7 @@ def _run_pipeline_impl_body(
                 if intent and intent.get("memory_plan_committed"):
                     entries = checkpoint.load_memory_outbox_entries(context.run_id)
                     if len(entries) != int(intent.get("memory_plan_count", 0)):
-                        raise RuntimeError("complete resume memory plan is incomplete")
+                        raise checkpoint.OutcomeInvariant("complete resume memory plan is incomplete")
                 checkpoint.validate_finalization_contract(context.run_id, run_root)
                 if intent and intent.get("memory_plan_committed"):
                     _drain_memory_outbox(
@@ -693,7 +743,7 @@ def _run_pipeline_impl_body(
                     )
                     entries = checkpoint.load_memory_outbox_entries(context.run_id)
                     if any(entry["state"] not in {"DONE", "SKIPPED_REPLAY"} for entry in entries):
-                        raise RuntimeError("complete resume left memory outbox entries")
+                        raise checkpoint.OutcomeInvariant("complete resume left memory outbox entries")
                 checkpoint.validate_finalization_contract(context.run_id, run_root)
                 _verify_artifact_metadata(
                     run_root,
@@ -704,7 +754,7 @@ def _run_pipeline_impl_body(
                 )
                 run_context.validate_run_bundle(run_root, expected_input_hash=input_hash, expected_config_hash=run_config.sha256, expected_source_ids=[record["source_record_id"] for record in company_records], profile="COMPLETE")
             lease.release()
-            return "COMPLETE_RESUME_VERIFIED"
+            return PipelineOutcome(PipelineOutcomeStatus.COMPLETE_RESUME_VERIFIED, "COMPLETE_RESUME_VERIFIED")
         # FINALIZING resumes reconcile the immutable artifact boundary below;
         # they must not enter either provider phase.
         resume_state = checkpoint.load_run_state_by_id(context.run_id)
@@ -716,7 +766,7 @@ def _run_pipeline_impl_body(
             if not resume_intent.get("memory_plan_committed"):
                 prepared_memory_rows = prepared.get("memory_rows")
                 if not isinstance(prepared_memory_rows, list):
-                    raise RuntimeError("prepared finalization has no recoverable memory rows")
+                    raise checkpoint.OutcomeInvariant("prepared finalization has no recoverable memory rows")
                 checkpoint.enqueue_memory_rows(context.run_id, prepared_memory_rows)
                 checkpoint.commit_finalization_memory_plan(
                     run_id=context.run_id,
@@ -746,24 +796,26 @@ def _run_pipeline_impl_body(
             checkpoint.validate_finalization_contract(context.run_id, run_root, require_complete=False)
             checkpoint.complete_finalization_phase(context.run_id, expected_count=len(company_records))
             if not resume_intent.get("memory_plan_committed"):
-                raise RuntimeError("prepared finalization has no committed memory plan")
+                raise checkpoint.OutcomeInvariant("prepared finalization has no committed memory plan")
             if len(checkpoint.load_memory_outbox_entries(context.run_id)) != int(resume_intent.get("memory_plan_count", 0)):
-                raise RuntimeError("prepared finalization memory plan is incomplete")
+                raise checkpoint.OutcomeInvariant("prepared finalization memory plan is incomplete")
             checkpoint.validate_finalization_contract(context.run_id, run_root)
             _drain_memory_outbox(
                 context.run_id,
                 replay=config.SEARCH_CACHE_MODE == "replay" or config.CRAWL_CACHE_MODE == "replay",
             )
             if any(entry["state"] not in {"DONE", "SKIPPED_REPLAY"} for entry in checkpoint.load_memory_outbox_entries(context.run_id)):
-                raise RuntimeError("prepared finalization left memory outbox entries")
+                raise checkpoint.OutcomeInvariant("prepared finalization left memory outbox entries")
             lease.release()
-            return "FINALIZATION_RESUME_RECONCILED"
+            return PipelineOutcome(PipelineOutcomeStatus.FINALIZATION_RESUME_RECONCILED, "FINALIZATION_RESUME_RECONCILED")
     ensure_directories()
     logger = setup_logging()
     prior_state = checkpoint.load_run_state_by_id(context.run_id)
     budgets = run_config.as_dict().get("budgets", {})
     config.PAID_ENABLED = bool(allow_paid)
-    runtime.configure_durable_run(context.run_id, budgets)
+    runtime.configure_durable_run(
+        context.run_id, budgets, budget_metadata=budget_details,
+    )
     if prior_state:
         checkpoint.recover_interrupted_items(context.run_id)
     if prior_state and prior_state.get("context"):
@@ -779,8 +831,8 @@ def _run_pipeline_impl_body(
     else:
         checkpoint.initialize_run(
             run_id=context.run_id, input_hash=input_hash, run_signature=run_signature,
-            context=context.as_dict(), budgets=budgets,
-            items=[{"item_index": idx, "source_record_id": record["source_record_id"], "paid_required": False}
+            context={**context.as_dict(), "budget_details": budget_details, "paid_query_limit_per_company": paid_query_limit}, budgets=budgets,
+            items=[{"item_index": idx, "source_record_id": record["source_record_id"], "company": record.get("company", ""), "website": record.get("website", ""), "paid_required": False}
                    for idx, record in enumerate(company_records)],
         )
     run_context.write_manifest(
@@ -794,6 +846,8 @@ def _run_pipeline_impl_body(
             "lineage": (resume_manifest or {}).get("lineage", {"type": "fresh"}),
             "phase": context.phase,
             "paid_enabled": run_config.paid_enabled,
+            "budget_details": budget_details,
+            "paid_query_limit_per_company": paid_query_limit,
         },
     )
     if prior_state and prior_state.get("runtime_snapshot"):
@@ -818,16 +872,28 @@ def _run_pipeline_impl_body(
             runtime.record("pipeline.paid_total", len(items))
         else:
             runtime.record("pipeline.free_total", len(items))
+        supports_execution_phase = "execution_phase" in inspect.signature(process_company_fn).parameters
         def process_one(idx: int, record: dict):
             runtime.set_item_context(idx, phase_name.lower())
+            if supports_execution_phase:
+                return process_company_fn(idx, record["company"], logger, record.get("website", ""), record, execution_phase=phase_name)
             return process_company_fn(idx, record["company"], logger, record.get("website", ""), record)
         def run_one(idx: int, record: dict):
+            runtime.reset_item_stop_state(idx)
             if not checkpoint.claim_item(run_id=context.run_id, item_index=idx, phase=phase_name):
                 return None
             if paid_phase:
                 checkpoint.begin_paid_attempt(
                     run_id=context.run_id, item_index=idx,
                     attempt_number=int(item_states.get(idx, {}).get("paid_attempts", 0)) + 1,
+                    provider_plan=[provider for provider, enabled in (
+                        ("brightdata", paid_settings["search_provider"] == "brightdata"),
+                        ("google_places", paid_settings["google_places"]),
+                        ("brandfetch", paid_settings["brandfetch"]),
+                        ("hunter", paid_settings["hunter_domain"]),
+                        ("linkedin", paid_settings["linkedin_enabled"]),
+                        ("llm", paid_settings["llm_enabled"]),
+                    ) if enabled],
                 )
             provider_token = runtime.begin_provider_attempt() if paid_phase else None
             calls_before = {call["call_id"] for call in checkpoint.provider_calls_for_item(context.run_id, idx)} if paid_phase else set()
@@ -859,6 +925,8 @@ def _run_pipeline_impl_body(
                         continue
                     idx, row = result
                 except Exception as exc:
+                    if isinstance(exc, checkpoint.SchedulerInvariantError):
+                        raise
                     idx = futures[future]
                     company = company_records[idx]["company"]
                     logger.exception("Unhandled processing failure for %s", company)
@@ -870,6 +938,8 @@ def _run_pipeline_impl_body(
                             idx, row = process_one(idx, company_records[idx])
                             row["attempt_number"] = 2
                         except Exception as retry_exc:
+                            if isinstance(retry_exc, checkpoint.SchedulerInvariantError):
+                                raise
                             logger.exception("Free retry failed for %s", company)
                             row = empty_result_fn(
                                 company, "PROCESSING_FAILED",
@@ -893,6 +963,8 @@ def _run_pipeline_impl_body(
                         row["attempt_number"] = 2
                         retried = True
                     except Exception as retry_exc:
+                        if isinstance(retry_exc, checkpoint.SchedulerInvariantError):
+                            raise
                         row = empty_result_fn(
                             company_records[idx]["company"], "PROCESSING_FAILED",
                             f"attempt_2:{retry_exc.__class__.__name__}: {retry_exc}",
@@ -904,9 +976,20 @@ def _run_pipeline_impl_body(
                 if company_records[idx].get("_id"):
                     row.setdefault("_id", company_records[idx]["_id"])
                 existing_item = item_states.get(idx, {})
-                attempt_reason = str(row.get("reason", ""))
+                attempt_reason = str(row.get("paid_attempt_reason") or row.get("reason", ""))
                 if paid_phase:
                     before_ids = set(row.pop("__provider_call_ids_before", []))
+                    if str(row.get("paid_attempt_reason", "")) == "supplied_website_publishable_at_paid_entry":
+                        row["paid_input_snapshot_sha256"] = checkpoint.immutable_input_snapshot_sha256(context.run_id, idx)
+                        row["paid_evidence_ref"] = row["paid_input_snapshot_sha256"]
+                    structured_relations = {
+                        str(call_id): str(relation).upper()
+                        for outcome in row.get("provider_results", [])
+                        if isinstance(outcome, dict)
+                        for call_id, relation in dict(outcome.get("call_relations") or {}).items()
+                        if call_id and str(relation).upper() in {"OWNER", "INHERITED"}
+                    }
+                    row["inherited_call_ids"] = sorted(call_id for call_id, relation in structured_relations.items() if relation == "INHERITED")
                     provider_calls = [
                         call for call in checkpoint.provider_calls_for_item(context.run_id, idx)
                         if not before_ids or call["call_id"] not in before_ids
@@ -920,12 +1003,14 @@ def _run_pipeline_impl_body(
                 attempt_result = paid_attempt_result(row) if paid_phase else "NO_CALL_NEEDED"
                 if paid_phase:
                     explicit_no_call = str(row.get("paid_attempt_result", "")).upper() == "NO_CALL_NEEDED" or str(row.get("status", "")).upper() == "NO_CALL_NEEDED"
-                    inherited_result, inherited_ref = _inherited_paid_result(row)
-                    if inherited_result and not provider_calls:
-                        attempt_result = inherited_result
-                        row["paid_result_ref"] = inherited_ref
-                    if attempt_result == "COMPLETED" and not provider_calls and not explicit_no_call:
-                        attempt_result = "FAILED"
+                    inherited_ids = row.get("inherited_call_ids", ())
+                    if inherited_ids and attempt_result in {"COMPLETED", "NO_CALL_NEEDED"} and not provider_calls:
+                        row["paid_result_ref"] = str(inherited_ids[0])
+                        row["paid_attempt_reason"] = "terminal_paid_result_reference"
+                        row["paid_evidence_ref"] = str(inherited_ids[0])
+                        attempt_reason = "terminal_paid_result_reference"
+                    if attempt_result == "COMPLETED" and not provider_calls and not inherited_ids and not explicit_no_call:
+                        attempt_result = "UNKNOWN"
                         row["reason"] = "; ".join(filter(None, [str(row.get("reason", "")), "paid_provider_execution_missing"]))
                         attempt_reason = str(row.get("reason", ""))
                     single_call = provider_calls[0] if len(provider_calls) == 1 else {"call_id": "", "request_fingerprint": ""}
@@ -935,13 +1020,20 @@ def _run_pipeline_impl_body(
                         result=attempt_result, reason=attempt_reason,
                         call_id=str(row.get("call_id") or single_call["call_id"]),
                         request_fingerprint=str(row.get("request_fingerprint") or single_call["request_fingerprint"]),
-                        call_ids=[call["call_id"] for call in provider_calls],
+                        call_ids=sorted(set([call["call_id"] for call in provider_calls] + [str(value) for value in row.get("inherited_call_ids", ()) if value])),
+                        call_relations=structured_relations,
+                        evidence_kind=str(row.get("paid_attempt_reason", "")),
+                        input_snapshot_sha256=str(row.get("paid_input_snapshot_sha256", "")),
                     )
                 if paid_phase and idx in results_by_index:
                     previous = results_by_index[idx]
                     if result_quality_key(previous) > result_quality_key(row):
+                        paid_audit = {key: row.get(key) for key in ("provider_results", "paid_attempt_result", "paid_attempt_reason", "paid_evidence_ref", "paid_result_ref", "call_id", "request_fingerprint") if key in row}
                         row = previous
-                if existing_item.get("quarantine_state"):
+                        row.update(paid_audit)
+                if existing_item.get("quarantine_state") and not (
+                    paid_phase and str(existing_item.get("quarantine_state")) == "HANDOFF_PENDING"
+                ):
                     output_artifacts.apply_quarantine(
                         row, state=str(existing_item["quarantine_state"]),
                         status=str(existing_item.get("quarantine_status", "")),
@@ -974,7 +1066,13 @@ def _run_pipeline_impl_body(
                     paid_attempts=(int(existing_item.get("paid_attempts", 0)) + 1) if paid_phase else int(existing_item.get("paid_attempts", 0)),
                     last_error=attempt_reason if paid_phase else str(row.get("reason", "")),
                 )
+                if paid_phase and attempt_result == "NO_CALL_NEEDED" and attempt_reason == "supplied_website_publishable_at_paid_entry":
+                    checkpoint.record_paid_no_call_evidence(
+                        run_id=context.run_id, item_index=idx,
+                        attempt_number=int(existing_item.get("paid_attempts", 0)) + 1,
+                    )
                 durable_telemetry = checkpoint.derive_telemetry(context.run_id)
+                runtime.merge_durable_telemetry(durable_telemetry)
                 counter = "paid_completed" if paid_phase else "free_completed"
                 total_counter = "paid_total" if paid_phase else "free_total"
                 runtime.record(f"pipeline.{counter}")
@@ -1014,15 +1112,29 @@ def _run_pipeline_impl_body(
         config.LINKEDIN_COMPANY_REQUEST_BUDGET = paid_settings["linkedin_budget"] if allow_paid else 0
         config.LLM_ARBITER_BUDGET = paid_settings["llm_budget"] if allow_paid else 0
         paid_indexes = checkpoint.freeze_paid_queue(context.run_id)
+        for item_index in paid_indexes:
+            existing_plan = checkpoint.load_paid_query_plan(context.run_id, item_index)
+            if not existing_plan:
+                checkpoint.freeze_paid_query_plan(
+                    run_id=context.run_id,
+                    item_index=item_index,
+                    queries=search._primary_queries(company_records[item_index]["company"], company_records[item_index])[:paid_query_limit],
+                )
+        query_plan_receipt = checkpoint.paid_query_plan_receipt(context.run_id)
+        run_context.write_manifest(
+            manifest_path, context, run_config, complete=False,
+            extra={**query_plan_receipt, "paid_query_limit_per_company": paid_query_limit},
+        )
         if resume_phase == "FREE" and not allow_paid and paid_indexes:
             telemetry = checkpoint.derive_telemetry(context.run_id)
+            runtime.merge_durable_telemetry(telemetry)
             expected = len(company_records)
             if not (
                 telemetry["item_terminal"] == expected
                 and telemetry["result_count"] == expected
                 and telemetry["manifest_count"] == expected
             ):
-                raise RuntimeError(f"handoff telemetry is not an exact terminal snapshot: {telemetry}")
+                raise checkpoint.OutcomeInvariant(f"handoff telemetry is not an exact terminal snapshot: {telemetry}")
             checkpoint.mark_handoff_pending(
                 run_id=context.run_id, expected_count=expected,
             )
@@ -1034,6 +1146,7 @@ def _run_pipeline_impl_body(
             # point through manifest publication no application-level reads or
             # writes are allowed to alter the handoff state.
             handoff_telemetry = checkpoint.derive_telemetry(context.run_id)
+            runtime.merge_durable_telemetry(handoff_telemetry)
             checkpoint_path = run_root / "state" / "progress.sqlite3"
             sealed = checkpoint.seal_checkpoint_for_handoff(
                 checkpoint_path,
@@ -1082,17 +1195,18 @@ def _run_pipeline_impl_body(
                     "files": files,
                     "checkpoint_sha256": frozen_hash,
                     "handoff": True,
+                    "budget_details": budget_details,
+                    "paid_query_limit_per_company": paid_query_limit,
+                    **query_plan_receipt,
                     "telemetry": handoff_telemetry,
                 },
             )
             lease.release()
-            return "PAID_PENDING_APPROVAL"
+            return PipelineOutcome(PipelineOutcomeStatus.PAID_PENDING_APPROVAL, "PAID_PENDING_APPROVAL")
         if resume_phase != "FINALIZING" and paid_escalation_enabled and escalation:
             runtime.record("pipeline.paid_escalation_companies", len(escalation))
             if resume_phase != "PAID":
                 checkpoint.transition_phase(context.run_id, "PAID", expected_count=len(company_records))
-                search.scale_paid_api_budgets(len(escalation))
-                search.configure_run_budget(len(escalation))
             execute_phase(escalation, paid_phase=True)
     except KeyboardInterrupt:
         logger.warning("Interrupted. Progress checkpoint was saved.")
@@ -1113,6 +1227,10 @@ def _run_pipeline_impl_body(
         config.LLM_ARBITER_BUDGET = paid_settings["llm_budget"]
         pass
 
+    run_context.write_manifest(
+        manifest_path, context, run_config, complete=False,
+        extra=checkpoint.paid_query_plan_receipt(context.run_id),
+    )
     manual_review_items = [
         item for item in checkpoint.load_run_items(context.run_id)
         if item.get("paid_required") and item.get("paid_state") in {"UNKNOWN", "BLOCKED_BUDGET"}
@@ -1126,15 +1244,18 @@ def _run_pipeline_impl_body(
                 "paid_pending": 0,
                 "manual_authorization_review_required": True,
                 "manual_review_item_indexes": [item["item_index"] for item in manual_review_items],
+                "paid_query_limit_per_company": paid_query_limit,
+                **checkpoint.paid_query_plan_receipt(context.run_id),
             },
         )
         lease.release()
-        return "PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED"
+        return PipelineOutcome(PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED, "PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED")
 
     if any(str(item.get("quarantine_state", "")) == "HANDOFF_PENDING" for item in checkpoint.load_run_items(context.run_id)):
         checkpoint.release_handoff_pending(context.run_id, expected_count=len(company_records))
 
     if resume_phase != "FINALIZING":
+        checkpoint.validate_paid_evidence(context.run_id)
         checkpoint.transition_phase(context.run_id, "FINALIZING", expected_count=len(company_records))
     runtime.set_phase("FINALIZING")
     existing_intent = checkpoint.load_finalization_intent(context.run_id)
@@ -1143,14 +1264,15 @@ def _run_pipeline_impl_body(
         generation = str(existing_intent.get("generation", ""))
         telemetry_snapshot = json.loads(existing_intent.get("telemetry_snapshot_json") or "{}")
         if not result_snapshot or not generation or not telemetry_snapshot:
-            raise RuntimeError("finalization intent has no frozen telemetry snapshot")
+            raise checkpoint.OutcomeInvariant("finalization intent has no frozen telemetry snapshot")
         output_context = json.loads(existing_intent.get("output_context_json") or "{}")
         finalization_elapsed = float(output_context.get("elapsed_seconds", telemetry_snapshot.get("elapsed_seconds", 0)))
     else:
         result_snapshot = checkpoint.result_snapshot_sha256(context.run_id)
         generation = hashlib.sha256(f"{context.run_id}:{result_snapshot}".encode("utf-8")).hexdigest()
-        telemetry_snapshot = {"durable_scheduler": checkpoint.derive_telemetry(context.run_id)}
-        finalization_elapsed = float(telemetry_snapshot.get("elapsed_seconds", time.monotonic() - start_time))
+        telemetry_snapshot = checkpoint.canonical_scheduler_receipt(context.run_id)
+        runtime.merge_durable_telemetry(telemetry_snapshot)
+        finalization_elapsed = float(runtime.snapshot().get("elapsed_seconds", time.monotonic() - start_time))
         checkpoint.begin_finalization_intent(
             run_id=context.run_id, generation=generation,
             input_snapshot_sha256=result_snapshot,
@@ -1172,7 +1294,7 @@ def _run_pipeline_impl_body(
     artifacts = getattr(artifact_result, "artifacts", None)
     if not artifacts:
         lease.release()
-        raise RuntimeError("writer must return immutable artifact metadata")
+        raise checkpoint.OutcomeInvariant("writer must return immutable artifact metadata")
     memory_rows = getattr(artifact_result, "entity_memory_rows", [])
     _verify_artifact_metadata(run_root, artifacts)
     run_context.validate_run_bundle(
@@ -1204,7 +1326,7 @@ def _run_pipeline_impl_body(
         config_sha256=run_config.sha256,
         counts={"input_count": len(company_records), "result_count": len(rows)},
         artifacts=artifacts,
-        telemetry=checkpoint.derive_telemetry(context.run_id),
+        telemetry=frozen_telemetry,
     )
     checkpoint.complete_finalization_intent(
         run_id=context.run_id,
@@ -1221,6 +1343,6 @@ def _run_pipeline_impl_body(
         replay=config.SEARCH_CACHE_MODE == "replay" or config.CRAWL_CACHE_MODE == "replay",
     )
     if any(entry["state"] not in {"DONE", "SKIPPED_REPLAY"} for entry in checkpoint.load_memory_outbox_entries(context.run_id)):
-        raise RuntimeError("finalization left memory outbox entries")
+        raise checkpoint.OutcomeInvariant("finalization left memory outbox entries")
     lease.release()
-    return str(report_text)
+    return PipelineOutcome(PipelineOutcomeStatus.COMPLETE, str(report_text))

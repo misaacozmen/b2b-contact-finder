@@ -52,7 +52,7 @@ class DiverseQueryBudgetTests(unittest.TestCase):
             search, "_RUN_PAID_QUERY_LIMIT", None,
         ):
             search.configure_run_budget(80)
-            self.assertEqual(config.SEARCH_HTTP_REQUEST_BUDGET, 800)
+            self.assertEqual(config.SEARCH_HTTP_REQUEST_BUDGET, 0)
 
     def test_paid_api_budgets_scale_to_escalation_count_and_hard_caps(self):
         with patch.object(config, "BRIGHTDATA_REQUEST_HARD_CAP", 500), patch.object(
@@ -121,7 +121,7 @@ class DiverseQueryBudgetTests(unittest.TestCase):
         ):
             input_path = Path(directory) / "input.xlsx"
             input_path.touch()
-            with self.assertRaisesRegex(RuntimeError, "writer must return immutable artifact metadata"):
+            with self.assertRaisesRegex(RuntimeError, "FAILED requires durable FAILED call"):
                 main.run(input_path, allow_paid=True)
 
         self.assertEqual(calls, [
@@ -253,7 +253,7 @@ class SearchCoverageIntegrationTests(unittest.TestCase):
             0,
         )
 
-    def test_brightdata_honors_body_cooldown_before_decode_retry(self):
+    def test_brightdata_decode_failure_does_not_create_retry_budget(self):
         failed = Mock(status_code=200, headers={}, text="minimum of 15 seconds")
         failed.json.side_effect = ValueError("not json")
         succeeded = Mock(
@@ -273,13 +273,14 @@ class SearchCoverageIntegrationTests(unittest.TestCase):
         ) as sleep:
             results = search._brightdata_text("nova official website")
         self.assertEqual(results, [])
-        sleep.assert_called_once_with(15.0)
+        self.assertEqual(results.result_state, "FAILED")
+        sleep.assert_not_called()
         counters = runtime.snapshot()["counters"]
         self.assertEqual(counters["api.brightdata.queries"], 1)
-        self.assertEqual(counters["api.brightdata.requests"], 2)
-        self.assertEqual(counters["api.brightdata.retries"], 1)
+        self.assertEqual(counters["api.brightdata.requests"], 1)
+        self.assertEqual(counters.get("api.brightdata.retries", 0), 0)
 
-    def test_brightdata_empty_body_uses_provider_cooldown_and_one_retry(self):
+    def test_brightdata_empty_body_is_definite_failure_without_retry(self):
         failed = Mock(status_code=200, headers={}, text="")
         failed.json.side_effect = ValueError("not json")
         succeeded = Mock(status_code=200, headers={}, text='{"organic": []}')
@@ -299,11 +300,9 @@ class SearchCoverageIntegrationTests(unittest.TestCase):
         ) as sleep:
             results = search._brightdata_text("nova official website")
         self.assertEqual(results, [])
-        sleep.assert_called_once_with(15)
-        self.assertEqual(
-            runtime.snapshot()["counters"]["api.brightdata.empty_body_retries"],
-            1,
-        )
+        self.assertEqual(results.result_state, "FAILED")
+        sleep.assert_not_called()
+        self.assertEqual(runtime.snapshot()["counters"].get("api.brightdata.empty_body_retries", 0), 0)
 
 
 if __name__ == "__main__":

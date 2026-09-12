@@ -8,12 +8,69 @@ import config
 from modules import runtime
 
 
+PAID_API_PROVIDERS = ("brightdata", "google_places", "hunter", "brandfetch")
+
+
+def explicit_paid_api_caps() -> dict[str, int | None]:
+    return {
+        "brightdata": config.BRIGHTDATA_REQUEST_HARD_CAP,
+        "google_places": config.GOOGLE_PLACES_REQUEST_HARD_CAP,
+        "hunter": config.HUNTER_REQUEST_HARD_CAP,
+        "brandfetch": config.BRANDFETCH_REQUEST_HARD_CAP,
+    }
+
+
+def calculate_paid_api_budgets(
+    company_count: int, caps: dict[str, int | None]
+) -> dict[str, int]:
+    """Calculate effective provider budgets without changing process state."""
+    count = max(0, int(company_count))
+    ratios = {
+        "brightdata": config.BRIGHTDATA_REQUEST_RATIO,
+        "google_places": config.GOOGLE_PLACES_REQUEST_RATIO,
+        "hunter": config.HUNTER_REQUEST_RATIO,
+        "brandfetch": config.BRANDFETCH_REQUEST_RATIO,
+    }
+    budgets: dict[str, int] = {}
+    for provider in PAID_API_PROVIDERS:
+        cap = caps.get(provider)
+        calculated = math.ceil(count * float(ratios[provider]))
+        if cap is None:
+            budgets[provider] = calculated
+        elif int(cap) <= 0:
+            budgets[provider] = 0
+        else:
+            budgets[provider] = min(calculated, int(cap))
+    return budgets
+
+
+def budget_details(
+    company_count: int,
+    caps: dict[str, int | None],
+    effective_budgets: dict[str, int],
+) -> dict[str, dict[str, object]]:
+    ratios = {
+        "brightdata": config.BRIGHTDATA_REQUEST_RATIO,
+        "google_places": config.GOOGLE_PLACES_REQUEST_RATIO,
+        "hunter": config.HUNTER_REQUEST_RATIO,
+        "brandfetch": config.BRANDFETCH_REQUEST_RATIO,
+    }
+    return {
+        provider: {
+            "population_count": max(0, int(company_count)),
+            "ratio": float(ratios[provider]),
+            "explicit_cap": caps.get(provider),
+            "effective_budget": int(effective_budgets.get(provider, 0)),
+            "reserved": 0,
+            "completed": 0,
+            "blocked": 0,
+        }
+        for provider in PAID_API_PROVIDERS
+    }
+
+
 def configure_run_budget(company_count: int) -> int:
     """Reserve retry headroom and spread paid discovery across the full run."""
-    if company_count > 0 and config.SEARCH_HTTP_REQUEST_BUDGET <= 0:
-        config.SEARCH_HTTP_REQUEST_BUDGET = (
-            company_count * config.DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY
-        )
     configured = (
         config.MAX_SEARCH_QUERIES_PER_COMPANY
         if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0
@@ -39,25 +96,7 @@ def configure_run_budget(company_count: int) -> int:
 
 def scale_paid_api_budgets(company_count: int) -> dict[str, int]:
     """Scale paid ceilings to the firms that actually need escalation."""
-    count = max(0, int(company_count))
-    budgets = {
-        "brightdata": min(
-            config.BRIGHTDATA_REQUEST_HARD_CAP,
-            math.ceil(count * config.BRIGHTDATA_REQUEST_RATIO),
-        ),
-        "google_places": min(
-            config.GOOGLE_PLACES_REQUEST_HARD_CAP,
-            math.ceil(count * config.GOOGLE_PLACES_REQUEST_RATIO),
-        ),
-        "hunter": min(
-            config.HUNTER_REQUEST_HARD_CAP,
-            math.ceil(count * config.HUNTER_REQUEST_RATIO),
-        ),
-        "brandfetch": min(
-            config.BRANDFETCH_REQUEST_HARD_CAP,
-            math.ceil(count * config.BRANDFETCH_REQUEST_RATIO),
-        ),
-    }
+    budgets = calculate_paid_api_budgets(company_count, explicit_paid_api_caps())
     config.BRIGHTDATA_REQUEST_BUDGET = budgets["brightdata"]
     config.GOOGLE_PLACES_REQUEST_BUDGET = budgets["google_places"]
     config.HUNTER_REQUEST_BUDGET = budgets["hunter"]

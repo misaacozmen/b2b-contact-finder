@@ -96,15 +96,23 @@ SEARCH_HTTP_REQUEST_BUDGET = int(os.getenv("SEARCH_HTTP_REQUEST_BUDGET", "0"))
 DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY = max(
     1, int(os.getenv("DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY", "10"))
 )
-BRIGHTDATA_REQUEST_HARD_CAP = int(os.getenv("BRIGHTDATA_REQUEST_BUDGET", "500"))
-GOOGLE_PLACES_REQUEST_HARD_CAP = int(os.getenv("GOOGLE_PLACES_REQUEST_BUDGET", "100"))
-HUNTER_REQUEST_HARD_CAP = int(os.getenv("HUNTER_REQUEST_BUDGET", "25"))
-BRANDFETCH_REQUEST_HARD_CAP = int(os.getenv("BRANDFETCH_REQUEST_BUDGET", "100"))
-BRIGHTDATA_REQUEST_RATIO = max(0.0, float(os.getenv("BRIGHTDATA_REQUEST_RATIO", "1.5")))
+def _optional_request_cap(name: str, default: int | None = None) -> int | None:
+    raw = os.getenv(name)
+    return default if raw is None else max(0, int(raw))
+
+
+# An omitted cap is intentionally unlimited; the population ratio determines
+# the effective budget.  An explicitly supplied legacy *_REQUEST_BUDGET
+# environment variable remains a hard cap.
+BRIGHTDATA_REQUEST_HARD_CAP = _optional_request_cap("BRIGHTDATA_REQUEST_BUDGET")
+GOOGLE_PLACES_REQUEST_HARD_CAP = _optional_request_cap("GOOGLE_PLACES_REQUEST_BUDGET")
+HUNTER_REQUEST_HARD_CAP = _optional_request_cap("HUNTER_REQUEST_BUDGET")
+BRANDFETCH_REQUEST_HARD_CAP = _optional_request_cap("BRANDFETCH_REQUEST_BUDGET")
+BRIGHTDATA_REQUEST_RATIO = max(0.0, float(os.getenv("BRIGHTDATA_REQUEST_RATIO", "3.9")))
 GOOGLE_PLACES_REQUEST_RATIO = max(0.0, float(os.getenv("GOOGLE_PLACES_REQUEST_RATIO", "0.25")))
 HUNTER_REQUEST_RATIO = max(0.0, float(os.getenv("HUNTER_REQUEST_RATIO", "0.10")))
 BRANDFETCH_REQUEST_RATIO = max(0.0, float(os.getenv("BRANDFETCH_REQUEST_RATIO", "0.25")))
-BRIGHTDATA_REQUEST_BUDGET = BRIGHTDATA_REQUEST_HARD_CAP
+BRIGHTDATA_REQUEST_BUDGET = BRIGHTDATA_REQUEST_HARD_CAP or 0
 LINKEDIN_COMPANY_REQUEST_HARD_CAP = max(
     0, int(os.getenv("LINKEDIN_COMPANY_REQUEST_BUDGET", "500"))
 )
@@ -121,9 +129,9 @@ LLM_ARBITER_BUDGET = max(0, int(os.getenv("LLM_ARBITER_BUDGET", "220")))
 LLM_ARBITER_TIMEOUT_SEC = max(
     5, int(os.getenv("LLM_ARBITER_TIMEOUT_SEC", "30"))
 )
-GOOGLE_PLACES_REQUEST_BUDGET = GOOGLE_PLACES_REQUEST_HARD_CAP
-HUNTER_REQUEST_BUDGET = HUNTER_REQUEST_HARD_CAP
-BRANDFETCH_REQUEST_BUDGET = BRANDFETCH_REQUEST_HARD_CAP
+GOOGLE_PLACES_REQUEST_BUDGET = GOOGLE_PLACES_REQUEST_HARD_CAP or 0
+HUNTER_REQUEST_BUDGET = HUNTER_REQUEST_HARD_CAP or 0
+BRANDFETCH_REQUEST_BUDGET = BRANDFETCH_REQUEST_HARD_CAP or 0
 
 SEARCH_QUERY_TEMPLATES = [
     "{company} resmi sitesi",
@@ -496,7 +504,6 @@ NON_COMPANY_DOMAIN_KEYWORDS = [
 LEGAL_COMPANY_WORDS = [
     "ltd",
     "sti",
-    "sti",
     "san",
     "sanayi",
     "tic",
@@ -504,10 +511,13 @@ LEGAL_COMPANY_WORDS = [
     "anonim",
     "limited",
     "as",
-    "as",
     "co",
     "inc",
     "gmbh",
+    "sirket",
+    "sirketi",
+    "ve",
+    "and",
 ]
 
 SECTOR_GENERIC_WORDS = [

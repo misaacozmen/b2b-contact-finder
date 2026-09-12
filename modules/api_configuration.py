@@ -97,6 +97,8 @@ def apply_saved_resolver_configuration(saved: dict[str, str] | None = None) -> d
     """
     saved = saved if saved is not None else load_saved_api_keys()
     settings = load_resolver_settings()
+    config.GOOGLE_PLACES_API_KEY = config.GOOGLE_PLACES_API_KEY or saved.get("google_places", "")
+    config.BRIGHTDATA_API_KEY = config.BRIGHTDATA_API_KEY or saved.get("brightdata", "")
     config.BRANDFETCH_CLIENT_ID = config.BRANDFETCH_CLIENT_ID or saved.get("brandfetch", "")
     config.HUNTER_API_KEY = config.HUNTER_API_KEY or saved.get("hunter", "")
 

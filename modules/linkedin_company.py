@@ -9,7 +9,7 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import requests
 
 import config
-from modules import cache_store, network_guard, runtime, scorer
+from modules import cache_store, checkpoint, network_guard, runtime, scorer
 
 
 _CACHE: dict[tuple[str, str], dict | None] = {}
@@ -19,22 +19,28 @@ _PROFILE_CACHE: dict[str, dict | None] = {}
 class ProviderText(str):
     """String-compatible LinkedIn provider result with ledger metadata."""
 
-    def __new__(cls, value: str = "", *, state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = ()):
+    def __new__(cls, value: str = "", *, state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = (), provider: str = "linkedin", origin: str = "LIVE_OWNER", flight_fingerprint: str = "", call_relations: dict | None = None, stop_scope=runtime.StopScope.NONE):
         result = str.__new__(cls, value)
         result.result_state = str(state)
         result.result_reason = str(reason)
         result.call_ids = tuple(str(value) for value in call_ids if value)
+        result.provider = provider; result.origin = origin; result.flight_fingerprint = flight_fingerprint
+        result.call_relations = dict(call_relations or {})
+        result.stop_scope = runtime.apply_provider_outcome_stop(state, provider, reason, result.call_ids, stop_scope).scope
         return result
 
 
 class ProviderRecord(dict):
     """Dict-compatible LinkedIn provider result with ledger metadata."""
 
-    def __init__(self, *args, state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = (), **kwargs):
+    def __init__(self, *args, state: str = "EMPTY", reason: str = "", call_ids: tuple[str, ...] = (), provider: str = "linkedin", origin: str = "LIVE_OWNER", flight_fingerprint: str = "", call_relations: dict | None = None, stop_scope=runtime.StopScope.NONE, **kwargs):
         super().__init__(*args, **kwargs)
         self.result_state = str(state)
         self.result_reason = str(reason)
         self.call_ids = tuple(str(value) for value in call_ids if value)
+        self.provider = provider; self.origin = origin; self.flight_fingerprint = flight_fingerprint
+        self.call_relations = dict(call_relations or {})
+        self.stop_scope = runtime.apply_provider_outcome_stop(state, provider, reason, self.call_ids, stop_scope).scope
 _LOCK = Lock()
 _WEBSITE_SESSION = network_guard.harden_session(requests.Session())
 
@@ -108,30 +114,46 @@ def _find_company_url(company: str) -> str:
         f"&gl={config.BRIGHTDATA_GOOGLE_GL}"
     )
     try:
-        response = requests.post(
-            config.BRIGHTDATA_ENDPOINT,
-            json={
+        runtime.start_api(reservation)
+        runtime.wait_for_request_slot()
+        runtime.mark_api_http_started(reservation, 1)
+        request_payload = {
                 "zone": config.BRIGHTDATA_ZONE,
                 "url": search_url,
                 "format": "json",
                 "country": config.BRIGHTDATA_COUNTRY,
-            },
+            }
+        envelope = runtime.transport_envelope(reservation, endpoint=config.BRIGHTDATA_ENDPOINT, request_shape={"method": "POST", "json": request_payload}, timeout=config.BRIGHTDATA_TIMEOUT_SEC)
+        response = runtime.invoke_paid_transport(envelope, lambda: requests.post(
+            config.BRIGHTDATA_ENDPOINT,
+            json=request_payload,
             headers={
                 "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
                 "Content-Type": "application/json",
             },
             timeout=config.BRIGHTDATA_TIMEOUT_SEC,
-        )
+        ))
         response.raise_for_status()
         data = _response_json(response)
-        runtime.complete_api(reservation, "DONE")
+        if not isinstance(data, dict) or any(key in data for key in ("error", "errors")) or str(data.get("status", "")).casefold() in {"error", "failed", "failure"}:
+            raise ValueError("LinkedIn search response is not a valid object")
+        result_key = next((key for key in ("organic", "organic_results", "results") if key in data), None)
+        if result_key is None:
+            raise ValueError("LinkedIn search response lacks a results key")
+        organic = data[result_key]
+        if not isinstance(organic, list) or any(not isinstance(item, dict) for item in organic):
+            raise ValueError("LinkedIn search results are not a list of objects")
+        for item in organic:
+            for field in ("link", "url", "title", "description", "snippet"):
+                if field in item and not isinstance(item.get(field), str):
+                    raise ValueError(f"LinkedIn search {field} is not a string")
     except BaseException as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
         runtime.complete_api(reservation, state)
         return ProviderText("", state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
-    if not isinstance(data, dict):
-        return ""
-    organic = data.get("organic") or data.get("organic_results") or data.get("results") or []
+    runtime.complete_api(reservation, "DONE")
     for item in organic:
         url = _company_url(item.get("link") or item.get("url") or "")
         observed = " ".join((str(item.get("title", "")), str(item.get("description", "")), str(item.get("snippet", ""))))
@@ -146,35 +168,53 @@ def _scrape(linkedin_url: str):
         rejected = runtime.rejected_provider_result(reservation)
         return ProviderRecord(state=rejected.result_state, reason=rejected.result_reason, call_ids=rejected.call_ids)
     try:
-        response = requests.post(
+        runtime.start_api(reservation)
+        runtime.wait_for_request_slot()
+        runtime.mark_api_http_started(reservation, 1)
+        request_payload = {"input": [{"url": linkedin_url}]}
+        envelope = runtime.transport_envelope(reservation, endpoint=config.LINKEDIN_COMPANY_ENDPOINT, request_shape={"method": "POST", "json": request_payload}, timeout=config.LINKEDIN_COMPANY_TIMEOUT_SEC)
+        response = runtime.invoke_paid_transport(envelope, lambda: requests.post(
             config.LINKEDIN_COMPANY_ENDPOINT,
             params={
                 "dataset_id": config.LINKEDIN_COMPANY_DATASET_ID,
                 "format": "json",
                 "include_errors": "true",
             },
-            json={"input": [{"url": linkedin_url}]},
+            json=request_payload,
             headers={
                 "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
                 "Content-Type": "application/json",
             },
             timeout=config.LINKEDIN_COMPANY_TIMEOUT_SEC,
-        )
+        ))
         response.raise_for_status()
         data = _response_json(response)
-        runtime.complete_api(reservation, "DONE")
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict) and not any(key in data for key in ("error", "errors")) and str(data.get("status", "")).casefold() not in {"error", "failed", "failure"}:
+            nested = data.get("data") if "data" in data else data.get("results")
+            if isinstance(nested, list):
+                rows = nested
+            elif any(data.get(key) for key in ("name", "company_name", "website", "url", "linkedin_url", "id")):
+                rows = [data]
+            else:
+                raise ValueError("LinkedIn scrape object lacks company identity")
+        else:
+            raise ValueError("LinkedIn scrape response has invalid schema")
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError("LinkedIn scrape rows are not objects")
+        for row in rows:
+            for field in ("name", "company_name", "website", "url", "linkedin_url", "id"):
+                if field in row and not isinstance(row.get(field), str):
+                    raise ValueError(f"LinkedIn scrape {field} is not a string")
     except BaseException as exc:
+        if isinstance(exc, checkpoint.SchedulerInvariantError):
+            raise
         state = "UNKNOWN" if runtime.is_unknown_transport_error(exc) else "FAILED"
         runtime.complete_api(reservation, state)
         return ProviderRecord(state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
-    if isinstance(data, list):
-        return ProviderRecord(data[0], state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),)) if data else ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),))
-    if isinstance(data, dict):
-        rows = data.get("data") or data.get("results")
-        if isinstance(rows, list):
-            return ProviderRecord(rows[0], state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),)) if rows else ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),))
-        return ProviderRecord(data, state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),))
-    return ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),))
+    runtime.complete_api(reservation, "DONE")
+    return ProviderRecord(rows[0], state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),), provider="linkedin") if rows else ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),), provider="linkedin")
 
 
 def _resolved_website(website: str) -> str:

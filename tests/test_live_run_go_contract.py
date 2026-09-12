@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import requests
 from openpyxl import Workbook
 
 import config
@@ -80,6 +81,7 @@ def test_provider_fold_reserved_completed_empty_retry_success_and_duplicate_inhe
     assert pipeline_runner.paid_attempt_result({"provider_results": [{"result_state": "RESERVED", "call_ids": ["a"]}, {"result_state": "COMPLETED", "call_ids": ["a"]}]}) == "COMPLETED"
     assert pipeline_runner.paid_attempt_result({"provider_results": [{"result_state": "EMPTY", "call_ids": ["e"]}]}) == "COMPLETED"
     assert pipeline_runner.paid_attempt_result({"provider_results": [{"result_state": "FAILED", "call_ids": ["f"]}, {"result_state": "COMPLETED", "call_ids": ["s"]}]}) == "COMPLETED"
+    assert pipeline_runner.paid_attempt_result({"provider_results": [{"result_state": "BLOCKED_BUDGET"}, {"result_state": "COMPLETED", "call_ids": ["s"]}]}) == "COMPLETED"
     inherited = runtime.rejected_provider_result(runtime.Reservation(False, "llm", "arbiter", 0, "PAID", call_id="done", reason="duplicate_request", inherited_state="DONE"))
     assert inherited.result_state == "COMPLETED" and inherited.call_ids == ("done",)
 
@@ -162,7 +164,10 @@ def test_real_pipeline_handoff_accepts_failed_free_item_as_terminal(tmp_path: Pa
     run_root = next(runs_dir.iterdir())
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["handoff"] is True and manifest["paid_pending"] == 1
-    assert manifest["telemetry"] == {
+    assert {key: manifest["telemetry"][key] for key in (
+        "total_items", "free_completed", "free_failed", "item_terminal",
+        "paid_required", "paid_completed", "result_count", "manifest_count",
+    )} == {
         "total_items": 159, "free_completed": 158, "free_failed": 1,
         "item_terminal": 159, "paid_required": 1, "paid_completed": 0,
         "result_count": 159, "manifest_count": 159,
@@ -320,10 +325,12 @@ def test_brightdata_connection_error_is_unknown_before_any_success():
     runtime.set_phase("PAID")
     token = runtime.begin_provider_attempt()
     with patch.object(config, "BRIGHTDATA_API_KEY", "key"), patch.object(
-        search.requests, "post", side_effect=ConnectionError("connection reset")
+        config, "BRIGHTDATA_REQUEST_BUDGET", 1
+    ), patch.object(
+        search.requests, "post", side_effect=requests.ConnectionError("connection reset")
     ):
-        with pytest.raises(search.BrightDataSearchError):
-            search._brightdata_text("Acme")
+        result = search._brightdata_text("Acme")
+    assert result.result_state == "UNKNOWN"
     outcomes = runtime.end_provider_attempt(token)
     assert any(item["result_state"] == "UNKNOWN" for item in outcomes)
 
@@ -338,6 +345,7 @@ def test_google_and_hunter_malformed_json_are_failed_before_done():
 
     with patch.object(config, "PAID_ENABLED", True), patch.object(
         config, "ENABLE_HUNTER_FALLBACK", True
+    ), patch.object(config, "HUNTER_REQUEST_BUDGET", 1
     ), patch.object(config, "HUNTER_API_KEY", "key"), patch.object(
         runtime, "reserve_api", return_value=runtime.Reservation(True, "hunter", "domain", 0, "PAID", call_id="h")
     ), patch.object(hunter.requests, "get", return_value=_MalformedProviderResponse()):

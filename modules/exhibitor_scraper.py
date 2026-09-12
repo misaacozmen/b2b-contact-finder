@@ -5,14 +5,14 @@ import time
 import unicodedata
 from datetime import datetime, timezone
 from html import unescape
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from charset_normalizer import from_bytes
 
 import config
-from modules import network_guard, run_context
+from modules import network_guard, phone, run_context, scorer
 
 
 HEADERS = {
@@ -55,13 +55,36 @@ def _absolute_url(base_url: str, href: str) -> str:
 
 
 def _normalize_website(value: str) -> str:
+    value = str(value or "")
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
+        return ""
     value = _clean(value)
     if not value:
         return ""
     if value.startswith("//"):
-        return f"https:{value}"
-    if "://" not in value:
-        return f"https://{value}"
+        value = f"https:{value}"
+    elif "://" not in value:
+        value = f"https://{value}"
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname or ""
+        if parsed.scheme.casefold() not in {"http", "https"} or not hostname:
+            return ""
+        hostname_ascii = hostname.encode("idna").decode("ascii")
+        labels = hostname_ascii.rstrip(".").split(".")
+        if not labels or any(
+            not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+            or not re.fullmatch(r"[A-Za-z0-9-]+", label)
+            for label in labels
+        ):
+            return ""
+        if len(hostname_ascii.rstrip(".")) > 253:
+            return ""
+        # Accessing port rejects malformed port syntax and keeps the
+        # normalized result fail-closed for values copied from catalogues.
+        parsed.port
+    except (UnicodeError, ValueError):
+        return ""
     return value
 
 
@@ -344,6 +367,42 @@ def scrape_metalexpo(fetch_details: bool = False, delay_sec: float = 0.4) -> lis
     return _metalexpo_list_rows(_get(session, list_url), list_url)
 
 
+def _source_evidence_normalized(field: str, value: str) -> str:
+    if field == "listed_phone":
+        return phone.normalize_phone(value)
+    return " ".join(scorer.normalize_text(value).split())
+
+
+def _record_profile_observation(row: dict, details: dict, html: str, profile_url: str) -> None:
+    """Attach auditable field observations after profile identity has matched."""
+    source_id, quality = run_context.source_record_identity(row, default_source="unknown")
+    row["source_record_id"] = source_id
+    row["source_record_id_quality"] = quality
+    content_hash = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
+    observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    row.update({
+        "source_detail_status": "COMPLETED",
+        "source_detail_url": profile_url,
+        "source_detail_content_sha256": content_hash,
+    })
+    claims = []
+    for field in ("listed_phone", "listed_address"):
+        value = str(details.get(field, "") or "").strip()
+        status = "OBSERVED_PRESENT" if value else "OBSERVED_ABSENT"
+        row[f"{field}_status"] = status
+        claims.append({
+            "source_record_id": source_id,
+            "field": field,
+            "value": value,
+            "normalized_value": _source_evidence_normalized(field, value) if value else "",
+            "observation": status,
+            "url": profile_url,
+            "content_sha256": content_hash,
+            "observed_at": observed_at,
+        })
+    row["source_evidence"] = json.dumps(claims, ensure_ascii=False, sort_keys=True)
+
+
 def _texhibition_list_rows(
     html: str,
     listing_url: str = "https://www.texhibitionist.com/katilimcilar?v=1",
@@ -391,6 +450,20 @@ def _texhibition_list_rows(
 
 def _detail_value(scope, labels: tuple[str, ...]) -> tuple[str, list[str]]:
     wanted = {_fold(label) for label in labels}
+    # Texhibition's production detail card stores each field in its own item.
+    # Read only that item's direct key/value pair so a neighbouring value can
+    # never be attributed to the requested label.
+    for item in scope.select(".item"):
+        key_node = item.find(class_="key", recursive=False)
+        value_node = item.find(class_="value", recursive=False)
+        if key_node is None or value_node is None:
+            continue
+        key = _fold(key_node.get_text(" ", strip=True)).rstrip(":")
+        if key not in wanted:
+            continue
+        return _clean(value_node.get_text(" ", strip=True)), [
+            str(link.get("href", "")) for link in value_node.find_all("a", href=True)
+        ]
     for tag in scope.find_all(["dt", "th", "label", "strong", "b", "span", "div"]):
         label = _fold(tag.get_text(" ", strip=True)).rstrip(":")
         if not label or not any(label == item or label.startswith(item + ":") for item in wanted):
@@ -404,14 +477,83 @@ def _detail_value(scope, labels: tuple[str, ...]) -> tuple[str, list[str]]:
         if tag.name == "dt" and tag.find_next_sibling("dd"):
             value_node = tag.find_next_sibling("dd")
             return _clean(value_node.get_text(" ", strip=True)), [str(link.get("href", "")) for link in value_node.find_all("a", href=True)]
-        if container:
-            value_node = container.select_one(".value, .detail-value, .field-value")
+        if container and container.select_one(":scope > .key") is tag:
+            value_node = container.find(class_="value", recursive=False)
             if value_node and value_node is not tag:
                 return _clean(value_node.get_text(" ", strip=True)), [str(link.get("href", "")) for link in value_node.find_all("a", href=True)]
         sibling = tag.find_next_sibling()
         if sibling:
             return _clean(sibling.get_text(" ", strip=True)), [str(link.get("href", "")) for link in sibling.find_all("a", href=True)]
     return "", []
+
+
+_TEXHIBITION_BLOCKED_WEBSITE_HOSTS = {
+    "texhibitionist.com",
+    "texhibition.com",
+}
+_TEXHIBITION_ASSET_SUFFIXES = {
+    ".7z", ".bmp", ".doc", ".docx", ".gif", ".jpeg", ".jpg", ".pdf",
+    ".png", ".rar", ".svg", ".tif", ".tiff", ".webp", ".xls", ".xlsx",
+    ".zip",
+}
+
+
+def _texhibition_website_is_catalog_or_asset(value: str) -> bool:
+    parsed = urlparse(value)
+    host = _catalog_host(value)
+    if not host:
+        return True
+    if host in _TEXHIBITION_BLOCKED_WEBSITE_HOSTS or any(
+        host.endswith(f".{blocked}") for blocked in _TEXHIBITION_BLOCKED_WEBSITE_HOSTS
+    ):
+        return True
+    path = (parsed.path or "").casefold()
+    if any(path.endswith(suffix) for suffix in _TEXHIBITION_ASSET_SUFFIXES):
+        return True
+    return any(token in path for token in ("certificate", "certification", "oeko-tex", "oeko_tex"))
+
+
+def _texhibition_labelled_website(value: str, links: list[str]) -> str:
+    # Only the explicitly-labelled Website/Web Site field is in scope.  The
+    # surrounding detail page is intentionally never used as a fallback.
+    candidates = [*links, value]
+    for candidate in candidates:
+        normalized = _normalize_website(candidate)
+        if normalized and not _texhibition_website_is_catalog_or_asset(normalized):
+            return normalized
+    return ""
+
+
+def _texhibition_labelled_phone(value: str, links: list[str]) -> str:
+    # tel: links are accepted only when they occur inside the labelled phone
+    # field; no page-wide number search is permitted.
+    candidates = [
+        unquote(link.split(":", 1)[1].split("?", 1)[0]).strip()
+        for link in links
+        if ":" in link and link.casefold().startswith("tel:")
+    ]
+    candidates.append(value)
+    for candidate in candidates:
+        normalized = phone.normalize_phone(_clean(candidate))
+        if normalized:
+            return normalized
+    return ""
+
+
+def _texhibition_labelled_email(value: str, links: list[str]) -> str:
+    # mailto: links are accepted only when they occur inside the labelled
+    # email field; page text and unrelated footer links are out of scope.
+    candidates = [
+        unquote(link.split(":", 1)[1].split("?", 1)[0]).strip()
+        for link in links
+        if ":" in link and link.casefold().startswith("mailto:")
+    ]
+    candidates.append(value)
+    for candidate in candidates:
+        match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", candidate, re.I)
+        if match:
+            return match.group(0)
+    return ""
 
 
 def _texhibition_detail_scope(html: str):
@@ -436,25 +578,9 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
     phone, phone_links = _detail_value(scope, ("phone", "telephone", "telefon", "tel"))
     email, email_links = _detail_value(scope, ("email", "e-mail", "e posta", "e-posta", "eposta"))
 
-    external_links = []
-    for href in [*website_links, *[str(link.get("href", "")) for link in scope.find_all("a", href=True)]]:
-        if href.casefold().startswith(("mailto:", "tel:", "javascript:")):
-            continue
-        value = _normalize_website(href)
-        host = _catalog_host(value)
-        if value and host and host not in {"texhibitionist.com", "www.texhibitionist.com"} and not value.lower().startswith(("mailto:", "tel:")):
-            external_links.append(value)
-    website = (
-        _normalize_website(website_links[0]) if website_links
-        else _normalize_website(website_value) if website_value
-        else (external_links[0] if external_links else "")
-    )
-    email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", email, re.I)
-    if not email_match:
-        email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", scope.get_text(" ", strip=True), re.I)
-    phone_match = re.search(r"(?:\+?\d[\d\s()./-]{7,}\d)", phone or scope.get_text(" ", strip=True))
-    email = email_match.group(0) if email_match else _clean(email)
-    phone = _clean(phone_match.group(0)) if phone_match else _clean(phone)
+    website = _texhibition_labelled_website(website_value, website_links)
+    email = _texhibition_labelled_email(email, email_links)
+    phone = _texhibition_labelled_phone(phone, phone_links)
     if not description:
         description = _meta_description(str(soup))
     details = {
@@ -470,15 +596,38 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
         "listed_email": email,
         "source_detail_url": profile_url,
         "source_detail_content_sha256": hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest(),
-        "source_detail_status": "COMPLETED" if any((legal_name, website, address, country, description, brands, representations, phone, email)) else "EMPTY",
+        "source_detail_status": "COMPLETED",
+        "listed_phone_status": "OBSERVED_PRESENT" if phone else "OBSERVED_ABSENT",
+        "listed_address_status": "OBSERVED_PRESENT" if address else "OBSERVED_ABSENT",
     }
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    details["source_evidence"] = json.dumps([
-        {"source_record_id": "", "field": field, "value": value, "url": profile_url,
-         "content_sha256": details["source_detail_content_sha256"], "observed_at": observed_at}
-        for field, value in details.items()
-        if field in {"listed_legal_name", "listed_website", "listed_address", "country", "description", "brands", "representations", "listed_phone", "listed_email"} and value
-    ], ensure_ascii=False, sort_keys=True)
+    claims = []
+    for field, value in details.items():
+        if field not in {"listed_legal_name", "listed_website", "listed_address", "country", "description", "brands", "representations", "listed_phone", "listed_email"} or not value:
+            continue
+        claim = {
+            "source_record_id": "", "field": field, "value": value,
+            "url": profile_url,
+            "content_sha256": details["source_detail_content_sha256"],
+            "observed_at": observed_at,
+        }
+        if field in {"listed_phone", "listed_address"}:
+            claim["normalized_value"] = _source_evidence_normalized(field, value)
+        claims.append(claim)
+    details["source_evidence"] = json.dumps(claims, ensure_ascii=False, sort_keys=True)
+    claims = json.loads(details["source_evidence"])
+    for field, status in (
+        ("listed_phone", details["listed_phone_status"]),
+        ("listed_address", details["listed_address_status"]),
+    ):
+        if status == "OBSERVED_ABSENT":
+            claims.append({
+                "source_record_id": "", "field": field, "value": "",
+                "observation": status, "url": profile_url,
+                "content_sha256": details["source_detail_content_sha256"],
+                "observed_at": observed_at,
+            })
+    details["source_evidence"] = json.dumps(claims, ensure_ascii=False, sort_keys=True)
     return details
 
 
@@ -545,7 +694,8 @@ def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> l
     if expected_total is not None and len({row["source_record_id"] for row in rows}) != expected_total:
         raise ValueError("texhibition_total_count_mismatch")
     if fetch_details:
-        for row in dedupe_rows(rows):
+        rows = dedupe_rows(rows)
+        for row in rows:
             profile_url = str(row.get("profile_url", ""))
             if not profile_url:
                 row["source_detail_status"] = "UNAVAILABLE_NO_PROFILE_URL"
@@ -710,15 +860,26 @@ def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
                 continue
             website = ""
             description = ""
+            details = {"company": "", "listed_address": "", "listed_phone": ""}
+            detail_html = ""
+            detail_status = "NOT_REQUESTED"
             if fetch_details:
                 try:
                     detail_html = _get(session, profile_url)
                     website = _first_external_website(detail_html, "ifco.com.tr")
                     description = _meta_description(detail_html)
+                    _soup_detail, scope = _texhibition_detail_scope(detail_html)
+                    heading = scope.select_one("h1")
+                    details["company"] = _clean(heading.get_text(" ", strip=True) if heading else "")
+                    details["listed_address"], _ = _detail_value(
+                        scope, ("company address", "firma adresi", "address", "adres")
+                    )
+                    detail_status = "COMPLETED"
                     time.sleep(delay_sec)
                 except requests.RequestException:
                     website = ""
-            rows_by_profile[profile_url] = {
+                    detail_status = "UNAVAILABLE_FETCH_ERROR"
+            row = {
                 "company": company,
                 "website": website,
                 "source": "ifco",
@@ -726,7 +887,19 @@ def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
                 "profile_url": profile_url,
                 "sector": "tekstil giyim moda hazir giyim",
                 "description": description,
+                "listed_phone": "",
+                "listed_address": "",
+                "source_detail_status": detail_status,
             }
+            if detail_status == "COMPLETED":
+                if _profile_company_key(company) == _profile_company_key(details["company"]):
+                    row["listed_address"] = details["listed_address"]
+                    _record_profile_observation(row, details, detail_html, profile_url)
+                else:
+                    row["website"] = ""
+                    row["description"] = ""
+                    row["source_detail_status"] = "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH"
+            rows_by_profile[profile_url] = row
             page_rows += 1
 
         next_page = soup.select_one(f'a[href*="page={page + 1}"]')
@@ -983,7 +1156,7 @@ def _maktek_profile_details(html: str) -> dict:
             icon = item.find("i")
             classes = set(icon.get("class", [])) if icon else set()
             if any("phone" in name for name in classes):
-                details["listed_phone"] = text
+                details["listed_phone"] = phone.normalize_phone(text)
             elif any("location" in name for name in classes):
                 details["listed_address"] = text
             elif any("globe" in name for name in classes):
@@ -1139,10 +1312,15 @@ def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[di
                 try:
                     detail_html = _get(session, profile_url)
                     details = _maktek_profile_details(detail_html)
-                    _merge_brand_catalog_profile(row, details, website_field="website")
+                    if _merge_brand_catalog_profile(row, details, website_field="website"):
+                        _record_profile_observation(row, details, detail_html, profile_url)
+                    else:
+                        row["source_detail_status"] = "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH"
                     time.sleep(delay_sec)
                 except requests.RequestException:
-                    pass
+                    row["source_detail_status"] = "UNAVAILABLE_FETCH_ERROR"
+            else:
+                row["source_detail_status"] = "NOT_REQUESTED"
             rows_by_profile[profile_url] = row
         page += 1
         if page <= max_page:
@@ -1187,10 +1365,15 @@ def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[d
                 try:
                     detail_html = _get(session, profile_url)
                     details = _maktek_profile_details(detail_html)
-                    _merge_brand_catalog_profile(row, details, website_field="listed_website")
+                    if _merge_brand_catalog_profile(row, details, website_field="listed_website"):
+                        _record_profile_observation(row, details, detail_html, profile_url)
+                    else:
+                        row["source_detail_status"] = "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH"
                     time.sleep(delay_sec)
                 except requests.RequestException:
-                    pass
+                    row["source_detail_status"] = "UNAVAILABLE_FETCH_ERROR"
+            else:
+                row["source_detail_status"] = "NOT_REQUESTED"
             rows_by_profile[profile_url] = row
         page += 1
         if page <= max_page:

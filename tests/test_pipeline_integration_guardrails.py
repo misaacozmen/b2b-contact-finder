@@ -127,8 +127,11 @@ class PipelineIntegrationGuardrailTests(unittest.TestCase):
         ), patch.object(
             config, "BRIGHTDATA_CIRCUIT_COOLDOWN_SEC", 300,
         ), patch(
-            "modules.search._search_text",
-            side_effect=RuntimeError("bad provider payload"),
+            "modules.search._brightdata_text",
+            side_effect=lambda query: (
+                search._observe_brightdata_owner(flight_fingerprint=query, state="FAILED", http_attempted=True)
+                or search.SearchResults([], "live", "brightdata", result_state="FAILED", stop_scope="PAID_PROVIDER")
+            ),
         ) as paid, patch(
             "modules.search._ddgs_text", return_value=[{"href": "https://fallback.example"}],
         ):

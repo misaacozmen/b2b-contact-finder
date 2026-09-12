@@ -521,6 +521,8 @@ def publish_manifest(*, path: Path, run_id: str, input_hash: str, config_sha256:
     })
     if telemetry is not None:
         payload["telemetry"] = telemetry
+        telemetry_json = json.dumps(telemetry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload["telemetry_sha256"] = hashlib.sha256(telemetry_json.encode("utf-8")).hexdigest()
     payload["phase"] = "COMPLETE"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.staging.json")

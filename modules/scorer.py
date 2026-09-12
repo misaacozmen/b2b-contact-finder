@@ -189,8 +189,12 @@ def _raw_company_tokens(company_name: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", normalize_text(company_name))
 
 
+def _legal_stopwords() -> set[str]:
+    return {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
+
+
 def _company_tokens(company_name: str, include_sector_words: bool = True) -> list[str]:
-    stopwords = {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
+    stopwords = _legal_stopwords()
     if not include_sector_words:
         stopwords |= {normalize_text(word) for word in config.SECTOR_GENERIC_WORDS}
         stopwords |= {normalize_text(word) for word in config.BUSINESS_GENERIC_WORDS}
@@ -206,8 +210,7 @@ def distinctive_tokens(company_name: str) -> list[str]:
 
 def legal_identity_tokens(company_name: str) -> list[str]:
     """Keep the public/legal name while dropping only corporate boilerplate."""
-    ignored = {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
-    ignored.update({"ve", "and", "sirket", "sirketi"})
+    ignored = _legal_stopwords()
     return [
         token for token in _raw_company_tokens(company_name)
         if token not in ignored and len(token) > 1
@@ -219,8 +222,7 @@ def legal_name_phrase_match(company_name: str, text: str) -> bool:
     tokens = legal_identity_tokens(company_name)
     if not tokens:
         return False
-    ignored = {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
-    ignored.update({"ve", "and", "sirket", "sirketi"})
+    ignored = _legal_stopwords()
     haystack_tokens = [
         token for token in _raw_company_tokens(text)
         if token not in ignored and len(token) > 1
@@ -242,8 +244,7 @@ def legal_name_full_phrase_match(company_name: str, text: str) -> bool:
     needle = legal_identity_tokens(company_name)
     if not needle:
         return False
-    ignored = {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
-    ignored.update({"ve", "and", "sirket", "sirketi"})
+    ignored = _legal_stopwords()
     haystack = [
         token for token in _raw_company_tokens(text)
         if token not in ignored and len(token) > 1
@@ -563,7 +564,7 @@ def search_name_variants(company_name: str) -> list[str]:
     raw_non_legal = [
         token
         for token in _raw_company_tokens(company_name)
-        if token not in {normalize_text(word) for word in config.LEGAL_COMPANY_WORDS}
+        if token not in _legal_stopwords()
     ]
     if len(raw_non_legal) >= 2 and len(raw_non_legal[1]) == 1:
         variants.append(" ".join(raw_non_legal[:2]))

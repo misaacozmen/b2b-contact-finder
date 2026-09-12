@@ -27,6 +27,8 @@ _SESSION_STATE = threading.local()
 _BROWSER_RENDER_SEMAPHORE = threading.BoundedSemaphore(
     config.MAX_BROWSER_RENDER_WORKERS
 )
+_PREFLIGHT_LOCK = threading.Lock()
+_PREFLIGHT_COMPLETE = False
 
 
 class ResponseTooLarge(requests.RequestException):
@@ -316,7 +318,10 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
 
                 context.route("**/*", guard_route)
                 page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=config.JS_RENDER_TIMEOUT_SEC * 1000)
+                response = page.goto(url, wait_until="domcontentloaded", timeout=config.JS_RENDER_TIMEOUT_SEC * 1000)
+                response_status = int(response.status) if response is not None else 0
+                if response_status >= 400:
+                    return None, f"js_render_http_{response_status}"
                 try:
                     page.wait_for_load_state(
                         "networkidle",
@@ -329,6 +334,11 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
                 if len(rendered.encode("utf-8")) > config.MAX_HTTP_RESPONSE_BYTES:
                     return None, "js_render_response_too_large"
                 _RENDER_STATE.last["final_url"] = page.url
+                final_host = (urlparse(page.url).hostname or "").casefold()
+                if final_host != original_host.casefold():
+                    return None, "js_render_cross_host_redirect"
+                if _looks_like_security_interstitial(rendered):
+                    return None, "security_interstitial"
                 return rendered, None
             finally:
                 browser.close()
@@ -341,6 +351,49 @@ def _renderable_fetch_error(error: str | None) -> bool:
         "http_401", "http_403", "http_408", "http_429", "timeout",
         "ssl_error", "connection_error", "security_interstitial",
     )))
+
+
+def _preflight_js_fallback() -> None:
+    """Fail before HTTP when JS fallback is enabled but unusable."""
+    global _PREFLIGHT_COMPLETE
+    if not config.ENABLE_JS_FALLBACK:
+        return
+    with _PREFLIGHT_LOCK:
+        if _PREFLIGHT_COMPLETE:
+            return
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("js_fallback_preflight_playwright_unavailable") from exc
+        playwright = None
+        browser = None
+        try:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(headless=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"js_fallback_preflight_chromium_unavailable:{exc.__class__.__name__.lower()}"
+            ) from exc
+        finally:
+            if browser is not None:
+                browser.close()
+            if playwright is not None:
+                playwright.stop()
+        _PREFLIGHT_COMPLETE = True
+
+
+def _record_security_interstitial(url: str, *, source: str = "live") -> None:
+    runtime.record_unique(
+        "recovery.security_interstitial_hosts",
+        urlparse(str(url or "")).hostname or "",
+    )
+    counter_name = (
+        "cache.site.security_interstitial_rejected"
+        if source == "cache"
+        else "live.site.security_interstitial_rejected"
+    )
+    runtime.record(counter_name)
+    runtime.record("recovery.security_interstitial_rejected")
 
 
 def _static_recovery_worthwhile(error: str | None) -> bool:
@@ -581,6 +634,8 @@ def _fetch_site_live(
     recovery_trace: list[dict] = []
     browser_render_attempts = 0
 
+    _preflight_js_fallback()
+
     def render_page(render_url: str) -> tuple[str | None, str | None]:
         nonlocal browser_render_attempts
         if browser_render_attempts >= 2:
@@ -599,6 +654,7 @@ def _fetch_site_live(
         final_parsed = urlparse(final_root_url)
         root = f"{final_parsed.scheme}://{final_parsed.netloc}"
     if html and _looks_like_security_interstitial(html):
+        _record_security_interstitial(root)
         html, error = None, "security_interstitial"
     if not html and parsed.scheme == "https":
         http_root = f"http://{parsed.netloc}"
@@ -606,6 +662,7 @@ def _fetch_site_live(
         http_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(http_meta.get("tls_insecure"))
         if http_html and _looks_like_security_interstitial(http_html):
+            _record_security_interstitial(http_root)
             http_html, http_error = None, "security_interstitial"
         if http_html:
             root = http_root
@@ -631,9 +688,10 @@ def _fetch_site_live(
             runtime.record("recovery.host_variant_attempts")
             recovery_html, recovery_error = _try_fetch(recovery_root)
             recovery_meta = getattr(_FETCH_STATE, "last", {})
-            if recovery_html and not _looks_like_security_interstitial(
-                recovery_html
-            ):
+            if recovery_html and _looks_like_security_interstitial(recovery_html):
+                _record_security_interstitial(recovery_root)
+                recovery_html, recovery_error = None, "security_interstitial"
+            if recovery_html:
                 final_url = recovery_meta.get("final_url", recovery_root)
                 if scorer.same_registrable_domain(
                     urlparse(final_url).netloc, parsed.netloc,
@@ -714,25 +772,43 @@ def _fetch_site_live(
         and _renderable_fetch_error(error)
     ):
         runtime.record("recovery.browser_attempts")
+        runtime.record("recovery.browser.root.attempts")
         tls_insecure = tls_insecure or bool(error and "ssl_error" in error)
         rendered_html, render_error = render_page(base_url)
-        if rendered_html:
+        if rendered_html and not _looks_like_js_shell(rendered_html):
             runtime.record("recovery.browser_successes")
+            runtime.record("recovery.browser.root.successes")
             root = base_url
             html = rendered_html
             root_retrieval_method = "browser_render"
             error = None
-        elif render_error and render_error != "js_fallback_disabled":
-            errors.append(f"{base_url}:{render_error}")
+        else:
+            html = None
+            if rendered_html:
+                render_error = "js_shell_after_render"
+            if render_error and render_error != "js_fallback_disabled":
+                if render_error == "security_interstitial":
+                    _record_security_interstitial(base_url)
+                runtime.record("recovery.browser.root.errors")
+                errors.append(f"{base_url}:{render_error}")
     if config.ENABLE_JS_FALLBACK and html and _looks_like_js_shell(html):
         runtime.record("recovery.browser_attempts")
+        runtime.record("recovery.browser.root.attempts")
         rendered_html, render_error = render_page(root)
-        if rendered_html:
+        if rendered_html and not _looks_like_js_shell(rendered_html):
             runtime.record("recovery.browser_successes")
+            runtime.record("recovery.browser.root.successes")
             html = rendered_html
             root_retrieval_method = "browser_render"
-        elif render_error and render_error != "js_fallback_disabled":
-            errors.append(f"{root}:{render_error}")
+        else:
+            html = None
+            if rendered_html:
+                render_error = "js_shell_after_render"
+            if render_error and render_error != "js_fallback_disabled":
+                if render_error == "security_interstitial":
+                    _record_security_interstitial(root)
+                runtime.record("recovery.browser.root.errors")
+                errors.append(f"{root}:{render_error}")
     if html:
         pages[root] = html
         page_provenance[root] = (
@@ -787,13 +863,56 @@ def _fetch_site_live(
                 continue
             identity_html, identity_error = _try_fetch(identity_url)
             identity_meta = getattr(_FETCH_STATE, "last", {})
+            identity_retrieval_method = (
+                "http_tls_unverified" if identity_meta.get("tls_insecure") else "http"
+            )
             tls_insecure = tls_insecure or bool(identity_meta.get("tls_insecure"))
+            if identity_html and _looks_like_security_interstitial(identity_html):
+                _record_security_interstitial(identity_url)
+                identity_html, identity_error = None, "security_interstitial"
+            identity_was_js_shell = bool(
+                identity_html and _looks_like_js_shell(identity_html)
+            )
+            if (
+                config.ENABLE_JS_FALLBACK
+                and (
+                    (not identity_html and _renderable_fetch_error(identity_error))
+                    or identity_was_js_shell
+                )
+                and browser_render_attempts < 2
+            ):
+                runtime.record("recovery.browser_attempts")
+                runtime.record("recovery.browser.identity.attempts")
+                rendered_html, render_error = render_page(identity_url)
+                if rendered_html and not _looks_like_js_shell(rendered_html):
+                    runtime.record("recovery.browser_successes")
+                    runtime.record("recovery.browser.identity.successes")
+                    identity_html, identity_error = rendered_html, None
+                    identity_meta = getattr(_RENDER_STATE, "last", {})
+                    identity_retrieval_method = "browser_render"
+                else:
+                    if render_error == "security_interstitial":
+                        _record_security_interstitial(identity_url)
+                    runtime.record("recovery.browser.identity.errors")
+                    if rendered_html:
+                        render_error = "js_shell_after_render"
+                    # A failed render must not turn the original JavaScript
+                    # shell into identity evidence.
+                    identity_html = None
+                    if render_error and render_error != "js_fallback_disabled":
+                        errors.append(f"{identity_url}:{render_error}")
+            elif identity_was_js_shell:
+                identity_html = None
+                errors.append(f"{identity_url}:js_shell_render_abstained")
             if identity_html:
                 final_identity_url = identity_meta.get("final_url", identity_url)
                 pages[final_identity_url] = identity_html
                 page_provenance[final_identity_url] = {
-                    "retrieval_method": "http_tls_unverified"
-                    if identity_meta.get("tls_insecure") else "http",
+                    "retrieval_method": identity_retrieval_method,
+                    **({
+                        key: value for key, value in identity_meta.items()
+                        if key not in {"retrieval_method"}
+                    } if identity_retrieval_method == "browser_render" else {}),
                 }
             elif identity_error:
                 errors.append(f"{identity_url}:{identity_error}")
@@ -869,6 +988,7 @@ def _fetch_site_live(
         contact_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(contact_meta.get("tls_insecure"))
         if contact_html and _looks_like_security_interstitial(contact_html):
+            _record_security_interstitial(contact_url)
             contact_html, contact_error = None, "security_interstitial"
         if not contact_html and contact_error:
             redirect_match = re.search(r"cross_domain_redirect:(https?://[^;\s]+)", contact_error)
@@ -886,16 +1006,25 @@ def _fetch_site_live(
             and (contact_url in discovered_contact_urls or contact_render_attempts < 2)
         ):
             runtime.record("recovery.browser_attempts")
+            runtime.record("recovery.browser.contact.attempts")
             contact_render_attempts += 1
             rendered_html, render_error = render_page(contact_url)
-            if rendered_html:
+            if rendered_html and not _looks_like_js_shell(rendered_html):
                 runtime.record("recovery.browser_successes")
+                runtime.record("recovery.browser.contact.successes")
                 contact_html = rendered_html
                 contact_retrieval_method = "browser_render"
                 contact_error = None
                 contact_render_attempts = 2
-            elif render_error and render_error != "js_fallback_disabled":
-                errors.append(f"{contact_url}:{render_error}")
+            else:
+                contact_html = None
+                if rendered_html:
+                    render_error = "js_shell_after_render"
+                if render_error and render_error != "js_fallback_disabled":
+                    if render_error == "security_interstitial":
+                        _record_security_interstitial(contact_url)
+                    runtime.record("recovery.browser.contact.errors")
+                    errors.append(f"{contact_url}:{render_error}")
         if (
             config.ENABLE_JS_FALLBACK
             and contact_html
@@ -904,14 +1033,23 @@ def _fetch_site_live(
             and contact_render_attempts < 2
         ):
             runtime.record("recovery.browser_attempts")
+            runtime.record("recovery.browser.contact.attempts")
             contact_render_attempts += 1
             rendered_html, render_error = render_page(contact_url)
-            if rendered_html:
+            if rendered_html and not _looks_like_js_shell(rendered_html):
                 runtime.record("recovery.browser_successes")
+                runtime.record("recovery.browser.contact.successes")
                 contact_html = rendered_html
                 contact_retrieval_method = "browser_render"
-            elif render_error and render_error != "js_fallback_disabled":
-                errors.append(f"{contact_url}:{render_error}")
+            else:
+                contact_html = None
+                if rendered_html:
+                    render_error = "js_shell_after_render"
+                if render_error and render_error != "js_fallback_disabled":
+                    if render_error == "security_interstitial":
+                        _record_security_interstitial(contact_url)
+                    runtime.record("recovery.browser.contact.errors")
+                    errors.append(f"{contact_url}:{render_error}")
         if contact_html:
             final_contact_url = contact_meta.get("final_url", contact_url)
             pages[final_contact_url] = contact_html
@@ -1091,11 +1229,15 @@ def fetch_site(
                 page for page in cached_pages
                 if not _looks_like_security_interstitial(page.get("html", ""))
             ]
+            for page in cached_pages:
+                if _looks_like_security_interstitial(page.get("html", "")):
+                    _record_security_interstitial(
+                        str(page.get("url", "")), source="cache"
+                    )
             cached["pages"] = safe_pages
             if any(not page.get("retrieval_method") for page in safe_pages):
                 cached["provenance_status"] = "legacy_cache_unknown"
             if len(safe_pages) != len(cached_pages):
-                runtime.record("cache.site.security_interstitial_rejected", len(cached_pages) - len(safe_pages))
                 if not safe_pages:
                     cached["error"] = "cached_security_interstitial"
             recorded_capabilities = cached.get("capability_profile")

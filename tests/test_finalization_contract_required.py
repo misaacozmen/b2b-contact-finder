@@ -56,10 +56,10 @@ def test_current_schema_missing_plan_is_not_legacy(tmp_path: Path):
 
 def test_finalization_writer_retry_is_byte_identical(tmp_path: Path):
     row = {"company": "Final", "source_record_id": "input:0", "status": "REVIEW_NEEDED", "publication_eligible": False, "reason": "manual"}
-    snapshot = {"generated_at": "2000-01-01T00:00:00+00:00", "elapsed_seconds": 1.25, "phase": "FINALIZING", "counters": {}, "budgets": {}}
     root = tmp_path / "output"
     with patch.object(config, "OUTPUT_DIR", root), patch.object(config, "EVIDENCE_FILE", root / "evidence.jsonl"), patch.object(config, "ENTITY_RELATIONSHIPS_FILE", root / "entity.jsonl"), patch.object(config, "QUALITY_AUDIT_FILE", root / "quality.json"), patch.object(config, "DISCOVERY_COVERAGE_FILE", root / "coverage.json"), patch.object(config, "REPORT_FILE", root / "report.txt"), patch.object(config, "TELEMETRY_FILE", root / "telemetry.json"), patch.object(config, "CONTACTS_FILE", root / "contacts.xlsx"), patch.object(config, "VERIFIED_CONTACTS_FILE", root / "verified.xlsx"), patch.object(config, "REVIEW_QUEUE_FILE", root / "review.xlsx"), patch.object(config, "FAILED_FILE", root / "failed.xlsx"), patch.object(config, "CANDIDATES_FILE", root / "candidates.xlsx"):
         runtime.reset()
+        snapshot = runtime.snapshot()
         first = output_artifacts.write_outputs([dict(row)], 1.25, telemetry_snapshot=snapshot)
         artifact_hash = first.artifacts["artifact_set_sha256"]
         second = output_artifacts.write_outputs([dict(row)], 1.25, telemetry_snapshot=snapshot)
@@ -68,28 +68,29 @@ def test_finalization_writer_retry_is_byte_identical(tmp_path: Path):
 
 def test_complete_resume_rejects_manifest_hash_phase_and_counts_tamper(tmp_path: Path):
     root, run_id = _seed(tmp_path)
-    artifact = root / "output" / "artifacts" / "placeholder"
-    artifact.mkdir()
-    body = b"immutable"
-    (artifact / "file.txt").write_bytes(body)
-    file_hash = hashlib.sha256(body).hexdigest()
-    artifact_hash = hashlib.sha256(f"file.txt:{file_hash}\n".encode()).hexdigest()
-    artifact.rename(root / "output" / "artifacts" / artifact_hash)
-    artifact = root / "output" / "artifacts" / artifact_hash
     manifest_path = root / "manifest.json"
     with patch.object(config, "PROGRESS_DB_FILE", root / "state" / "progress.sqlite3"):
         checkpoint.begin_finalization_intent(run_id=run_id, generation="g", input_snapshot_sha256="r", result_snapshot_sha256="r")
-        checkpoint.mark_finalization_artifact_and_outbox(run_id=run_id, generation="g", result_snapshot_sha256="r", artifact_set_sha256=artifact_hash, artifacts={"artifact_set_sha256": artifact_hash, "files": {"file.txt": {"sha256": file_hash, "bytes": len(body)}}}, memory_rows=[{"source_record_id": "input:0"}])
-        manifest_path.write_text(json.dumps({"complete": True, "phase": "COMPLETE", "artifact_set_sha256": artifact_hash, "files": {"file.txt": {"sha256": file_hash, "bytes": len(body)}}}), encoding="utf-8")
+        telemetry = checkpoint.canonical_scheduler_receipt(run_id)
+        telemetry_json = json.dumps(telemetry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payloads = {"file.txt": b"immutable", config.TELEMETRY_FILE.name: telemetry_json.encode(), config.REPORT_FILE.name: f"SCHEDULER_RECEIPT_JSON={telemetry_json}\n".encode()}
+        files = {name: {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)} for name, body in payloads.items()}
+        artifact_hash = hashlib.sha256("".join(f"{name}:{files[name]['sha256']}\n" for name in sorted(files)).encode()).hexdigest()
+        artifact = root / "output" / "artifacts" / artifact_hash; artifact.mkdir()
+        for name, body in payloads.items(): (artifact / name).write_bytes(body)
+        artifacts = {"artifact_set_sha256": artifact_hash, "files": files}
+        checkpoint.mark_finalization_artifact_and_outbox(run_id=run_id, generation="g", result_snapshot_sha256="r", artifact_set_sha256=artifact_hash, artifacts=artifacts, memory_rows=[{"source_record_id": "input:0"}])
+        base_manifest = {"complete": True, "phase": "COMPLETE", "artifact_set_sha256": artifact_hash, "files": files, "telemetry": telemetry, "telemetry_sha256": hashlib.sha256(telemetry_json.encode()).hexdigest()}
+        manifest_path.write_text(json.dumps(base_manifest), encoding="utf-8")
         checkpoint.complete_finalization_intent(run_id=run_id, artifact_set_sha256=artifact_hash, manifest_sha256=checkpoint.file_hash(manifest_path))
         with sqlite3.connect(config.PROGRESS_DB_FILE) as connection:
             connection.execute("update runs set phase='COMPLETE' where run_id=?", (run_id,))
             connection.commit()
         assert checkpoint.validate_finalization_contract(run_id, root)["memory_plan_count"] == 1
-        manifest_path.write_text(json.dumps({"complete": True, "phase": "FINALIZING", "artifact_set_sha256": artifact_hash, "files": {"file.txt": {"sha256": file_hash, "bytes": len(body)}}}), encoding="utf-8")
+        manifest_path.write_text(json.dumps({**base_manifest, "phase": "FINALIZING"}), encoding="utf-8")
         with pytest.raises(RuntimeError, match="manifest is not COMPLETE"):
             checkpoint.validate_finalization_contract(run_id, root)
-        manifest_path.write_text(json.dumps({"complete": True, "phase": "COMPLETE", "artifact_set_sha256": artifact_hash, "files": {"file.txt": {"sha256": file_hash, "bytes": len(body)}}}), encoding="utf-8")
+        manifest_path.write_text(json.dumps(base_manifest), encoding="utf-8")
         with sqlite3.connect(config.PROGRESS_DB_FILE) as connection:
             connection.execute("update finalization_intent set manifest_sha256=?, memory_plan_count=99 where run_id=?", (checkpoint.file_hash(manifest_path), run_id))
             connection.commit()
@@ -102,14 +103,14 @@ def test_outbox_transaction_fault_rolls_back_all(tmp_path: Path):
     db = root / "state" / "progress.sqlite3"
     with patch.object(config, "PROGRESS_DB_FILE", db):
         checkpoint.begin_finalization_intent(run_id=run_id, generation="g", input_snapshot_sha256="r", result_snapshot_sha256="r")
-        connection = checkpoint._connect()
         class FaultyConnection:
             def __init__(self, value): self.value = value
             def __getattr__(self, name): return getattr(self.value, name)
             def commit(self): raise RuntimeError("injected commit fault")
-        with patch.object(checkpoint, "_connect", return_value=FaultyConnection(connection)), pytest.raises(RuntimeError, match="injected commit fault"):
+        def faulty_connection():
+            return FaultyConnection(checkpoint._open_connection(db))
+        with patch.object(checkpoint, "_connect", side_effect=faulty_connection), pytest.raises(RuntimeError, match="injected commit fault"):
             checkpoint.mark_finalization_artifact_and_outbox(run_id=run_id, generation="g", result_snapshot_sha256="r", artifact_set_sha256="a", artifacts={"artifact_set_sha256": "a", "files": {}}, memory_rows=[{"source_record_id": "input:0"}])
-        connection.close()
         assert checkpoint.load_memory_outbox_entries(run_id) == []
         assert checkpoint.load_finalization_intent(run_id)["memory_plan_committed"] == 0
 

@@ -161,6 +161,8 @@ class DiscoveryPipelineTests(unittest.TestCase):
             return None, "http_404"
 
         with patch.object(config, "ENABLE_JS_FALLBACK", True), patch(
+            "modules.crawler._preflight_js_fallback"
+        ), patch(
             "modules.crawler._try_fetch", side_effect=fake_fetch
         ), patch(
             "modules.crawler._try_render",
@@ -322,14 +324,14 @@ class DiscoveryPipelineTests(unittest.TestCase):
                 {"id": "place-2", "businessStatus": "CLOSED_PERMANENTLY", "websiteUri": "https://closed.example"},
             ]
         }
-        with patch.object(google_places, "is_enabled", return_value=True), patch("modules.google_places.requests.post", return_value=FakeResponse(payload)):
+        with patch.object(google_places, "is_enabled", return_value=True), patch.object(config, "GOOGLE_PLACES_REQUEST_BUDGET", 1), patch("modules.google_places.requests.post", return_value=FakeResponse(payload)):
             places = google_places.search_company("Example Brand")
         self.assertEqual(places, [{"website": "https://examplebrand.com.tr", "phone": "+90 212 555 12 34", "name": "Example Brand", "place_id": "place-1"}])
 
     def test_google_places_uses_short_brand_query_for_long_legal_name(self) -> None:
         response = FakeResponse({"places": []})
         company = "ATC KIMYA TUZ TARIM INSAAT HAYVANCILIK NAKLIYE SANAYI VE TICARET LIMITED SIRKETI"
-        with patch.object(google_places, "is_enabled", return_value=True), patch(
+        with patch.object(google_places, "is_enabled", return_value=True), patch.object(config, "GOOGLE_PLACES_REQUEST_BUDGET", 1), patch(
             "modules.google_places.requests.post", return_value=response
         ) as post:
             google_places.search_company(company)
@@ -369,7 +371,7 @@ class DiscoveryPipelineTests(unittest.TestCase):
 
     def test_hunter_filters_low_confidence_results(self) -> None:
         payload = {"data": {"emails": [{"value": "info@example.com", "confidence": 90}, {"value": "weak@example.com", "confidence": 20}]}}
-        with patch.object(hunter, "is_enabled", return_value=True), patch("modules.hunter.requests.get", return_value=FakeResponse(payload)):
+        with patch.object(hunter, "is_enabled", return_value=True), patch.object(config, "HUNTER_REQUEST_BUDGET", 1), patch("modules.hunter.requests.get", return_value=FakeResponse(payload)):
             emails = hunter.find_domain_emails("example.com")
         self.assertEqual(emails, [{"email": "info@example.com", "confidence": 90, "sources": []}])
 
@@ -381,6 +383,8 @@ class DiscoveryPipelineTests(unittest.TestCase):
         with patch.object(hunter, "is_enabled", return_value=True), patch.object(
             config, "HUNTER_API_KEY", api_key,
         ), patch("modules.hunter.runtime.reserve_api", return_value=True), patch(
+            "modules.hunter.runtime.paid_access_allowed", return_value=True
+        ), patch(
             "modules.hunter.runtime.wait_for_request_slot"
         ), patch("modules.hunter.requests.get", side_effect=error), self.assertLogs(
             "contact_finder", level="WARNING"
@@ -590,6 +594,8 @@ class DiscoveryPipelineTests(unittest.TestCase):
 
     def test_crawler_renders_root_after_http_403(self) -> None:
         with patch.object(config, "ENABLE_JS_FALLBACK", True), patch(
+            "modules.crawler._preflight_js_fallback"
+        ), patch(
             "modules.crawler._try_fetch", return_value=(None, "http_403")
         ), patch(
             "modules.crawler._try_render", return_value=("<html><body>Example Brand</body></html>", None)
