@@ -107,7 +107,9 @@ def _optional_request_cap(name: str, default: int | None = None) -> int | None:
 BRIGHTDATA_REQUEST_HARD_CAP = _optional_request_cap("BRIGHTDATA_REQUEST_BUDGET")
 GOOGLE_PLACES_REQUEST_HARD_CAP = _optional_request_cap("GOOGLE_PLACES_REQUEST_BUDGET")
 HUNTER_REQUEST_HARD_CAP = _optional_request_cap("HUNTER_REQUEST_BUDGET")
-BRANDFETCH_REQUEST_HARD_CAP = _optional_request_cap("BRANDFETCH_REQUEST_BUDGET")
+BRANDFETCH_REQUEST_HARD_CAP = _optional_request_cap(
+    "BRANDFETCH_REQUEST_BUDGET", 100
+)
 BRIGHTDATA_REQUEST_RATIO = max(0.0, float(os.getenv("BRIGHTDATA_REQUEST_RATIO", "3.9")))
 GOOGLE_PLACES_REQUEST_RATIO = max(0.0, float(os.getenv("GOOGLE_PLACES_REQUEST_RATIO", "0.25")))
 HUNTER_REQUEST_RATIO = max(0.0, float(os.getenv("HUNTER_REQUEST_RATIO", "0.10")))
@@ -279,7 +281,7 @@ MAX_CONTACT_PAGES = 6
 # into an unbounded sequence of 404 requests.  This cap counts attempted
 # contact URLs (homepage/identity/document fetches are tracked separately).
 MAX_CONTACT_ATTEMPTS = int(os.getenv("MAX_CONTACT_ATTEMPTS", "10"))
-MAX_IDENTITY_PAGES = int(os.getenv("MAX_IDENTITY_PAGES", "4"))
+MAX_IDENTITY_PAGES = int(os.getenv("MAX_IDENTITY_PAGES", "6"))
 MAX_FULL_CANDIDATE_EVALUATIONS = int(os.getenv("MAX_FULL_CANDIDATE_EVALUATIONS", "3"))
 MAX_IDENTITY_EVIDENCE_RECRAWLS = max(
     0, int(os.getenv("MAX_IDENTITY_EVIDENCE_RECRAWLS", "1"))

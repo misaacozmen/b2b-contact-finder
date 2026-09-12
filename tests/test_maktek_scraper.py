@@ -1,4 +1,5 @@
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -8,6 +9,7 @@ from modules.exhibitor_scraper import (
     _absolute_url,
     _decode_body,
     _brand_catalog_list_rows,
+    _beauty_profile_details,
     _fold,
     _get,
     _maktek_list_rows,
@@ -15,6 +17,7 @@ from modules.exhibitor_scraper import (
     _merge_brand_catalog_profile,
     _post_json,
     scrape_maktek,
+    scrape_beauty_eurasia,
 )
 
 
@@ -254,6 +257,142 @@ class MaktekScraperTests(unittest.TestCase):
         self.assertEqual(details["listed_address"], "İstanbul")
         self.assertEqual(details["brands"], "Örnek CNC")
         self.assertEqual(details["representations"], "Example GmbH")
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    def test_scraper_emits_completed_contact_observation_contract(self, get_mock, _sleep_mock):
+        get_mock.side_effect = [LIST_HTML.replace('<a href="?country=T%C3%9CRK%C4%B0YE&page=2">2</a>', ""), PROFILE_HTML]
+        rows = scrape_maktek(fetch_details=True, delay_sec=0)
+        row = rows[0]
+        self.assertEqual(row["listed_phone"], "02125551234")
+        self.assertEqual(row["listed_address"], "İstanbul")
+        self.assertEqual(row["listed_phone_status"], "OBSERVED_PRESENT")
+        self.assertEqual(row["listed_address_status"], "OBSERVED_PRESENT")
+        self.assertEqual(row["source_detail_status"], "COMPLETED")
+        self.assertEqual({claim["source_record_id"] for claim in __import__("json").loads(row["source_evidence"])}, {row["source_record_id"]})
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    def test_scraper_excludes_footer_contact_data(self, get_mock, _sleep_mock):
+        get_mock.side_effect = [
+            LIST_HTML.replace('<a href="?country=T%C3%9CRK%C4%B0YE&page=2">2</a>', ""),
+            PROFILE_HTML + "<footer>Organizatör 02129990000 Ankara</footer>",
+        ]
+        row = scrape_maktek(fetch_details=True, delay_sec=0)[0]
+        evidence = __import__("json").loads(row["source_evidence"])
+        self.assertNotIn("02129990000", str(row))
+        self.assertNotIn("02129990000", evidence)
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    def test_scraper_mismatch_does_not_merge_profile_contact(self, get_mock, _sleep_mock):
+        get_mock.side_effect = [
+            LIST_HTML.replace('<a href="?country=T%C3%9CRK%C4%B0YE&page=2">2</a>', ""),
+            PROFILE_HTML.replace("ÖRNEK MAKİNA", "BAŞKA MAKİNA"),
+        ]
+        row = scrape_maktek(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(row["listed_phone"], "")
+        self.assertEqual(row["listed_address"], "")
+        self.assertEqual(row["listed_phone_status"], "UNAVAILABLE")
+        self.assertEqual(row["listed_address_status"], "UNAVAILABLE")
+        self.assertEqual(row["source_detail_status"], "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH")
+        self.assertEqual(row["source_evidence"], "[]")
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    def test_scraper_fetch_error_is_unavailable_not_absent(self, get_mock, _sleep_mock):
+        get_mock.side_effect = [LIST_HTML.replace('<a href="?country=T%C3%9CRK%C4%B0YE&page=2">2</a>', ""), requests.RequestException("offline")]
+        row = scrape_maktek(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(row["source_detail_status"], "UNAVAILABLE_FETCH_ERROR")
+        self.assertEqual(row["listed_phone_status"], "UNAVAILABLE")
+        self.assertEqual(row["listed_address_status"], "UNAVAILABLE")
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    def test_scraper_without_detail_fetch_marks_fields_not_requested(self, get_mock, _sleep_mock):
+        get_mock.return_value = LIST_HTML.replace('<a href="?country=T%C3%9CRK%C4%B0YE&page=2">2</a>', "")
+        row = scrape_maktek(fetch_details=False, delay_sec=0)[0]
+        self.assertEqual(row["source_detail_status"], "NOT_REQUESTED")
+        self.assertEqual(row["listed_phone_status"], "NOT_REQUESTED")
+        self.assertEqual(row["listed_address_status"], "NOT_REQUESTED")
+        get_mock.assert_called_once()
+
+    def test_beauty_profile_parser_is_scoped_and_labelled(self):
+        details = _beauty_profile_details(
+            """
+            <main><h1>BEAUTY CO</h1>
+              <b>Firma Adresi</b> İstanbul<hr>
+              <b>Telefon</b> <a href="tel:+902125550000">call</a><hr>
+              <b>Firma Websitesi</b> <a href="https://beauty.example">site</a><hr>
+              <b>Ürün Grupları</b> Cosmetics<hr>
+            </main><footer>Organizatör 02129990000</footer>
+            """,
+            "https://beautyeurasia.com/tr/company/beauty",
+        )
+        self.assertEqual(details["company"], "BEAUTY CO")
+        self.assertEqual(details["listed_phone"], "02125550000")
+        self.assertEqual(details["listed_address"], "İstanbul")
+        self.assertEqual(details["website"], "https://beauty.example")
+        self.assertNotIn("02129990000", str(details))
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    @patch("modules.exhibitor_scraper._post_json")
+    def test_beauty_datatables_detail_enrichment_emits_contact_contract(self, post_mock, get_mock, _sleep_mock):
+        post_mock.return_value = {
+            "data": [["", '<a href="/tr/company/beauty">BEAUTY CO</a>', "Türkiye"]],
+            "recordsTotal": 1,
+        }
+        get_mock.return_value = """
+            <main><h1>BEAUTY CO</h1>
+              <b>Firma Adresi</b> İstanbul<hr>
+              <b>Telefon</b> <a href="tel:+902125550000">call</a><hr>
+              <b>Firma Websitesi</b> <a href="https://beauty.example">site</a><hr>
+            </main><footer>Organizatör 02129990000</footer>
+        """
+        row = scrape_beauty_eurasia(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(row["listed_phone"], "02125550000")
+        self.assertEqual(row["listed_address"], "İstanbul")
+        self.assertEqual(row["listed_phone_status"], "OBSERVED_PRESENT")
+        self.assertEqual(row["listed_address_status"], "OBSERVED_PRESENT")
+        self.assertEqual(row["source_detail_status"], "COMPLETED")
+        self.assertNotIn("02129990000", str(row))
+        self.assertTrue(all(claim["source_record_id"] for claim in json.loads(row["source_evidence"])))
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    @patch("modules.exhibitor_scraper._post_json")
+    def test_beauty_valid_profile_without_contact_is_observed_absent(self, post_mock, get_mock, _sleep_mock):
+        post_mock.return_value = {
+            "data": [["", '<a href="/tr/company/beauty">BEAUTY CO</a>', "Türkiye"]],
+            "recordsTotal": 1,
+        }
+        get_mock.return_value = "<main><h1>BEAUTY CO</h1><p>Products</p></main>"
+        row = scrape_beauty_eurasia(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(row["source_detail_status"], "COMPLETED")
+        self.assertEqual(row["listed_phone_status"], "OBSERVED_ABSENT")
+        self.assertEqual(row["listed_address_status"], "OBSERVED_ABSENT")
+        self.assertEqual(row["listed_phone"], "")
+        self.assertEqual(row["listed_address"], "")
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    @patch("modules.exhibitor_scraper._post_json")
+    def test_beauty_mismatch_and_fetch_error_are_unavailable(self, post_mock, get_mock, _sleep_mock):
+        post_mock.return_value = {
+            "data": [["", '<a href="/tr/company/beauty">BEAUTY CO</a>', "Türkiye"]],
+            "recordsTotal": 1,
+        }
+        get_mock.return_value = "<main><h1>OTHER CO</h1><b>Telefon</b> 02129990000<hr></main>"
+        mismatch = scrape_beauty_eurasia(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(mismatch["source_detail_status"], "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH")
+        self.assertEqual(mismatch["listed_phone_status"], "UNAVAILABLE")
+        self.assertEqual(mismatch["listed_phone"], "")
+
+        get_mock.side_effect = requests.RequestException("offline")
+        failed = scrape_beauty_eurasia(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(failed["source_detail_status"], "UNAVAILABLE_FETCH_ERROR")
+        self.assertEqual(failed["listed_phone_status"], "UNAVAILABLE")
 
     @patch("modules.exhibitor_scraper.time.sleep")
     @patch("modules.exhibitor_scraper._get")

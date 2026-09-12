@@ -300,20 +300,194 @@ def _idos_detail_description(html: str) -> str:
     return _clean(next_block.get_text(" ", strip=True)) if next_block else ""
 
 
-def _beauty_label_value(html: str, label_text: str) -> str:
+def _idos_list_rows(
+    html: str,
+    listing_url: str = "https://crm.idos.events/portal/catalogue/75",
+) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
-    for label in soup.find_all("b"):
-        if label_text.lower() not in _clean(label.get_text(" ", strip=True)).lower():
+    rows: list[dict] = []
+    cards = soup.select("article.cv2-card, .catalogue-card")
+    for card in cards:
+        name_node = card.select_one(".cv2-card-name") or card.select_one(".exhibitor-name")
+        country_node = card.select_one(".cv2-country span") or card.select_one(".catalogue-country")
+        sector_node = card.select_one(".cv2-card-sectors") or card.select_one(".catalogue-sectors")
+        link_node = card.select_one("a.stretched-link[href]") or card.select_one(
+            'a[href*="/portal/catalogue/75/"]'
+        )
+        company = _clean(name_node.get_text(" ", strip=True) if name_node else "")
+        country = _clean(country_node.get_text(" ", strip=True) if country_node else "")
+        if country and "türkiye" not in country.casefold() and "turkiye" not in country.casefold():
             continue
-        values = []
+        profile_url = _absolute_url(
+            "https://crm.idos.events", link_node.get("href", "") if link_node else ""
+        )
+        if not company:
+            continue
+        location_node = card.select_one(".cv2-stand")
+        if location_node:
+            location = _clean(location_node.get_text(" ", strip=True))
+        else:
+            legacy_location = BeautifulSoup(str(card), "html.parser")
+            for node in legacy_location.select(
+                ".exhibitor-name, .catalogue-country, .catalogue-sectors, a[href]"
+            ):
+                node.decompose()
+            location = _clean(legacy_location.get_text(" ", strip=True))
+        hall_match = re.search(
+            r"(?:Hall\s*/\s*Salon|Hall|Salon)\s*[:\-]\s*(.+?)(?=\s+(?:Stand\s*/\s*Booth|Stand|Booth)\s*[:\-]|$)",
+            location,
+            re.I,
+        )
+        stand_match = re.search(
+            r"(?:Stand\s*/\s*Booth|Stand|Booth)\s*[:\-]\s*(.+)$",
+            location,
+            re.I,
+        )
+        rows.append({
+            "company": company,
+            "website": "",
+            "listed_website": "",
+            "source": "idos_f_istanbul",
+            "country": country or "Türkiye",
+            "profile_url": profile_url,
+            "listing_url": listing_url,
+            "sector": _clean(sector_node.get_text(" ", strip=True) if sector_node else "gida icecek makine ambalaj"),
+            "description": "",
+            "listed_phone": "",
+            "listed_address": "",
+            "listed_phone_status": "NOT_REQUESTED",
+            "listed_address_status": "NOT_REQUESTED",
+            "source_detail_status": "NOT_REQUESTED",
+            "source_evidence": "[]",
+            "hall": _clean(hall_match.group(1)) if hall_match else "",
+            "stand": _clean(stand_match.group(1)) if stand_match else "",
+        })
+    return dedupe_rows(rows)
+
+
+def _idos_detail_scope(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    scope = soup.select_one(".cv2-detail")
+    if scope is None:
+        candidates = soup.select("main, article, [class*='participant'], [class*='profile'], [class*='detail']")
+        scope = max(candidates, key=lambda node: len(node.get_text(" ", strip=True)), default=soup)
+    for node in scope.select("footer, header, nav, aside, script, style, noscript"):
+        node.decompose()
+    return soup, scope
+
+
+def _idos_profile_details(html: str, profile_url: str) -> dict:
+    soup, scope = _idos_detail_scope(html)
+    heading = scope.select_one(".cv2-detail-side h2") or scope.select_one("h1, h2")
+    company = _clean(heading.get_text(" ", strip=True) if heading else "")
+    website = ""
+    for link in scope.select(".cv2-detail-side .cv2-side-actions a[href]"):
+        href = str(link.get("href", ""))
+        candidate = _normalize_website(href)
+        if candidate and _catalog_host(candidate) != _catalog_host(profile_url):
+            website = candidate
+            break
+    description_node = scope.select_one(".cv2-prose")
+    address, _ = _detail_value(scope, ("firma adresi", "company address", "address", "adres"))
+    phone_value, phone_links = _detail_value(
+        scope, ("phone", "telephone", "telefon", "tel", "gsm", "mobil")
+    )
+    return {
+        "company": company,
+        "website": website,
+        "description": _clean(description_node.get_text(" ", strip=True) if description_node else ""),
+        "listed_phone": _texhibition_labelled_phone(phone_value, phone_links),
+        "listed_address": address,
+        "source_detail_url": profile_url,
+        "source_detail_content_sha256": hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest(),
+    }
+
+
+def _beauty_labelled_value(scope, labels: tuple[str, ...]) -> tuple[str, list[str]]:
+    wanted = {_fold(label).rstrip(":") for label in labels}
+    for label in scope.find_all(["b", "strong", "label", "dt", "th"]):
+        label_text = _fold(label.get_text(" ", strip=True)).rstrip(":")
+        if label_text not in wanted:
+            continue
+        container = label.parent
+        if container and container.name == "tr":
+            cells = container.find_all(["th", "td"], recursive=False)
+            if len(cells) > 1:
+                value_node = cells[-1]
+                return _clean(value_node.get_text(" ", strip=True)), [
+                    str(link.get("href", "")) for link in value_node.find_all("a", href=True)
+                ]
+        if label.name == "dt" and label.find_next_sibling("dd"):
+            value_node = label.find_next_sibling("dd")
+            return _clean(value_node.get_text(" ", strip=True)), [
+                str(link.get("href", "")) for link in value_node.find_all("a", href=True)
+            ]
+        values: list[str] = []
+        links: list[str] = []
         for sibling in label.next_siblings:
             if getattr(sibling, "name", None) == "hr":
                 break
-            text = _clean(sibling.get_text(" ", strip=True) if hasattr(sibling, "get_text") else str(sibling))
+            if getattr(sibling, "name", None) in {"b", "strong", "label", "dt", "th"}:
+                break
+            if hasattr(sibling, "find_all"):
+                if getattr(sibling, "name", None) == "a" and sibling.get("href"):
+                    links.append(str(sibling.get("href")))
+                links.extend(str(link.get("href", "")) for link in sibling.find_all("a", href=True))
+                text = _clean(sibling.get_text(" ", strip=True))
+            else:
+                text = _clean(str(sibling))
             if text:
                 values.append(text)
-        return _clean(" ".join(values))
-    return ""
+        return _clean(" ".join(values)), links
+    return "", []
+
+
+def _beauty_label_value(html: str, label_text: str) -> str:
+    scope = BeautifulSoup(html, "html.parser") if isinstance(html, str) else html
+    return _beauty_labelled_value(scope, (label_text,))[0]
+
+
+def _beauty_detail_scope(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    scope = soup.select_one("main")
+    if scope is None:
+        candidates = soup.select("article, [class*='participant'], [class*='profile'], [class*='detail']")
+        scope = max(candidates, key=lambda node: len(node.get_text(" ", strip=True)), default=soup)
+    for node in scope.select("footer, header, nav, aside, script, style, noscript"):
+        node.decompose()
+    return soup, scope
+
+
+def _beauty_profile_details(html: str, profile_url: str) -> dict:
+    soup, scope = _beauty_detail_scope(html)
+    heading = scope.select_one("h1")
+    company = _clean(heading.get_text(" ", strip=True) if heading else "")
+    address, _ = _beauty_labelled_value(
+        scope, ("Firma Adresi", "Adres", "Address", "Company Address")
+    )
+    phone_value, phone_links = _beauty_labelled_value(
+        scope, ("Telefon", "Phone", "Telephone", "Tel", "GSM", "Mobil")
+    )
+    website_value, website_links = _beauty_labelled_value(
+        scope, ("Firma Websitesi", "Website", "Web Sitesi")
+    )
+    website = ""
+    for candidate in [*website_links, website_value]:
+        website = _normalize_website(candidate)
+        if website:
+            break
+    normalized_phone = _texhibition_labelled_phone(phone_value, phone_links)
+    sector = _beauty_label_value(scope, "Ürün Grupları") or _beauty_label_value(scope, "Urun Gruplari")
+    return {
+        "company": company,
+        "website": website,
+        "sector": sector,
+        "description": _meta_description(str(soup)),
+        "listed_phone": normalized_phone,
+        "listed_address": address,
+        "source_detail_url": profile_url,
+        "source_detail_content_sha256": hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest(),
+    }
 
 
 def _metalexpo_list_rows(
@@ -356,21 +530,57 @@ def _metalexpo_list_rows(
             "stand": stand,
             "sector": "demir celik metalurji metal isleme",
             "description": "",
+            "listed_phone": "",
+            "listed_address": "",
+            "listed_phone_status": "NOT_REQUESTED",
+            "listed_address_status": "NOT_REQUESTED",
+            "source_detail_status": "NOT_REQUESTED",
+            "source_evidence": "[]",
         })
     return dedupe_rows(rows)
 
 
 def scrape_metalexpo(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
-    del fetch_details, delay_sec
     list_url = "https://www.metalexpo.com.tr/katilimci-listesi-2026"
     session = _session()
-    return _metalexpo_list_rows(_get(session, list_url), list_url)
+    rows = _metalexpo_list_rows(_get(session, list_url), list_url)
+    for row in rows:
+        if fetch_details:
+            _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
+        else:
+            _set_source_detail_state(row, "NOT_REQUESTED")
+    return rows
 
 
 def _source_evidence_normalized(field: str, value: str) -> str:
     if field == "listed_phone":
         return phone.normalize_phone(value)
     return " ".join(scorer.normalize_text(value).split())
+
+
+_SOURCE_DETAIL_FAILURE_STATUSES = {
+    "NOT_REQUESTED",
+    "UNAVAILABLE_NO_PROFILE_URL",
+    "UNAVAILABLE_FETCH_ERROR",
+    "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH",
+}
+
+
+def _set_source_detail_state(row: dict, status: str, profile_url: str = "") -> None:
+    if status not in _SOURCE_DETAIL_FAILURE_STATUSES:
+        raise ValueError(f"invalid_source_detail_status:{status}")
+    row.setdefault("listed_phone", "")
+    row.setdefault("listed_address", "")
+    row["listed_phone"] = ""
+    row["listed_address"] = ""
+    row["listed_phone_status"] = "NOT_REQUESTED" if status == "NOT_REQUESTED" else "UNAVAILABLE"
+    row["listed_address_status"] = "NOT_REQUESTED" if status == "NOT_REQUESTED" else "UNAVAILABLE"
+    row["source_detail_status"] = status
+    if profile_url:
+        row["source_detail_url"] = profile_url
+    else:
+        row.pop("source_detail_url", None)
+    row["source_evidence"] = "[]"
 
 
 def _record_profile_observation(row: dict, details: dict, html: str, profile_url: str) -> None:
@@ -385,9 +595,13 @@ def _record_profile_observation(row: dict, details: dict, html: str, profile_url
         "source_detail_url": profile_url,
         "source_detail_content_sha256": content_hash,
     })
+    normalized_phone = phone.normalize_phone(str(details.get("listed_phone", "") or ""))
+    normalized_address = _clean(str(details.get("listed_address", "") or ""))
+    row["listed_phone"] = normalized_phone
+    row["listed_address"] = normalized_address
     claims = []
     for field in ("listed_phone", "listed_address"):
-        value = str(details.get(field, "") or "").strip()
+        value = row[field]
         status = "OBSERVED_PRESENT" if value else "OBSERVED_ABSENT"
         row[f"{field}_status"] = status
         claims.append({
@@ -430,6 +644,11 @@ def _texhibition_list_rows(
             "profile_url": _absolute_url(listing_url, link.get("href", "")),
             "listing_url": listing_url,
             "source_detail_status": "NOT_REQUESTED",
+            "listed_phone": "",
+            "listed_address": "",
+            "listed_phone_status": "NOT_REQUESTED",
+            "listed_address_status": "NOT_REQUESTED",
+            "source_evidence": "[]",
             "hall": _clean(hall_match.group(1)) if hall_match else "",
             "stand": _clean(stand_match.group(1)) if stand_match else "",
             "sector": _clean(category.get_text(" ", strip=True)) if category else "",
@@ -569,13 +788,16 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
     """Extract labelled exhibitor fields while excluding site-wide footer data."""
     soup, scope = _texhibition_detail_scope(html)
     legal_name, _ = _detail_value(scope, ("legal name", "company name", "firma unvani", "ticari unvan", "company"))
+    if not legal_name:
+        heading = scope.select_one("h1")
+        legal_name = _clean(heading.get_text(" ", strip=True) if heading else "")
     website_value, website_links = _detail_value(scope, ("website", "web site", "web sitesi", "firma website"))
     address, _ = _detail_value(scope, ("address", "adres", "company address", "firma adresi"))
     country, _ = _detail_value(scope, ("country", "ulke", "ülke"))
     description, _ = _detail_value(scope, ("description", "about company", "about", "aciklama", "açıklama"))
     brands, _ = _detail_value(scope, ("brands", "brand", "markalar"))
     representations, _ = _detail_value(scope, ("representations", "representation", "temsilcilikler"))
-    phone, phone_links = _detail_value(scope, ("phone", "telephone", "telefon", "tel"))
+    phone, phone_links = _detail_value(scope, ("phone", "telephone", "telefon", "tel", "gsm", "mobil"))
     email, email_links = _detail_value(scope, ("email", "e-mail", "e posta", "e-posta", "eposta"))
 
     website = _texhibition_labelled_website(website_value, website_links)
@@ -584,6 +806,7 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
     if not description:
         description = _meta_description(str(soup))
     details = {
+        "company": legal_name,
         "listed_legal_name": legal_name,
         "listed_website": website,
         "website": website,
@@ -633,15 +856,19 @@ def _texhibition_profile_details(html: str, profile_url: str) -> dict:
 
 def _apply_source_detail(row: dict, html: str, profile_url: str) -> dict:
     details = _texhibition_profile_details(html, profile_url)
-    source_id = str(row.get("source_record_id", ""))
-    try:
-        claims = json.loads(details.get("source_evidence", "[]"))
-        for claim in claims:
-            claim["source_record_id"] = source_id
-        details["source_evidence"] = json.dumps(claims, ensure_ascii=False, sort_keys=True)
-    except json.JSONDecodeError:
-        pass
-    row.update({key: value for key, value in details.items() if value not in ("", None)})
+    listing_key = _profile_company_key(str(row.get("company", "")))
+    profile_key = _profile_company_key(str(details.get("company", "")))
+    if not listing_key or not profile_key or listing_key != profile_key:
+        _set_source_detail_state(row, "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH", profile_url)
+        return row
+    for key in (
+        "listed_legal_name", "listed_website", "website", "country",
+        "description", "brands", "representations", "listed_email",
+    ):
+        value = details.get(key)
+        if value not in ("", None):
+            row[key] = value
+    _record_profile_observation(row, details, html, profile_url)
     return row
 
 
@@ -698,14 +925,16 @@ def scrape_texhibition(fetch_details: bool = False, delay_sec: float = 0.4) -> l
         for row in rows:
             profile_url = str(row.get("profile_url", ""))
             if not profile_url:
-                row["source_detail_status"] = "UNAVAILABLE_NO_PROFILE_URL"
+                _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
                 continue
             try:
                 _apply_source_detail(row, _get(session, profile_url), profile_url)
-            except Exception as exc:
-                row["source_detail_status"] = f"UNAVAILABLE:{type(exc).__name__}"
-                row["source_detail_url"] = profile_url
+            except (requests.RequestException, ValueError):
+                _set_source_detail_state(row, "UNAVAILABLE_FETCH_ERROR", profile_url)
             time.sleep(delay_sec)
+    else:
+        for row in rows:
+            _set_source_detail_state(row, "NOT_REQUESTED", str(row.get("profile_url", "")))
     return dedupe_rows(rows)
 
 
@@ -799,6 +1028,11 @@ def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[d
                 "profile_url": profile_url,
                 "listing_url": listing_url,
                 "source_detail_status": "NOT_REQUESTED",
+                "listed_phone": "",
+                "listed_address": "",
+                "listed_phone_status": "NOT_REQUESTED",
+                "listed_address_status": "NOT_REQUESTED",
+                "source_evidence": "[]",
                 "hall": "",
                 "stand": _clean(event_data.get("booth", "")),
                 "sector": "ev ve mutfak esyalari",
@@ -823,13 +1057,16 @@ def scrape_zuchex(fetch_details: bool = False, delay_sec: float = 0.4) -> list[d
         for row in rows:
             profile_url = str(row.get("profile_url", "") or "")
             if not profile_url:
-                row["source_detail_status"] = "UNAVAILABLE_NO_PROFILE_URL"
+                _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
                 continue
             try:
                 _apply_source_detail(row, _get(session, profile_url), profile_url)
-            except Exception as exc:
-                row["source_detail_status"] = f"UNAVAILABLE:{type(exc).__name__}"
+            except (requests.RequestException, ValueError):
+                _set_source_detail_state(row, "UNAVAILABLE_FETCH_ERROR", profile_url)
             time.sleep(delay_sec)
+    else:
+        for row in rows:
+            _set_source_detail_state(row, "NOT_REQUESTED", str(row.get("profile_url", "")))
     return dedupe_rows(rows)
 
 
@@ -844,12 +1081,13 @@ def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
         url = list_url if page == 1 else f"{list_url}?page={page}"
         html = _get(session, url)
         soup = BeautifulSoup(html, "html.parser")
-        links = soup.select('a[href*="/tr/fuar/exhibitors/"]')
+        links = soup.select('a[href*="/fair/exhibitors/"], a[href*="/tr/fuar/exhibitors/"]')
         page_rows = 0
 
         for link in links:
             href = link.get("href", "")
-            if any(part in href for part in ("/detail", "/showroom", "contact-form")):
+            lowered_href = href.casefold()
+            if any(part in lowered_href for part in ("/detail", "/showroom", "contact-form")):
                 continue
             image = link.find("img", alt=True)
             company = _clean(image["alt"] if image else link.get_text(" ", strip=True))
@@ -858,47 +1096,47 @@ def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
             profile_url = _absolute_url(base_url, href)
             if profile_url in rows_by_profile:
                 continue
-            website = ""
-            description = ""
-            details = {"company": "", "listed_address": "", "listed_phone": ""}
-            detail_html = ""
-            detail_status = "NOT_REQUESTED"
-            if fetch_details:
-                try:
-                    detail_html = _get(session, profile_url)
-                    website = _first_external_website(detail_html, "ifco.com.tr")
-                    description = _meta_description(detail_html)
-                    _soup_detail, scope = _texhibition_detail_scope(detail_html)
-                    heading = scope.select_one("h1")
-                    details["company"] = _clean(heading.get_text(" ", strip=True) if heading else "")
-                    details["listed_address"], _ = _detail_value(
-                        scope, ("company address", "firma adresi", "address", "adres")
-                    )
-                    detail_status = "COMPLETED"
-                    time.sleep(delay_sec)
-                except requests.RequestException:
-                    website = ""
-                    detail_status = "UNAVAILABLE_FETCH_ERROR"
             row = {
                 "company": company,
-                "website": website,
+                "website": "",
                 "source": "ifco",
                 "country": "",
                 "profile_url": profile_url,
                 "sector": "tekstil giyim moda hazir giyim",
-                "description": description,
+                "description": "",
                 "listed_phone": "",
                 "listed_address": "",
-                "source_detail_status": detail_status,
             }
-            if detail_status == "COMPLETED":
-                if _profile_company_key(company) == _profile_company_key(details["company"]):
-                    row["listed_address"] = details["listed_address"]
-                    _record_profile_observation(row, details, detail_html, profile_url)
-                else:
-                    row["website"] = ""
-                    row["description"] = ""
-                    row["source_detail_status"] = "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH"
+            if fetch_details and not profile_url:
+                _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
+            elif fetch_details:
+                try:
+                    detail_html = _get(session, profile_url)
+                    _soup_detail, scope = _texhibition_detail_scope(detail_html)
+                    heading = scope.select_one("h1")
+                    details = {
+                        "company": _clean(heading.get_text(" ", strip=True) if heading else ""),
+                        "listed_address": "",
+                        "listed_phone": "",
+                    }
+                    details["listed_address"], _ = _detail_value(
+                        scope, ("company address", "firma adresi", "address", "adres")
+                    )
+                    phone_value, phone_links = _detail_value(
+                        scope, ("phone", "telephone", "telefon", "tel", "gsm", "mobil")
+                    )
+                    details["listed_phone"] = _texhibition_labelled_phone(phone_value, phone_links)
+                    if _profile_company_key(company) == _profile_company_key(details["company"]):
+                        row["website"] = _first_external_website(str(scope), "ifco.com.tr")
+                        row["description"] = _meta_description(detail_html)
+                        _record_profile_observation(row, details, detail_html, profile_url)
+                    else:
+                        _set_source_detail_state(row, "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH", profile_url)
+                    time.sleep(delay_sec)
+                except requests.RequestException:
+                    _set_source_detail_state(row, "UNAVAILABLE_FETCH_ERROR", profile_url)
+            else:
+                _set_source_detail_state(row, "NOT_REQUESTED", profile_url)
             rows_by_profile[profile_url] = row
             page_rows += 1
 
@@ -908,7 +1146,7 @@ def scrape_ifco(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
         page += 1
         time.sleep(delay_sec)
 
-    return list(rows_by_profile.values())
+    return dedupe_rows(list(rows_by_profile.values()))
 
 
 def scrape_idos(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dict]:
@@ -941,39 +1179,32 @@ def scrape_idos(fetch_details: bool = False, delay_sec: float = 0.4) -> list[dic
                     discovered_pages.append(int(match.group(1)))
             max_page = max(discovered_pages, default=0)
             page_numbers = list(range(2, max_page + 1))
-        cards = soup.select(".catalogue-card")
+        page_rows_data = _idos_list_rows(html, url)
         page_rows = 0
 
-        for card in cards:
-            country = _clean(card.select_one(".catalogue-country").get_text(" ", strip=True) if card.select_one(".catalogue-country") else "")
-            if country and "türkiye" not in country.lower() and "turkiye" not in country.lower():
+        for row in page_rows_data:
+            source_id = str(row.get("source_record_id", ""))
+            if not source_id or source_id in rows_by_profile:
                 continue
-            name_el = card.select_one(".exhibitor-name")
-            sector_el = card.select_one(".catalogue-sectors")
-            link_el = card.select_one('a[href*="/portal/catalogue/75/"]')
-            company = _clean(name_el.get_text(" ", strip=True) if name_el else "")
-            profile_url = _absolute_url(base_url, link_el["href"]) if link_el else ""
-            if not company or not profile_url or profile_url in rows_by_profile:
-                continue
-            website = ""
-            description = ""
-            if fetch_details:
+            profile_url = str(row.get("profile_url", ""))
+            if fetch_details and not profile_url:
+                _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
+            elif fetch_details:
                 try:
                     detail_html = _get(session, profile_url)
-                    website = _first_external_website(detail_html, "crm.idos.events")
-                    description = _idos_detail_description(detail_html)
+                    details = _idos_profile_details(detail_html, profile_url)
+                    if _profile_company_key(str(row.get("company", ""))) == _profile_company_key(details["company"]):
+                        row["website"] = details["website"]
+                        row["description"] = details["description"]
+                        _record_profile_observation(row, details, detail_html, profile_url)
+                    else:
+                        _set_source_detail_state(row, "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH", profile_url)
                     time.sleep(delay_sec)
-                except requests.RequestException:
-                    website = ""
-            rows_by_profile[profile_url] = {
-                "company": company,
-                "website": website,
-                "source": "idos_f_istanbul",
-                "country": country or "Türkiye",
-                "profile_url": profile_url,
-                "sector": _clean(sector_el.get_text(" ", strip=True) if sector_el else "gida icecek makine ambalaj"),
-                "description": description,
-            }
+                except (requests.RequestException, ValueError):
+                    _set_source_detail_state(row, "UNAVAILABLE_FETCH_ERROR", profile_url)
+            else:
+                _set_source_detail_state(row, "NOT_REQUESTED", profile_url)
+            rows_by_profile[source_id] = row
             page_rows += 1
 
         if page_rows == 0 and not page_numbers:
@@ -1017,14 +1248,14 @@ def _beauty_profile_url(row: list) -> str:
 
 
 def _beauty_detail_website(html: str) -> str:
-    soup = BeautifulSoup(html, "html.parser")
-    labels = soup.find_all("b")
-    for label in labels:
-        if "websitesi" not in _clean(label.get_text(" ", strip=True)).lower():
-            continue
-        link = label.find_next("a", href=True)
-        if link:
-            return _normalize_website(link["href"])
+    _soup, scope = _beauty_detail_scope(html)
+    value, links = _beauty_labelled_value(
+        scope, ("Firma Websitesi", "Website", "Web Sitesi")
+    )
+    for candidate in [*links, value]:
+        website = _normalize_website(candidate)
+        if website:
+            return website
     return ""
 
 
@@ -1056,34 +1287,39 @@ def scrape_beauty_eurasia(fetch_details: bool = True, delay_sec: float = 0.4) ->
             if "türkiye" not in country.lower() and "turkiye" not in country.lower():
                 continue
             profile_url = _beauty_profile_url(row)
-            website = ""
-            sector = ""
-            description = ""
-            if fetch_details and profile_url:
+            result_row = {
+                "company": company.replace(" Yeni katılımcı", "").strip(),
+                "website": "",
+                "source": "beauty_eurasia",
+                "country": country,
+                "profile_url": profile_url,
+                "sector": "",
+                "description": "",
+            }
+            if fetch_details and not profile_url:
+                _set_source_detail_state(result_row, "UNAVAILABLE_NO_PROFILE_URL")
+            elif fetch_details:
                 try:
                     detail_html = _get(session, profile_url)
-                    website = _beauty_detail_website(detail_html)
-                    sector = _beauty_label_value(detail_html, "Ürün Grupları") or _beauty_label_value(detail_html, "Urun Gruplari")
-                    description = _meta_description(detail_html)
+                    details = _beauty_profile_details(detail_html, profile_url)
+                    if _profile_company_key(result_row["company"]) == _profile_company_key(details["company"]):
+                        result_row["website"] = details["website"]
+                        result_row["sector"] = details["sector"]
+                        result_row["description"] = details["description"]
+                        _record_profile_observation(result_row, details, detail_html, profile_url)
+                    else:
+                        _set_source_detail_state(result_row, "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH", profile_url)
                     time.sleep(delay_sec)
                 except (requests.RequestException, ValueError):
-                    website = ""
-            rows.append(
-                {
-                    "company": company.replace(" Yeni katılımcı", "").strip(),
-                    "website": website,
-                    "source": "beauty_eurasia",
-                    "country": country,
-                    "profile_url": profile_url,
-                    "sector": sector,
-                    "description": description,
-                }
-            )
+                    _set_source_detail_state(result_row, "UNAVAILABLE_FETCH_ERROR", profile_url)
+            else:
+                _set_source_detail_state(result_row, "NOT_REQUESTED", profile_url)
+            rows.append(result_row)
         start += length
         if start >= int(payload.get("recordsTotal", start)):
             break
         time.sleep(delay_sec)
-    return rows
+    return dedupe_rows(rows)
 
 
 def _maktek_widget(soup: BeautifulSoup, title: str):
@@ -1266,6 +1502,10 @@ def _brand_catalog_list_rows(
             "listed_phone": "",
             "listed_email": "",
             "listed_address": "",
+            "listed_phone_status": "NOT_REQUESTED",
+            "listed_address_status": "NOT_REQUESTED",
+            "source_detail_status": "NOT_REQUESTED",
+            "source_evidence": "[]",
             "hall": hall,
             "stand": stand,
             "brands": _brand_values(card),
@@ -1308,24 +1548,26 @@ def scrape_maktek(fetch_details: bool = True, delay_sec: float = 0.2) -> list[di
             profile_url = row["profile_url"]
             if profile_url in rows_by_profile:
                 continue
-            if fetch_details:
+            if fetch_details and not profile_url:
+                _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
+            elif fetch_details:
                 try:
                     detail_html = _get(session, profile_url)
                     details = _maktek_profile_details(detail_html)
                     if _merge_brand_catalog_profile(row, details, website_field="website"):
                         _record_profile_observation(row, details, detail_html, profile_url)
                     else:
-                        row["source_detail_status"] = "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH"
+                        _set_source_detail_state(row, "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH", profile_url)
                     time.sleep(delay_sec)
                 except requests.RequestException:
-                    row["source_detail_status"] = "UNAVAILABLE_FETCH_ERROR"
+                    _set_source_detail_state(row, "UNAVAILABLE_FETCH_ERROR", profile_url)
             else:
-                row["source_detail_status"] = "NOT_REQUESTED"
+                _set_source_detail_state(row, "NOT_REQUESTED", profile_url)
             rows_by_profile[profile_url] = row
         page += 1
         if page <= max_page:
             time.sleep(delay_sec)
-    return list(rows_by_profile.values())
+    return dedupe_rows(list(rows_by_profile.values()))
 
 
 def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[dict]:
@@ -1361,24 +1603,26 @@ def scrape_foodist(fetch_details: bool = True, delay_sec: float = 0.2) -> list[d
             profile_url = row["profile_url"]
             if profile_url in rows_by_profile:
                 continue
-            if fetch_details:
+            if fetch_details and not profile_url:
+                _set_source_detail_state(row, "UNAVAILABLE_NO_PROFILE_URL")
+            elif fetch_details:
                 try:
                     detail_html = _get(session, profile_url)
                     details = _maktek_profile_details(detail_html)
                     if _merge_brand_catalog_profile(row, details, website_field="listed_website"):
                         _record_profile_observation(row, details, detail_html, profile_url)
                     else:
-                        row["source_detail_status"] = "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH"
+                        _set_source_detail_state(row, "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH", profile_url)
                     time.sleep(delay_sec)
                 except requests.RequestException:
-                    row["source_detail_status"] = "UNAVAILABLE_FETCH_ERROR"
+                    _set_source_detail_state(row, "UNAVAILABLE_FETCH_ERROR", profile_url)
             else:
-                row["source_detail_status"] = "NOT_REQUESTED"
+                _set_source_detail_state(row, "NOT_REQUESTED", profile_url)
             rows_by_profile[profile_url] = row
         page += 1
         if page <= max_page:
             time.sleep(delay_sec)
-    return list(rows_by_profile.values())
+    return dedupe_rows(list(rows_by_profile.values()))
 
 
 def dedupe_rows(rows: list[dict]) -> list[dict]:

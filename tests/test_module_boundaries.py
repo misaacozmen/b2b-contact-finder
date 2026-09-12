@@ -387,15 +387,23 @@ class ModuleBoundariesTests(unittest.TestCase):
         import socket
         import urllib.request
         if os.environ.get("B2B_TEST_OFFLINE") == "1":
-            # 1. TCP socket creation
-            with self.assertRaises(RuntimeError) as ctx:
-                socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.assertIn("Network access disabled during tests", str(ctx.exception))
+            # 1. TCP outbound connection attempt
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_socket:
+                with self.assertRaises(RuntimeError) as ctx:
+                    tcp_socket.connect(("127.0.0.1", 9))
+                self.assertEqual(
+                    str(ctx.exception),
+                    "Network access disabled during tests: socket.connect",
+                )
 
-            # 2. UDP socket creation
-            with self.assertRaises(RuntimeError) as ctx:
-                socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.assertIn("Network access disabled during tests", str(ctx.exception))
+            # 2. UDP outbound send attempt
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+                with self.assertRaises(RuntimeError) as ctx:
+                    udp_socket.sendto(b"offline-guard-probe", ("127.0.0.1", 9))
+                self.assertEqual(
+                    str(ctx.exception),
+                    "Network access disabled during tests: socket.sendto",
+                )
 
             # 3. getaddrinfo
             with self.assertRaises(RuntimeError) as ctx:

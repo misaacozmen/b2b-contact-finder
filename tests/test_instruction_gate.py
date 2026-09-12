@@ -14,7 +14,7 @@ from scrape_exhibitors import enrich_existing_workbook
 from validate_benchmark_suite import _population_check
 from validate_golden_xlsx import evaluate, evaluate_stages, validate_artifact_contract
 from modules import crawler, excel, identity, phone, run_budget, runtime, run_context, scorer, selection
-from modules.exhibitor_scraper import _texhibition_profile_details, scrape_ifco
+from modules.exhibitor_scraper import _apply_source_detail, _texhibition_profile_details, scrape_ifco
 
 
 def _workbook(path: Path, headers: list[str], rows: list[dict], *, sheet: str = "Sheet") -> None:
@@ -178,6 +178,73 @@ class BudgetAndLegalRuleTests(unittest.TestCase):
             run_budget.calculate_paid_api_budgets(893, {**none_caps, "brightdata": 100})["brightdata"], 100,
         )
 
+    def test_default_paid_caps_leave_brandfetch_hard_capped(self):
+        self.assertIsNone(config.BRIGHTDATA_REQUEST_HARD_CAP)
+        self.assertIsNone(config.GOOGLE_PLACES_REQUEST_HARD_CAP)
+        self.assertIsNone(config.HUNTER_REQUEST_HARD_CAP)
+        self.assertEqual(config.BRANDFETCH_REQUEST_HARD_CAP, 100)
+
+    def test_population_budget_matrix_includes_brandfetch_cap(self):
+        for population, expected in {
+            0: {"brightdata": 0, "google_places": 0, "hunter": 0, "brandfetch": 0},
+            1: {"brightdata": 4, "google_places": 1, "hunter": 1, "brandfetch": 1},
+            890: {"brightdata": 3471, "google_places": 223, "hunter": 89, "brandfetch": 100},
+            893: {"brightdata": 3483, "google_places": 224, "hunter": 90, "brandfetch": 100},
+        }.items():
+            self.assertEqual(
+                run_budget.calculate_paid_api_budgets(
+                    population,
+                    {"brightdata": None, "google_places": None, "hunter": None, "brandfetch": 100},
+                ),
+                expected,
+            )
+
+    def test_each_paid_provider_hard_cap_is_fail_closed(self):
+        calculated = run_budget.calculate_paid_api_budgets(
+            100, {name: None for name in run_budget.PAID_API_PROVIDERS}
+        )
+        for provider, value in calculated.items():
+            self.assertEqual(
+                run_budget.calculate_paid_api_budgets(
+                    100,
+                    {name: (0 if name == provider else None) for name in run_budget.PAID_API_PROVIDERS},
+                )[provider],
+                0,
+            )
+            self.assertEqual(
+                run_budget.calculate_paid_api_budgets(
+                    100,
+                    {name: (value - 1 if name == provider else None) for name in run_budget.PAID_API_PROVIDERS},
+                )[provider],
+                max(0, value - 1),
+            )
+            self.assertEqual(
+                run_budget.calculate_paid_api_budgets(
+                    100,
+                    {name: (value + 1 if name == provider else None) for name in run_budget.PAID_API_PROVIDERS},
+                )[provider],
+                value,
+            )
+
+    def test_paid_disabled_run_config_zeroes_every_budget(self):
+        run_config = run_context.RunConfig.from_config(
+            paid_enabled=False,
+            budgets={provider: 99 for provider in ("brightdata", "google_places", "hunter", "brandfetch", "linkedin", "llm")},
+        )
+        self.assertEqual(set(run_config.as_dict()["budgets"].values()), {0})
+
+    def test_resume_run_config_preserves_recorded_budgets(self):
+        original = run_context.RunConfig.from_config(
+            paid_enabled=True,
+            budgets={"brightdata": 7, "google_places": 3, "hunter": 2, "brandfetch": 4, "linkedin": 5, "llm": 6},
+        )
+        restored = run_context.RunConfig.from_dict(original.as_dict())
+        self.assertEqual(restored.as_dict()["budgets"], original.as_dict()["budgets"])
+
+    def test_hunter_and_domain_finder_share_canonical_budget_provider(self):
+        self.assertIn("hunter", run_budget.PAID_API_PROVIDERS)
+        self.assertNotIn("hunter_domain_finder", run_budget.PAID_API_PROVIDERS)
+
     def test_zero_budget_rejects_paid_call_without_durable_run(self):
         with patch.object(config, "PAID_ENABLED", True), patch.object(
             config, "BRIGHTDATA_REQUEST_BUDGET", 0
@@ -220,20 +287,39 @@ class BudgetAndLegalRuleTests(unittest.TestCase):
 class EnrichedInputTests(unittest.TestCase):
     @patch("modules.exhibitor_scraper.time.sleep")
     @patch("modules.exhibitor_scraper._get")
-    def test_ifco_merges_only_labelled_address_from_matching_profile(self, get_mock, _sleep):
+    def test_ifco_merges_only_labelled_contact_from_matching_profile(self, get_mock, _sleep):
         listing = '<main><a href="/tr/fuar/exhibitors/alpha"><img alt="Alpha Tekstil"></a></main>'
-        detail = '''<main><h1>Alpha Tekstil</h1><dl>
+        detail = '''<head><meta name="description" content="IFCO participant profile."></head><main><h1>Alpha Tekstil</h1><dl>
             <dt>Firma Adresi</dt><dd>Merkez Mah. 1, İstanbul</dd>
             <dt>Telefon</dt><dd>+90 212 555 00 00</dd>
         </dl></main><footer>Organizatör +90 212 999 00 00</footer>'''
         get_mock.side_effect = [listing, detail]
         rows = scrape_ifco(fetch_details=True, delay_sec=0)
         self.assertEqual(rows[0]["listed_address"], "Merkez Mah. 1, İstanbul")
-        self.assertEqual(rows[0]["listed_phone"], "")
+        self.assertEqual(rows[0]["listed_phone"], "02125550000")
         self.assertEqual(rows[0]["listed_address_status"], "OBSERVED_PRESENT")
-        self.assertEqual(rows[0]["listed_phone_status"], "OBSERVED_ABSENT")
+        self.assertEqual(rows[0]["listed_phone_status"], "OBSERVED_PRESENT")
         evidence = json.loads(rows[0]["source_evidence"])
         self.assertTrue(all(item["source_record_id"] for item in evidence))
+        self.assertNotIn("02129990000", str(rows[0]))
+        self.assertEqual(rows[0]["description"], "IFCO participant profile.")
+
+    @patch("modules.exhibitor_scraper.time.sleep")
+    @patch("modules.exhibitor_scraper._get")
+    def test_ifco_does_not_merge_contact_from_mismatched_profile(self, get_mock, _sleep):
+        listing = '<main><a href="/fair/exhibitors/alpha"><img alt="Alpha Tekstil"></a></main>'
+        detail = '''<head><meta name="description" content="Mismatched profile description."></head><main><h1>Different Textile</h1><dl>
+            <dt>Firma Adresi</dt><dd>Wrong address</dd>
+            <dt>Telefon</dt><dd>+90 212 999 00 00</dd>
+        </dl></main>'''
+        get_mock.side_effect = [listing, detail]
+        row = scrape_ifco(fetch_details=True, delay_sec=0)[0]
+        self.assertEqual(row["listed_phone"], "")
+        self.assertEqual(row["listed_address"], "")
+        self.assertEqual(row["listed_phone_status"], "UNAVAILABLE")
+        self.assertEqual(row["listed_address_status"], "UNAVAILABLE")
+        self.assertEqual(row["source_detail_status"], "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH")
+        self.assertEqual(row["description"], "")
 
     def test_texhibition_parser_and_keyed_enrichment_preserve_population(self):
         profile_url = "https://www.texhibitionist.com/en/exhibitors/alpha"
@@ -287,6 +373,34 @@ class EnrichedInputTests(unittest.TestCase):
         self.assertEqual([row["company"] for row in after_output], ["Alpha", "Beta"])
         self.assertEqual(after_output[0]["listed_website"], "https://alpha.example")
         self.assertEqual(after_output[1]["source_detail_status"], "UNAVAILABLE_NO_PROFILE_URL")
+
+    def test_texhibition_detail_merge_requires_matching_profile_identity(self):
+        profile_url = "https://www.texhibitionist.com/en/exhibitors/alpha"
+        row = {
+            "company": "Alpha Tekstil",
+            "source": "texhibition_2026",
+            "source_record_id": "texhibition_2026:alpha",
+            "profile_url": profile_url,
+        }
+        detail = """
+            <main><h1>Alpha Tekstil</h1>
+              <div class="item"><div class="key">Phone</div><div class="value"><a href="tel:+902125550000">+90 212 555 00 00</a></div></div>
+              <div class="item"><div class="key">Address</div><div class="value">Istanbul</div></div>
+              <div class="item"><div class="key">Website</div><div class="value"><a href="https://alpha.example">alpha.example</a></div></div>
+            </main><footer>02129990000 footer@example.com</footer>
+        """
+        _apply_source_detail(row, detail, profile_url)
+        self.assertEqual(row["source_detail_status"], "COMPLETED")
+        self.assertEqual(row["listed_phone"], "02125550000")
+        self.assertEqual(row["listed_address"], "Istanbul")
+        self.assertNotIn("02129990000", row["source_evidence"])
+
+        mismatch = dict(row, company="Different Textile", listed_phone="", listed_address="")
+        _apply_source_detail(mismatch, detail, profile_url)
+        self.assertEqual(mismatch["source_detail_status"], "UNAVAILABLE_PROFILE_IDENTITY_MISMATCH")
+        self.assertEqual(mismatch["listed_phone_status"], "UNAVAILABLE")
+        self.assertEqual(mismatch["listed_address_status"], "UNAVAILABLE")
+        self.assertEqual(mismatch["source_evidence"], "[]")
 
     def test_production_item_fixture_maps_website_without_authorized_person_leak(self):
         fixture = Path(__file__).parent / "fixtures" / "texhibition_detail_ait.html"

@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
@@ -175,6 +178,29 @@ class IdentityArchitectureTests(unittest.TestCase):
             result = crawler.fetch_site("https://example.com", profile="identity")
         self.assertEqual(result["crawl_profile"], "identity")
         self.assertLessEqual(fetch.call_count, 1 + config.MAX_IDENTITY_PAGES)
+
+    def test_identity_pages_default_is_six_without_environment_override(self):
+        self.assertEqual(config.MAX_IDENTITY_PAGES, 6)
+
+    def test_identity_pages_environment_override_is_scoped_to_subprocess(self):
+        environment = os.environ.copy()
+        environment["MAX_IDENTITY_PAGES"] = "4"
+        overridden = subprocess.check_output(
+            [sys.executable, "-c", "import config; print(config.MAX_IDENTITY_PAGES)"],
+            cwd=str(Path(main.__file__).resolve().parent),
+            env=environment,
+            text=True,
+        ).strip()
+        self.assertEqual(overridden, "4")
+        clean_environment = os.environ.copy()
+        clean_environment.pop("MAX_IDENTITY_PAGES", None)
+        default = subprocess.check_output(
+            [sys.executable, "-c", "import config; print(config.MAX_IDENTITY_PAGES)"],
+            cwd=str(Path(main.__file__).resolve().parent),
+            env=clean_environment,
+            text=True,
+        ).strip()
+        self.assertEqual(default, "6")
 
     def test_six_page_candidate_fetches_homepage_plus_six_identity_pages(self):
         links = "".join(f'<a href="/about-{index}">About {index}</a>' for index in range(7))

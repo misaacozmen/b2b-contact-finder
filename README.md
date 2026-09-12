@@ -198,7 +198,7 @@ Remove-Item Env:\BRIGHTDATA_API_KEY
 
 Ücretli sağlayıcılar yalnızca açık `--allow-paid` ile kullanılır. İşlem yarıda kalırsa önce immutable run bundle handoff hazırlanır; yetkilendirme dosyası doğrulandıktan sonra yeni child continuation oluşturulur ve yalnız child run devam eder. Replay export yalnızca ayrı `export_replay.py` komutuyla üretilir.
 
-API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Bright Data, Google Places ve Hunter bütçeleri firma nüfusu ile sırasıyla 3.9, 0.25 ve 0.10 oranlarıyla hesaplanır; ilgili `*_REQUEST_BUDGET` değeri açıkça verilirse azami sınırdır, `0` sağlayıcıyı kapatır. Brandfetch mevcut sabit üst sınır davranışını korur. Ana komutta tavanlar değiştirilebilir:
+API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Yalnız Bright Data, Google Places ve Hunter bütçeleri firma nüfusu ile sırasıyla 3.9, 0.25 ve 0.10 oranlarıyla ölçeklenir; ilgili ortam/CLI `*_REQUEST_BUDGET` değerleri başlangıç bütçesi değil hard cap'tir, `0` sağlayıcıyı kapatır. Brandfetch popülasyona göre ölçeklenmez; varsayılan hard cap'i 100 olarak kalır. Ana komutta tavanlar değiştirilebilir:
 
 ```powershell
 python main.py --brightdata-budget 300 --google-places-budget 50
@@ -246,7 +246,7 @@ full contact crawl, source availability, abstention, and HTTP/API cost. Golden X
 validation can also report stage metrics:
 
 ```powershell
-python validate_golden_xlsx.py --expected EXPECTED.xlsx --actual contacts.xlsx --candidates website_candidates.xlsx
+python validate_golden_xlsx.py --expected EXPECTED.xlsx --actual contacts.xlsx --candidates website_candidates.xlsx --all-results ALL_RESULTS.xlsx --json-output REPORT.json
 ```
 
 The contacts output also includes `email_verification` and
