@@ -19,12 +19,13 @@ from tools.free_only_contract import validate_manifest as validate_free_only_man
 
 
 NETWORK_EVENT_PREFIXES = (
-    "socket.", "http.client.", "urllib.", "ssl.", "asyncio.",
+    "http.client.", "urllib.", "ssl.",
 )
 NETWORK_EVENTS = {
     "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex",
     "socket.gethostbyaddr", "socket.getnameinfo", "socket.getfqdn",
-    "socket.connect", "socket.create_connection", "http.client.connect",
+    "socket.connect", "socket.create_connection", "socket.sendto", "socket.sendmsg",
+    "http.client.connect",
     "http.client.send", "http.client.putrequest", "http.client.request",
     "urllib.Request", "urllib.urlopen", "ssl.wrap_socket",
     "ssl.SSLContext.wrap_socket",
