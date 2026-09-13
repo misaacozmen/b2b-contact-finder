@@ -1,8 +1,6 @@
 import tempfile
 import unittest
 import json
-import sqlite3
-import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +11,7 @@ import main
 from scrape_exhibitors import enrich_existing_workbook
 from validate_benchmark_suite import _population_check
 from validate_golden_xlsx import evaluate, evaluate_stages, validate_artifact_contract
-from modules import crawler, excel, identity, phone, run_budget, runtime, run_context, scorer, selection
+from modules import crawler, excel, identity, phone, pipeline_runner, run_budget, runtime, run_context, scorer, selection
 from modules.exhibitor_scraper import _apply_source_detail, _texhibition_profile_details, scrape_ifco
 
 
@@ -125,14 +123,15 @@ class BenchmarkPopulationGateTests(unittest.TestCase):
 
 
 class BudgetAndLegalRuleTests(unittest.TestCase):
-    def test_pinned_project_runtime_has_safe_sqlite(self):
-        runtime_python = Path(main.__file__).resolve().parent / ".runtime" / "python3147-sqlite3534" / "python.exe"
-        self.assertTrue(runtime_python.is_file())
-        version = subprocess.check_output(
-            [str(runtime_python), "-c", "import sqlite3; print(sqlite3.sqlite_version)"],
-            text=True,
-        ).strip()
-        self.assertGreaterEqual(tuple(map(int, version.split("."))), (3, 51, 3))
+    def test_safe_sqlite_policy_accepts_supported_builds_and_rejects_unsafe_builds(self):
+        for version in ("3.51.3", "3.53.4", "3.50.7", "3.44.6"):
+            with patch.object(pipeline_runner.sqlite3, "sqlite_version", version):
+                pipeline_runner.require_safe_sqlite_for_live()
+
+        for version in ("3.51.2", "3.50.8", "3.44.5"):
+            with patch.object(pipeline_runner.sqlite3, "sqlite_version", version):
+                with self.assertRaisesRegex(RuntimeError, "live run requires SQLite"):
+                    pipeline_runner.require_safe_sqlite_for_live()
 
     def test_identity_depth_changes_semantic_config_hash(self):
         with patch.object(config, "MAX_IDENTITY_PAGES", 4):

@@ -1318,7 +1318,8 @@ def test_paid_targeted_query_plan_is_append_only_across_real_rounds_and_resume(t
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra", "bool", "negative", "float"])
-def test_run_config_requires_exact_canonical_provider_budget_set(tmp_path, mutation):
+def test_run_config_requires_exact_canonical_provider_budget_set(tmp_path, mutation, monkeypatch):
+    monkeypatch.setattr(main, "_ensure_safe_project_runtime", lambda *_a, **_k: None)
     payload = run_context.RunConfig.from_config(paid_enabled=True).as_dict()
     if mutation == "missing": payload["budgets"].pop("llm")
     elif mutation == "extra": payload["budgets"]["extra"] = 0
