@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from enum import Enum
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from functools import lru_cache
 from urllib.parse import quote_plus
 from urllib.parse import unquote, urlparse
 
@@ -32,6 +31,7 @@ from modules import (
     entity_memory,
     google_places,
     query_planner,
+    replay_snapshot,
     run_budget,
     runtime,
     scorer,
@@ -44,6 +44,10 @@ DISCOVERY_ONLY_ROLES = discovery_rules.DISCOVERY_ONLY_ROLES
 LOGGER = logging.getLogger("contact_finder")
 PREFERRED_BACKENDS = ["duckduckgo", "google", "brave", "yahoo", "yandex"]
 FALLBACK_BACKENDS = ["mojeek", "grokipedia"]
+FREE_SEARCH_EXECUTION_NAMESPACE = "free_search_execution_v1"
+FREE_SEARCH_EXECUTION_SCHEMA_VERSION = 1
+DNS_ADDRESS_NAMESPACE = "dns_address_v1"
+DNS_ADDRESS_SCHEMA_VERSION = 1
 _SOURCE_HEALTH_LOCK = threading.Lock()
 _SOURCE_HEALTH: dict[str, dict] = {}
 _BRIGHTDATA_RATE_LOCK = threading.Lock()
@@ -129,6 +133,162 @@ class SearchResults(list):
             flight_fingerprint=self.flight_fingerprint, call_relations=self.call_relations,
             stop_scope=self.stop_scope,
         )
+
+
+def _query_fingerprint(query: str) -> str:
+    return hashlib.sha256(" ".join(str(query).split()).casefold().encode("utf-8")).hexdigest()
+
+
+def _source_record_id() -> str:
+    return str(runtime.current_source_record_id() or "").strip()
+
+
+def _replay_record_key(source_record_id: str, bucket: str, query_fingerprint: str) -> str:
+    return f"{source_record_id}\0{bucket}\0{query_fingerprint}"
+
+
+def _dns_record_key(source_record_id: str, domain: str) -> str:
+    return f"{source_record_id}\0{domain.casefold()}"
+
+
+def _safe_error_class(value: object) -> str:
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value or ""))[:120]
+
+
+def _free_search_result_payload(results: SearchResults) -> dict:
+    return {
+        "values": list(results),
+        "result_state": str(results.result_state),
+        "result_reason": str(results.result_reason),
+        "provider": str(results.provider),
+        "stop_scope": results.stop_scope.value,
+        "origin": results.origin.value,
+        "call_ids": list(results.call_ids),
+        "primary_provider": str(results.primary_provider),
+        "primary_result_state": str(results.primary_result_state),
+        "primary_result_reason": str(results.primary_result_reason),
+        "primary_call_ids": list(results.primary_call_ids),
+        "fallback_provider": str(results.fallback_provider),
+        "fallback_result_state": str(results.fallback_result_state),
+        "fallback_result_reason": str(results.fallback_result_reason),
+        "fallback_call_ids": list(results.fallback_call_ids),
+        "flight_fingerprint": str(results.flight_fingerprint),
+        "call_relations": dict(results.call_relations),
+    }
+
+
+def _record_free_search_execution(
+    *, source_record_id: str, bucket: str, query_fingerprint: str,
+    logical: dict, backend_attempts: list[dict], results: SearchResults,
+) -> None:
+    replay_snapshot.record(
+        "replay", FREE_SEARCH_EXECUTION_NAMESPACE,
+        _replay_record_key(source_record_id, bucket, query_fingerprint),
+        FREE_SEARCH_EXECUTION_SCHEMA_VERSION,
+        {
+            "schema_version": FREE_SEARCH_EXECUTION_SCHEMA_VERSION,
+            "source_record_id": source_record_id,
+            "bucket": bucket,
+            "query_fingerprint": query_fingerprint,
+            "provider": "ddgs",
+            "logical_reservation": {
+                "result": "ACCEPTED" if logical.get("accepted") else "BLOCKED",
+                "reason": _safe_error_class(logical.get("reason")),
+                "logical_used": int(logical.get("logical_used", 0)),
+                "logical_limit": int(logical.get("logical_limit", 0)),
+                "physical_used": int(logical.get("physical_used", 0)),
+                "physical_limit": int(logical.get("physical_limit", 0)),
+            },
+            "backend_attempts": backend_attempts,
+            "result": _free_search_result_payload(results),
+        },
+    )
+
+
+def _replay_miss_result(reason: str) -> SearchResults:
+    return SearchResults(
+        [], "replay_miss", "ddgs", result_state="UNKNOWN",
+        reason=reason, origin=SearchOrigin.REPLAY,
+    )
+
+
+def _assert_replay_reservation(expected: dict, actual, *, kind: str) -> None:
+    expected_result = str(expected.get("result", ""))
+    actual_result = "ACCEPTED" if actual.accepted else "BLOCKED"
+    if expected_result != actual_result:
+        raise checkpoint.ReplayInvariantError(
+            f"free_search_replay_{kind}_reservation_mismatch"
+        )
+    for field in ("reason", "logical_used", "logical_limit", "physical_used", "physical_limit"):
+        if field in expected and field != "reason" and int(expected[field]) != int(getattr(actual, field)):
+            raise checkpoint.ReplayInvariantError(
+                f"free_search_replay_{kind}_{field}_mismatch"
+            )
+    if field := expected.get("reason"):
+        if _safe_error_class(actual.reason) != str(field):
+            raise checkpoint.ReplayInvariantError(
+                f"free_search_replay_{kind}_reason_mismatch"
+            )
+
+
+def _replay_free_search_execution(
+    payload: dict, *, source_record_id: str, bucket: str, query_fingerprint: str,
+) -> SearchResults:
+    if (
+        payload.get("schema_version") != FREE_SEARCH_EXECUTION_SCHEMA_VERSION
+        or payload.get("source_record_id") != source_record_id
+        or payload.get("bucket") != bucket
+        or payload.get("query_fingerprint") != query_fingerprint
+        or payload.get("provider") != "ddgs"
+    ):
+        raise checkpoint.ReplayInvariantError("free_search_replay_record_identity_mismatch")
+    logical_expected = payload.get("logical_reservation")
+    attempts = payload.get("backend_attempts")
+    result = payload.get("result")
+    if not isinstance(logical_expected, dict) or not isinstance(attempts, list) or not isinstance(result, dict):
+        raise checkpoint.ReplayInvariantError("free_search_replay_record_shape_invalid")
+    actual_logical = runtime.reserve_free_logical_query(bucket, query_fingerprint)
+    _assert_replay_reservation(logical_expected, actual_logical, kind="logical")
+    for expected in attempts:
+        if not isinstance(expected, dict) or not expected.get("backend"):
+            raise checkpoint.ReplayInvariantError("free_search_replay_backend_record_invalid")
+        actual = runtime.reserve_free_physical_attempt(
+            bucket, query_fingerprint, str(expected["backend"]),
+        )
+        _assert_replay_reservation(expected, actual, kind="physical")
+        if actual.accepted:
+            if int(expected.get("attempt_ordinal", 0)) != int(actual.attempt_ordinal):
+                raise checkpoint.ReplayInvariantError("free_search_replay_attempt_ordinal_mismatch")
+            outcome = str(expected.get("outcome", ""))
+            if outcome not in {"DONE", "FAILED"}:
+                raise checkpoint.ReplayInvariantError("free_search_replay_attempt_outcome_invalid")
+            runtime.complete_free_physical_attempt(
+                actual.attempt_id, outcome == "DONE",
+                _safe_error_class(expected.get("error_class")),
+            )
+    values = result.get("values")
+    if not isinstance(values, list):
+        raise checkpoint.ReplayInvariantError("free_search_replay_result_values_invalid")
+    if str(result.get("result_state", "")) not in {"COMPLETED", "EMPTY", "FAILED", "BLOCKED_BUDGET", "UNKNOWN"}:
+        raise checkpoint.ReplayInvariantError("free_search_replay_result_state_invalid")
+    return SearchResults(
+        values, "live", str(result.get("provider") or "ddgs"),
+        result_state=str(result.get("result_state")),
+        reason=str(result.get("result_reason") or ""),
+        call_ids=tuple(result.get("call_ids") or ()),
+        primary_provider=str(result.get("primary_provider") or ""),
+        primary_result_state=str(result.get("primary_result_state") or ""),
+        primary_result_reason=str(result.get("primary_result_reason") or ""),
+        primary_call_ids=tuple(result.get("primary_call_ids") or ()),
+        fallback_provider=str(result.get("fallback_provider") or ""),
+        fallback_result_state=str(result.get("fallback_result_state") or ""),
+        fallback_result_reason=str(result.get("fallback_result_reason") or ""),
+        fallback_call_ids=tuple(result.get("fallback_call_ids") or ()),
+        stop_scope=str(result.get("stop_scope") or "NONE"),
+        origin=SearchOrigin.REPLAY,
+        flight_fingerprint=str(result.get("flight_fingerprint") or ""),
+        call_relations=dict(result.get("call_relations") or {}),
+    )
 
 
 def reset_run_state() -> None:
@@ -518,17 +678,45 @@ def _canonical_site_url(raw_url: str) -> str:
 
 def _ddgs_text(query: str) -> SearchResults:
     bucket = runtime.search_bucket() or "discovery"
-    fingerprint = hashlib.sha256(" ".join(str(query).split()).casefold().encode("utf-8")).hexdigest()
+    fingerprint = _query_fingerprint(query)
+    source_record_id = _source_record_id()
+    backend_attempts: list[dict] = []
     logical = runtime.reserve_free_logical_query(bucket, fingerprint)
     if not logical.accepted:
-        return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=logical.reason, stop_scope="FREE_CURRENT_BUCKET")
+        results = SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=logical.reason, stop_scope="FREE_CURRENT_BUCKET")
+        _record_free_search_execution(
+            source_record_id=source_record_id, bucket=bucket,
+            query_fingerprint=fingerprint, logical=logical.__dict__,
+            backend_attempts=backend_attempts, results=results,
+        )
+        return results
     had_non_error_response = False
     last_hard_error: Exception | None = None
 
     for backend in PREFERRED_BACKENDS + FALLBACK_BACKENDS:
         physical = runtime.reserve_free_physical_attempt(bucket, fingerprint, backend)
+        attempt = {
+            "backend": backend,
+            "result": "ACCEPTED" if physical.accepted else "BLOCKED",
+            "reason": _safe_error_class(physical.reason),
+            "logical_used": int(physical.logical_used),
+            "logical_limit": int(physical.logical_limit),
+            "physical_used": int(physical.physical_used),
+            "physical_limit": int(physical.physical_limit),
+            "attempt_ordinal": int(physical.attempt_ordinal),
+            "outcome": "",
+            "error_class": "",
+        }
+        backend_attempts.append(attempt)
         if not physical.accepted:
-            return SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=physical.reason, stop_scope="FREE_CURRENT_BUCKET")
+            attempt["outcome"] = "BLOCKED"
+            results = SearchResults([], "budget_blocked", "ddgs", result_state="BLOCKED_BUDGET", reason=physical.reason, stop_scope="FREE_CURRENT_BUCKET")
+            _record_free_search_execution(
+                source_record_id=source_record_id, bucket=bucket,
+                query_fingerprint=fingerprint, logical=logical.__dict__,
+                backend_attempts=backend_attempts, results=results,
+            )
+            return results
         try:
             # DDGS may make a separate physical request per backend.  Each
             # attempt gets its own global limiter slot even though it consumes
@@ -537,28 +725,55 @@ def _ddgs_text(query: str) -> SearchResults:
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
             runtime.complete_free_physical_attempt(physical.attempt_id, True)
+            attempt["outcome"] = "DONE"
             had_non_error_response = True
-            return SearchResults(results, "live", "ddgs", result_state="COMPLETED" if results else "EMPTY", reason=f"backend:{backend}")
+            final = SearchResults(results, "live", "ddgs", result_state="COMPLETED" if results else "EMPTY", reason=f"backend:{backend}")
+            _record_free_search_execution(
+                source_record_id=source_record_id, bucket=bucket,
+                query_fingerprint=fingerprint, logical=logical.__dict__,
+                backend_attempts=backend_attempts, results=final,
+            )
+            return final
         except DDGSException as exc:
             message = str(exc).lower()
             if "no results" in message:
                 runtime.complete_free_physical_attempt(physical.attempt_id, True)
+                attempt["outcome"] = "DONE"
                 had_non_error_response = True
                 LOGGER.debug("DDGS backend '%s' no results for '%s'", backend, query)
-                return SearchResults([], "live", "ddgs", result_state="EMPTY", reason=f"backend:{backend}:empty")
-            runtime.complete_free_physical_attempt(physical.attempt_id, False, type(exc).__name__)
+                final = SearchResults([], "live", "ddgs", result_state="EMPTY", reason=f"backend:{backend}:empty")
+                _record_free_search_execution(
+                    source_record_id=source_record_id, bucket=bucket,
+                    query_fingerprint=fingerprint, logical=logical.__dict__,
+                    backend_attempts=backend_attempts, results=final,
+                )
+                return final
+            error_class = _safe_error_class(type(exc).__name__)
+            runtime.complete_free_physical_attempt(physical.attempt_id, False, error_class)
+            attempt["outcome"] = "FAILED"
+            attempt["error_class"] = error_class
             LOGGER.debug("DDGS backend '%s' error for '%s': %s", backend, query, exc)
             last_hard_error = exc
         except Exception as exc:
             if isinstance(exc, checkpoint.SchedulerInvariantError):
                 raise
-            runtime.complete_free_physical_attempt(physical.attempt_id, False, type(exc).__name__)
+            error_class = _safe_error_class(type(exc).__name__)
+            runtime.complete_free_physical_attempt(physical.attempt_id, False, error_class)
+            attempt["outcome"] = "FAILED"
+            attempt["error_class"] = error_class
             LOGGER.debug("DDGS backend '%s' failed for '%s': %s", backend, query, exc)
             last_hard_error = exc
 
     if last_hard_error and not had_non_error_response:
-        return SearchResults([], "error", "ddgs", result_state="FAILED", reason=f"all_backends_failed:{type(last_hard_error).__name__}")
-    return SearchResults([], "live", "ddgs", result_state="EMPTY", reason="empty_response")
+        final = SearchResults([], "error", "ddgs", result_state="FAILED", reason=f"all_backends_failed:{_safe_error_class(type(last_hard_error).__name__)}")
+    else:
+        final = SearchResults([], "live", "ddgs", result_state="EMPTY", reason="empty_response")
+    _record_free_search_execution(
+        source_record_id=source_record_id, bucket=bucket,
+        query_fingerprint=fingerprint, logical=logical.__dict__,
+        backend_attempts=backend_attempts, results=final,
+    )
+    return final
 
 
 def _decode_brightdata_response(response: requests.Response) -> dict:
@@ -920,6 +1135,22 @@ def _cache_search_value(results: SearchResults) -> dict:
 def _search_text(query: str) -> SearchResults:
     """Search live or replay a provider response from the persistent cache."""
     mode = config.SEARCH_CACHE_MODE
+    bucket = runtime.search_bucket() or "discovery"
+    source_record_id = _source_record_id()
+    if mode == "replay" and source_record_id:
+        query_fingerprint = _query_fingerprint(query)
+        found, execution = replay_snapshot.lookup(
+            "replay", FREE_SEARCH_EXECUTION_NAMESPACE,
+            _replay_record_key(source_record_id, bucket, query_fingerprint),
+            FREE_SEARCH_EXECUTION_SCHEMA_VERSION,
+            record_runtime=False,
+        )
+        if found:
+            return _replay_free_search_execution(
+                execution, source_record_id=source_record_id,
+                bucket=bucket, query_fingerprint=query_fingerprint,
+            )
+        return _replay_miss_result("free_search_execution_replay_miss")
     cache_key = _search_cache_key(query)
     cached_hint: list = []
     if mode in {"use", "replay"}:
@@ -1480,15 +1711,47 @@ def _can_early_stop(company_name: str, candidate: dict, metadata: dict | None = 
     return discovery_rules.can_early_stop(company_name, candidate, metadata=metadata)
 
 
-@lru_cache(maxsize=4096)
 def _domain_has_address(domain: str) -> bool:
-    if config.SEARCH_CACHE_MODE == "replay" or config.CRAWL_CACHE_MODE == "replay":
+    canonical = scorer.normalize_domain(domain).casefold()
+    source_record_id = _source_record_id()
+    if not canonical:
         return False
+    if config.SEARCH_CACHE_MODE == "replay" or config.CRAWL_CACHE_MODE == "replay":
+        found, value = replay_snapshot.lookup(
+            "replay", DNS_ADDRESS_NAMESPACE,
+            _dns_record_key(source_record_id, canonical),
+            DNS_ADDRESS_SCHEMA_VERSION,
+            record_runtime=False,
+        )
+        if not found:
+            discovery_coverage.record_replay_miss("dns_address")
+            return False
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != DNS_ADDRESS_SCHEMA_VERSION
+            or value.get("source_record_id") != source_record_id
+            or value.get("domain") != canonical
+            or not isinstance(value.get("has_address"), bool)
+        ):
+            raise checkpoint.ReplayInvariantError("dns_address_replay_record_invalid")
+        return bool(value["has_address"])
     try:
         socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, OSError):
-        return False
-    return True
+        has_address = False
+    else:
+        has_address = True
+    replay_snapshot.record(
+        "replay", DNS_ADDRESS_NAMESPACE,
+        _dns_record_key(source_record_id, canonical), DNS_ADDRESS_SCHEMA_VERSION,
+        {
+            "schema_version": DNS_ADDRESS_SCHEMA_VERSION,
+            "source_record_id": source_record_id,
+            "domain": canonical,
+            "has_address": has_address,
+        },
+    )
+    return has_address
 
 
 def _primary_queries(company_name: str, metadata: dict | None) -> list[str]:
@@ -2215,6 +2478,7 @@ def _expand_search_bridge_candidates(
 
 def find_candidate_domains(company_name: str, metadata: dict | None = None) -> list[dict]:
     source_record_id = str((metadata or {}).get("source_record_id", "") or "").strip()
+    runtime.set_source_record_id(source_record_id)
     original_index = (metadata or {}).get("original_index")
     if aliases.has_no_website(company_name):
         discovery_coverage.finalize_company(
@@ -2458,10 +2722,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         "search_text_identity:" not in candidate.get("reason", "")
         for candidate in candidates_by_domain.values()
     )
-    if (
-        config.SEARCH_CACHE_MODE != "replay"
-        and (not best or best["score"] < config.MIN_ACCEPT_SCORE or not has_domain_identity_candidate)
-    ):
+    if not best or best["score"] < config.MIN_ACCEPT_SCORE or not has_domain_identity_candidate:
         _add_domain_guesses(candidates_by_domain, company_name)
 
     remove_mirror_candidates()
@@ -2506,6 +2767,7 @@ def find_targeted_candidates(
     candidates_by_domain: dict[str, dict] = {}
     trace: list[dict] = []
     source_record_id = str((metadata or {}).get("source_record_id", "") or "").strip()
+    runtime.set_source_record_id(source_record_id)
     original_index = (metadata or {}).get("original_index")
     attempted = {str(value).strip() for value in already_run if str(value).strip()}
     proposed_queries = list(dict.fromkeys(queries))

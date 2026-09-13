@@ -139,6 +139,10 @@ def load(
             # 2. Snapshot lookup after disk hygiene
             snapshot_hit, snapshot_value = replay_snapshot.lookup(
                 store, namespace, key, schema_version,
+                record_runtime=not (
+                    config.SEARCH_CACHE_MODE == "replay"
+                    or config.CRAWL_CACHE_MODE == "replay"
+                ),
             )
             if snapshot_hit:
                 return snapshot_value

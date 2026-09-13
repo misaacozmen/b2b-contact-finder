@@ -15,14 +15,24 @@ _LOCK = threading.Lock()
 _QUERIES: dict[tuple[str, str, str], dict] = {}
 _COMPANIES: dict[str, dict] = {}
 _SOURCES: dict[str, dict] = {}
+_REPLAY_MISSES = 0
 
 
 def reset() -> None:
-    global _QUERIES, _COMPANIES, _SOURCES
+    global _QUERIES, _COMPANIES, _SOURCES, _REPLAY_MISSES
     with _LOCK:
         _QUERIES = {}
         _COMPANIES = {}
         _SOURCES = {}
+        _REPLAY_MISSES = 0
+
+
+def record_replay_miss(kind: str) -> None:
+    """Count a typed replay miss without allowing a network fallback."""
+    global _REPLAY_MISSES
+    with _LOCK:
+        _REPLAY_MISSES += 1
+    runtime.record(f"discovery_coverage.replay_miss.{str(kind or 'unknown')}")
 
 
 def register_source(
@@ -214,6 +224,8 @@ def payload(max_queries_per_company: int = 3) -> dict:
             "status": "resolved" if company_row and company_row.get("resolved") else "unresolved" if company_row else "unprocessed",
             "terminal_reason": (company_row or {}).get("terminal_reason", "") or ("source_not_processed" if source_id not in known else ""),
         })
+    with _LOCK:
+        replay_misses = int(_REPLAY_MISSES)
     return {
         "policy_version": POLICY_VERSION,
         "company_count": len(companies),
@@ -223,7 +235,7 @@ def payload(max_queries_per_company: int = 3) -> dict:
         "resolved_companies": sum(1 for row in companies if row["resolved"]),
         "unresolved_companies": sum(1 for row in companies if not row["resolved"]),
         "query_count": len(queries),
-        "replay_miss_count": sum(
+        "replay_miss_count": replay_misses + sum(
             1 for row in queries if row["cache_status"] == "replay_miss"
         ),
         "cached_empty_count": sum(

@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.free_only_contract import validate_database as validate_free_only_database
 from tools.free_only_contract import validate_manifest as validate_free_only_manifest
+from tools.free_only_contract import expected_offline_run_config
+from tools.free_only_contract import validate_manifest_config_sha
 
 
 NETWORK_EVENT_PREFIXES = (
@@ -85,6 +87,8 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
     package_manifest = _json(package_manifest_path)
     try:
         validate_free_only_manifest(package_manifest, require_complete=False)
+        validate_manifest_config_sha(package_manifest)
+        expected_config = expected_offline_run_config(package_manifest["run_config"])
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
     replay_snapshot = package_dir / str(package_manifest.get("replay", {}).get("snapshot", ""))
@@ -158,6 +162,9 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
         })
         try:
             validate_free_only_manifest(manifest)
+            validate_manifest_config_sha(manifest)
+            if manifest.get("run_config") != expected_config:
+                raise ValueError("offline_free_only_run_config_mismatch")
             paid_activity = validate_free_only_database(
                 run_root / "state" / "progress.sqlite3",
                 str(manifest.get("run_id", run_root.name)),

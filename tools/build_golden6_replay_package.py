@@ -21,6 +21,7 @@ from openpyxl import load_workbook
 from modules import excel, replay_snapshot, run_context
 from tools.free_only_contract import validate_database as validate_free_only_database
 from tools.free_only_contract import validate_manifest as validate_free_only_manifest
+from tools.free_only_contract import validate_behavioral_replay
 
 
 EXPECTED_COUNT = 20
@@ -226,6 +227,10 @@ def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | No
         paid_activity = validate_free_only_database(db, live_id, EXPECTED_COUNT)
     except ValueError as exc:
         raise ReplayPackageError(str(exc)) from exc
+    try:
+        replay_closure = validate_behavioral_replay(db, live_id, ids)
+    except ValueError as exc:
+        raise ReplayPackageError(str(exc)) from exc
     artifacts = _artifact_dir(live_root, live_manifest, ids)
     head_sha = _git(repo, "rev-parse", "HEAD")
 
@@ -259,6 +264,7 @@ def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | No
             "paid_enabled": False,
             "finalize_without_paid": True,
             "head_sha": head_sha,
+            "config_sha256": config_hash,
             "input": {
                 "path": str(input_path), "sha256": input_hash,
                 "ordered_id_sha256": _ids_hash(ids), "record_count": len(ids),
@@ -287,7 +293,8 @@ def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | No
                 "snapshot": "replay_snapshot.json.gz",
                 "snapshot_sha256": _sha256(snapshot_path),
                 "body_shards": body_shards,
-            "entry_count": _snapshot_entry_count(snapshot_path),
+                "entry_count": _snapshot_entry_count(snapshot_path),
+                "closure": replay_closure,
             },
             "source_integrity_before": before_integrity,
             "source_integrity_after": after_integrity,

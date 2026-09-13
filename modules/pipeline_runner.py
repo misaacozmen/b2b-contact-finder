@@ -708,7 +708,11 @@ def _run_pipeline_impl_body(
     # Load/configure replay identity before source preflight.  A replay miss
     # must fail locally before any source probe can become physical I/O.
     if config.REPLAY_SNAPSHOT_INPUT:
-        replay_snapshot.load(Path(config.REPLAY_SNAPSHOT_INPUT), max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES)
+        replay_snapshot.load(
+            Path(config.REPLAY_SNAPSHOT_INPUT),
+            max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES,
+            record_runtime=False,
+        )
     replay_snapshot.configure_run_store(run_root / "state" / "progress.sqlite3", context.run_id)
     if config.REPLAY_MANIFEST_INPUT:
         replay_snapshot.load_shards(Path(config.REPLAY_MANIFEST_INPUT), expected_run_id=context.run_id, expected_config_hash=run_config.sha256, max_uncompressed_bytes=config.REPLAY_SNAPSHOT_MAX_UNCOMPRESSED_BYTES)
@@ -898,6 +902,7 @@ def _run_pipeline_impl_body(
         supports_execution_phase = "execution_phase" in inspect.signature(process_company_fn).parameters
         def process_one(idx: int, record: dict):
             runtime.set_item_context(idx, phase_name.lower())
+            runtime.set_source_record_id(record.get("source_record_id", ""))
             if supports_execution_phase:
                 return process_company_fn(idx, record["company"], logger, record.get("website", ""), record, execution_phase=phase_name)
             return process_company_fn(idx, record["company"], logger, record.get("website", ""), record)

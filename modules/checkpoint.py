@@ -104,6 +104,12 @@ class OutcomeInvariant(SchedulerInvariantError):
     pass
 
 
+class ReplayInvariantError(SchedulerInvariantError):
+    """A behavioral replay record does not match the durable execution."""
+
+    pass
+
+
 _SCHEMA_READY: set[tuple[str, int, int]] = set()
 
 

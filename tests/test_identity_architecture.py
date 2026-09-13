@@ -204,12 +204,10 @@ class IdentityArchitectureTests(unittest.TestCase):
         self.assertEqual(value, "False")
 
     def test_replay_domain_check_does_not_query_dns(self):
-        search._domain_has_address.cache_clear()
         with patch.object(config, "SEARCH_CACHE_MODE", "replay"), patch.object(
             config, "CRAWL_CACHE_MODE", "replay"
         ), patch.object(search.socket, "getaddrinfo", side_effect=AssertionError("DNS called in replay")):
             self.assertFalse(search._domain_has_address("example.com"))
-        search._domain_has_address.cache_clear()
 
     def test_identity_pages_environment_override_is_scoped_to_subprocess(self):
         environment = os.environ.copy()

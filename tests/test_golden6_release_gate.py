@@ -1,6 +1,10 @@
 import copy
+import subprocess
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+from tools import evaluate_release_gate
 from tools.evaluate_release_gate import evaluate_evidence
 
 
@@ -11,6 +15,7 @@ def _valid_evidence() -> dict:
             "replay_miss_count": 0,
             "replay_network_events": 0,
             "provider_http_calls": 0,
+            "provider_call_count": 0,
             "free_only_config_valid": True,
             "all_results_unique_ids": 20,
             "expected_all_results_order_match": True,
@@ -19,6 +24,8 @@ def _valid_evidence() -> dict:
             "issues": [],
             "positive_denominators": True,
             "live_replay_metrics_equal": True,
+            "live_artifact_hash": "artifact",
+            "offline_artifact_hash": "artifact",
         },
         "checks": {
             "js_default_unset_true": True,
@@ -133,6 +140,20 @@ class Golden6ReleaseGateTests(unittest.TestCase):
         self.assertFalse(result["behavioral_recall_validated"])
         self.assertFalse(result["release_ready"])
         self.assertFalse(result["merge_allowed"])
+
+    def test_ci_auth_falls_back_to_git_credential_without_exposing_secret(self):
+        token = "credential-token-not-evidence"
+        gh = subprocess.CompletedProcess(["gh"], 1, "", "")
+        credential = subprocess.CompletedProcess(
+            ["git"], 0, f"protocol=https\nhost=github.com\nusername=user\npassword={token}\n", "",
+        )
+        with patch.dict(evaluate_release_gate.os.environ, {"GITHUB_TOKEN": "", "GH_TOKEN": ""}, clear=False), patch.object(
+            evaluate_release_gate.subprocess, "run", side_effect=[gh, credential],
+        ) as run:
+            resolved, method = evaluate_release_gate._ci_auth_token(Path.cwd())
+        self.assertEqual(resolved, token)
+        self.assertEqual(method, "git_credential")
+        self.assertNotIn(token, repr(run.call_args_list))
 
 
 if __name__ == "__main__":

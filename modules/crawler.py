@@ -1218,6 +1218,7 @@ def fetch_site(
                     "site",
                     prefix,
                     schema_version,
+                    record_runtime=False,
                 )
                 if found:
                     cached = value

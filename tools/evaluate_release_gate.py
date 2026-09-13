@@ -23,6 +23,8 @@ from openpyxl import load_workbook
 
 from tools.free_only_contract import validate_database as validate_free_only_database
 from tools.free_only_contract import validate_manifest as validate_free_only_manifest
+from tools.free_only_contract import expected_offline_run_config
+from tools.free_only_contract import validate_manifest_config_sha
 
 
 REQUIRED_CI_JOBS = ("test", "browser-smoke", "ocr-smoke")
@@ -161,6 +163,7 @@ def evaluate_evidence(evidence: dict) -> dict:
         "replay_miss_zero": behavioral.get("replay_miss_count") == 0,
         "replay_network_zero": behavioral.get("replay_network_events") == 0,
         "provider_http_zero": behavioral.get("provider_http_calls") == 0,
+        "provider_call_zero": behavioral.get("provider_call_count") == 0,
         "free_only_config_valid": behavioral.get("free_only_config_valid") is True,
         "all_results_unique_ids_20": behavioral.get("all_results_unique_ids") == 20,
         "expected_all_results_order_match": behavioral.get("expected_all_results_order_match") is True,
@@ -169,6 +172,8 @@ def evaluate_evidence(evidence: dict) -> dict:
         "issues_empty": behavioral.get("issues") == [],
         "positive_denominators": behavioral.get("positive_denominators") is True,
         "live_replay_metrics_equal": behavioral.get("live_replay_metrics_equal") is True,
+        "artifact_hash_equal": behavioral.get("live_artifact_hash")
+        and behavioral.get("live_artifact_hash") == behavioral.get("offline_artifact_hash"),
     }
     for name, passed in conditions.items():
         if not passed:
@@ -213,6 +218,7 @@ def evaluate_evidence(evidence: dict) -> dict:
         "behavioral_recall_validated": behavioral_recall_validated,
         "release_ready": release_ready,
         "merge_allowed": merge_allowed,
+        "ci_exact_head_success": release_conditions["ci_exact_head"],
         "failure_reasons": sorted(set(failures)),
     }
 
@@ -275,14 +281,51 @@ def _github_repo(remote: str) -> tuple[str, str] | None:
     return (parts[-2], parts[-1]) if len(parts) >= 2 else None
 
 
+def _ci_auth_token(repo: Path) -> tuple[str, str]:
+    """Resolve a GitHub token without ever returning it as evidence."""
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, name
+    command_env = os.environ.copy()
+    command_env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        gh = subprocess.run(
+            ["gh", "auth", "token"], cwd=repo, env=command_env,
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        gh = None
+    if gh is not None and gh.returncode == 0 and gh.stdout.strip():
+        return gh.stdout.strip(), "gh_auth"
+    try:
+        credential = subprocess.run(
+            ["git", "credential", "fill"], cwd=repo, env=command_env,
+            input="protocol=https\nhost=github.com\n\n",
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        credential = None
+    if credential is not None and credential.returncode == 0:
+        fields = {
+            line.split("=", 1)[0]: line.split("=", 1)[1]
+            for line in credential.stdout.splitlines()
+            if "=" in line
+        }
+        password = str(fields.get("password", "")).strip()
+        if password:
+            return password, "git_credential"
+    return "", ""
+
+
 def query_github_ci(repo: Path, head_sha: str, branch: str) -> dict:
     _code, remote, _ = _git(repo, "config", "--get", "remote.origin.url")
     identity = _github_repo(remote)
     if not identity:
         return {"jobs_success": False, "failure": "CI_REMOTE_NOT_GITHUB"}
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    token, auth_method = _ci_auth_token(repo)
     if not token:
-        return {"jobs_success": False, "failure": "CI_API_TOKEN_MISSING"}
+        return {"jobs_success": False, "failure": "CI_API_AUTH_UNAVAILABLE"}
     owner, repo_name = identity
     headers = {
         "Accept": "application/vnd.github+json",
@@ -322,6 +365,7 @@ def query_github_ci(repo: Path, head_sha: str, branch: str) -> dict:
             "jobs_success": success and selected.get("status") == "completed" and selected.get("conclusion") == "success",
             "repository": f"{owner}/{repo_name}",
             "token_used_for_auth_only": True,
+            "auth_method": auth_method,
         }
     except Exception as exc:
         return {"jobs_success": False, "failure": f"CI_API_ERROR:{type(exc).__name__}"}
@@ -333,6 +377,9 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
     report_path = Path(report_path).resolve()
     evidence: dict = {"behavioral": {}, "checks": {}, "git": {}, "artifacts": {}, "metrics": {}}
     failures: list[str] = []
+    live_artifact_hash = ""
+    offline_artifact_hash = ""
+    provider_call_count = -1
     try:
         package_manifest_path = package_dir / "package_manifest.json"
         package_manifest = _json(package_manifest_path)
@@ -341,6 +388,7 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
         free_only_config_valid = True
         try:
             validate_free_only_manifest(package_manifest, require_complete=False)
+            validate_manifest_config_sha(package_manifest)
         except ValueError as exc:
             free_only_config_valid = False
             failures.append(f"FREE_ONLY_PACKAGE:{exc}")
@@ -355,15 +403,20 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
         try:
             live_manifest = _json(live_root / "manifest.json")
             validate_free_only_manifest(live_manifest)
+            validate_manifest_config_sha(live_manifest)
             live_config = live_manifest.get("run_config", {})
+            live_artifact_hash = str(live_manifest.get("artifact_set_sha256") or "")
             if str(live_manifest.get("config_sha256", "")) != str(package_manifest.get("live_run", {}).get("config_sha256", "")):
                 raise ValueError("live_config_hash_mismatch")
             validate_free_only_database(live_root / "state" / "progress.sqlite3", str(live_manifest.get("run_id", "")), 20)
             offline_manifest = _json(offline_root / "manifest.json")
+            offline_artifact_hash = str(offline_manifest.get("artifact_set_sha256") or "")
             validate_free_only_manifest(offline_manifest)
-            if offline_manifest.get("run_config") != live_config:
+            validate_manifest_config_sha(offline_manifest)
+            if offline_manifest.get("run_config") != expected_offline_run_config(live_config):
                 raise ValueError("offline_free_only_run_config_mismatch")
             validate_free_only_database(offline_root / "state" / "progress.sqlite3", str(offline_manifest.get("run_id", "")), 20)
+            provider_call_count = int(receipt.get("paid_provider_calls", -1))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             free_only_config_valid = False
             failures.append(f"FREE_ONLY_RUN:{exc}")
@@ -384,6 +437,7 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
             "replay_miss_count": offline_coverage.get("replay_miss_count", -1),
             "replay_network_events": receipt.get("replay_network_events", -1),
             "provider_http_calls": offline_telemetry_calls,
+            "provider_call_count": provider_call_count,
             "live_provider_http_calls": live_telemetry_calls,
             "free_only_config_valid": free_only_config_valid,
             "all_results_unique_ids": len(live_ids) if len(live_ids) == len(set(live_ids)) else -1,
@@ -393,6 +447,8 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
             "issues": list(live_report.get("issues", [])) + list(offline_report.get("issues", [])),
             "positive_denominators": _positive_denominators(live_report) and _positive_denominators(offline_report),
             "live_replay_metrics_equal": live_metrics == offline_metrics,
+            "live_artifact_hash": live_artifact_hash,
+            "offline_artifact_hash": offline_artifact_hash,
         }
         git = _repo_state(repo)
         command_env = os.environ.copy()
@@ -444,6 +500,7 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
         "behavioral_recall_validated": computed["behavioral_recall_validated"],
         "release_ready": computed["release_ready"],
         "merge_allowed": computed["merge_allowed"],
+        "ci_exact_head_success": computed["ci_exact_head_success"],
         "head_sha": evidence.get("git", {}).get("head_sha", ""),
         "base_sha": evidence.get("git", {}).get("gate_base_sha", ""),
         "origin_main_sha": evidence.get("git", {}).get("origin_main_sha", ""),
@@ -451,6 +508,9 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
         "source_record_id_sha256": _json(package_dir / "package_manifest.json").get("input", {}).get("ordered_id_sha256", "") if (package_dir / "package_manifest.json").is_file() else "",
         "replay_miss_count": evidence.get("behavioral", {}).get("replay_miss_count"),
         "replay_network_events": evidence.get("behavioral", {}).get("replay_network_events"),
+        "provider_call_count": evidence.get("behavioral", {}).get("provider_call_count"),
+        "live_artifact_hash": evidence.get("behavioral", {}).get("live_artifact_hash"),
+        "offline_artifact_hash": evidence.get("behavioral", {}).get("offline_artifact_hash"),
         "validator_status": evidence.get("behavioral", {}).get("validator_status", "FAIL"),
         "publication_precision": evidence.get("metrics", {}).get("live", {}).get("stages", {}).get("publication_precision"),
         "publication_recall": evidence.get("metrics", {}).get("live", {}).get("stages", {}).get("publication_recall"),

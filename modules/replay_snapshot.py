@@ -174,7 +174,14 @@ def record(store: str, namespace: str, key: str, schema_version: int, value: Any
             connection.commit()
 
 
-def lookup(store: str, namespace: str, key: str, schema_version: int) -> tuple[bool, Any]:
+def lookup(
+    store: str,
+    namespace: str,
+    key: str,
+    schema_version: int,
+    *,
+    record_runtime: bool = True,
+) -> tuple[bool, Any]:
     marker = (
         str(store), str(namespace), _key_digest(str(key)),
         int(schema_version),
@@ -194,7 +201,8 @@ def lookup(store: str, namespace: str, key: str, schema_version: int) -> tuple[b
                 return False, None
             _ENTRIES[marker] = {"key_hint": "[REDACTED]", "prefix_sha256": json.loads(stored[0]), "value": json.loads(stored[1])}
         value = _hydrate_crawl_bodies(_ENTRIES[marker]["value"])
-    runtime.record(f"snapshot.{namespace}.hit")
+    if record_runtime:
+        runtime.record(f"snapshot.{namespace}.hit")
     return True, _safe(value)
 
 
@@ -203,6 +211,8 @@ def lookup_prefix(
     namespace: str,
     key_prefix: str,
     schema_version: int,
+    *,
+    record_runtime: bool = True,
 ) -> tuple[bool, Any]:
     """Return the richest cached variant for an exact resource prefix.
 
@@ -226,7 +236,8 @@ def lookup_prefix(
         key=lambda item: len(item.get("pages", []))
         if isinstance(item, dict) else 0,
     )
-    runtime.record(f"snapshot.{namespace}.prefix_hit")
+    if record_runtime:
+        runtime.record(f"snapshot.{namespace}.prefix_hit")
     return True, _safe(value)
 
 
@@ -464,7 +475,12 @@ def load_shards(
     return {"path": str(manifest_path), "entry_count": total}
 
 
-def load(path: Path, *, max_uncompressed_bytes: int) -> dict:
+def load(
+    path: Path,
+    *,
+    max_uncompressed_bytes: int,
+    record_runtime: bool = True,
+) -> dict:
     global _LOADED_FROM, _SHARD_ROOT
     with gzip.open(path, "rb") as handle:
         raw = handle.read(max(1, int(max_uncompressed_bytes)) + 1)
@@ -514,8 +530,9 @@ def load(path: Path, *, max_uncompressed_bytes: int) -> dict:
         _ENTRIES.update(loaded)
         _SHARD_ROOT = Path(path).parent / "replay_shards"
         _LOADED_FROM = str(path)
-    runtime.record("snapshot.load")
-    runtime.record("snapshot.entries_loaded", len(loaded))
+    if record_runtime:
+        runtime.record("snapshot.load")
+        runtime.record("snapshot.entries_loaded", len(loaded))
     return {
         "path": str(path),
         "entry_count": len(loaded),

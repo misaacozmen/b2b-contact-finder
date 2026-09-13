@@ -6,13 +6,14 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from openpyxl import Workbook
 
 import config
 import main
-from modules import checkpoint, pipeline_runner, runtime
+from modules import checkpoint, pipeline_runner, runtime, run_context
 from tools import offline_replay_runner
 from test_search_phase_regressions import _input_book, _real_run_setup
 
@@ -126,15 +127,20 @@ def test_offline_replay_command_is_explicitly_free_only_and_has_no_network(tmp_p
         json.dump({"entries": [], "entry_count": 0}, handle)
     package = tmp_path / "package"
     package.mkdir()
+    with patch.object(config, "SEARCH_CACHE_MODE", "refresh"), patch.object(
+        config, "CRAWL_CACHE_MODE", "refresh"
+    ):
+        run_config = run_context.RunConfig.from_config(
+            paid_enabled=False,
+            budgets={provider: 0 for provider in ("brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm")},
+            finalize_without_paid=True,
+        ).as_dict()
     package_manifest = {
-        "run_config": {
-            "paid_enabled": False,
-            "finalize_without_paid": True,
-            "budgets": {provider: 0 for provider in ("brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm")},
-        },
+        "run_config": run_config,
         "input": {"sha256": hashlib.sha256(input_path.read_bytes()).hexdigest()},
         "replay": {"snapshot": snapshot.name, "snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest()},
     }
+    package_manifest["config_sha256"] = run_context.RunConfig.from_dict(run_config).sha256
     (package / "package_manifest.json").write_text(json.dumps(package_manifest), encoding="utf-8")
     snapshot.replace(package / snapshot.name)
     receipt_path = tmp_path / "receipt.json"
