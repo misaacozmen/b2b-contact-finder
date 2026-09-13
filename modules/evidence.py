@@ -32,7 +32,10 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
                         if value.strip()
                     ]
                 record = {
-                    "run_id": row.get("run_id", ""),
+                    # Run identity is carried by the manifest; keeping it out
+                    # of the portable evidence rows makes live/replay
+                    # artifacts byte-identical while preserving row lineage.
+                    "run_id": "",
                     "company": row.get("company", ""),
                     "source_record_id": row.get("source_record_id", ""),
                     "original_index": row.get("original_index", row.get("__index")),

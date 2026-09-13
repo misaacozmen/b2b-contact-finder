@@ -5,7 +5,7 @@ import pytest
 from ddgs.exceptions import DDGSException
 
 import config
-from modules import discovery_coverage, replay_snapshot, runtime, search
+from modules import discovery_coverage, replay_snapshot, report, runtime, search
 from tools.free_only_contract import expected_offline_run_config
 
 
@@ -182,6 +182,10 @@ def test_replay_body_sanitizer_preserves_page_semantics(tmp_path):
     assert found is True
     assert "Example Brand" in value["pages"][0]["html"]
     assert "public-js-marker" not in value["pages"][0]["html"]
+
+
+def test_report_wall_clock_is_replay_stable():
+    assert report.build_report([], 0) == report.build_report([], 9999)
 
 
 def test_offline_config_changes_only_the_two_cache_modes():

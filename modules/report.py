@@ -1,4 +1,3 @@
-from datetime import timedelta
 import json
 from statistics import mean
 from modules import checkpoint, discovery_coverage, runtime
@@ -52,7 +51,10 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
     ambiguous_count = sum(1 for row in rows if row.get("status") == "WEBSITE_AMBIGUOUS")
     scores = [int(row.get("score") or 0) for row in rows]
     average_score = mean(scores) if scores else 0
-    elapsed = "unknown" if elapsed_seconds is None else str(timedelta(seconds=int(elapsed_seconds)))
+    # Wall-clock time is execution-specific and would make live/replay
+    # artifacts differ despite identical evidence.  Runtime timing remains in
+    # logs; the published report is deliberately deterministic.
+    elapsed = "deterministic"
     counters = (runtime_snapshot or {}).get("counters", {})
     brightdata_requests = int(counters.get("api.brightdata.requests", 0))
     linkedin_company_requests = int(counters.get("api.linkedin_company.requests", 0))
