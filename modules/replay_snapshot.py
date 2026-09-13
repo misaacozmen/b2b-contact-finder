@@ -59,6 +59,27 @@ def _safe(value: Any) -> Any:
     return copy.deepcopy(redaction.sanitize(value))
 
 
+def _safe_replay_value(value: Any) -> Any:
+    """Sanitize replay metadata while retaining safe, useful crawl bodies."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if redaction._sensitive_key(key):
+                continue
+            if str(key).casefold() in {"body", "html", "raw_body"} and isinstance(item, str):
+                result[str(key)] = redaction.redact_crawl_body(item)
+            else:
+                result[str(key)] = _safe_replay_value(item)
+        return result
+    if isinstance(value, list):
+        return [_safe_replay_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_safe_replay_value(item) for item in value]
+    if isinstance(value, str):
+        return redaction.redact_known_values(value)
+    return copy.deepcopy(value)
+
+
 def _externalize_crawl_bodies(value: Any, *, shard_root: Path) -> Any:
     """Keep raw crawl bodies out of SQLite; retain a content-addressed shard."""
     if isinstance(value, dict):
@@ -87,9 +108,10 @@ def _stored_value(value: Any, *, shard_root: Path | None = None) -> Any:
     """Return a SQLite/export-safe value, externalizing nested body fields."""
     if shard_root is None:
         return _safe(value)
-    # Body shards are persisted/exported artifacts too: redact before writing
-    # them, retaining byte-identical content only for already-safe bodies.
-    return _externalize_crawl_bodies(_safe(value), shard_root=shard_root)
+    # Preserve enough of the public page body for behavioral replay.  The
+    # crawl-body sanitizer removes credential-shaped values without allowing
+    # broad HTML/JavaScript false positives to collapse the whole page.
+    return _externalize_crawl_bodies(_safe_replay_value(value), shard_root=shard_root)
 
 
 def _shard_path(digest: str) -> Path:

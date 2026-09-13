@@ -1258,7 +1258,9 @@ def fetch_site(
                     runtime.record(f"capability_unavailable.{name}")
             elif recorded_capabilities != capability_profile:
                 cached["capability_status"] = "capability_profile_mismatch"
-            cached["cache_status"] = "hit"
+            # Replay must preserve the live result semantics in downstream
+            # evidence; the replay audit is already captured separately.
+            cached["cache_status"] = "live" if mode == "replay" else "hit"
             cached.setdefault("capability_profile", recorded_capabilities or capability_profile)
             return cached
         if mode == "replay":

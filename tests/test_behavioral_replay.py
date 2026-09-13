@@ -163,6 +163,27 @@ def test_replay_body_shards_survive_run_store_configuration(tmp_path):
     assert value["pages"][0]["html"] == "recorded body"
 
 
+def test_replay_body_sanitizer_preserves_page_semantics(tmp_path):
+    source_db = tmp_path / "source.sqlite3"
+    replay_snapshot.configure_run_store(source_db, "source-run")
+    replay_snapshot.record(
+        "crawl_cache", "site", "body-key", 1,
+        {"pages": [{"url": "https://example.com", "html": (
+            '<main>Example Brand contact info@example.com</main>'
+            '<script>const signature = "public-js-marker";</script>'
+        )}]},
+    )
+    snapshot = tmp_path / "snapshot.json.gz"
+    replay_snapshot.write(snapshot)
+
+    replay_snapshot.reset()
+    replay_snapshot.load(snapshot, max_uncompressed_bytes=1024 * 1024)
+    found, value = replay_snapshot.lookup("crawl_cache", "site", "body-key", 1)
+    assert found is True
+    assert "Example Brand" in value["pages"][0]["html"]
+    assert "public-js-marker" not in value["pages"][0]["html"]
+
+
 def test_offline_config_changes_only_the_two_cache_modes():
     live = {
         "search_cache_mode": "refresh",

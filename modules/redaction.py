@@ -137,12 +137,7 @@ def redact_text(value: str) -> str:
     return "[REDACTED]" if s_mod else p_text
 
 
-def redact_known_values(text: str) -> str:
-    if not text:
-        return text
-    result = redact_text(str(text))
-    if result == "[REDACTED]":
-        return result
+def _known_secrets() -> set[str]:
     import config
 
     known_secrets: set[str] = set()
@@ -151,21 +146,48 @@ def redact_known_values(text: str) -> str:
             val = getattr(config, attr, None)
             if isinstance(val, str) and val.strip():
                 known_secrets.add(val.strip())
+    return known_secrets
+
+
+def _known_secret_candidates() -> set[str]:
+    known_secrets = _known_secrets()
 
     candidates: set[str] = set()
-    for s in known_secrets:
-        candidates.update({s, f"[REDACTED]{s}", urllib.parse.quote(s, safe=""), urllib.parse.quote_plus(s)})
-        curr_p, curr_h = s, s
+    for secret in known_secrets:
+        candidates.update({secret, f"[REDACTED]{secret}", urllib.parse.quote(secret, safe=""), urllib.parse.quote_plus(secret)})
+        curr_percent, curr_html = secret, secret
         for _ in range(_MAX_ENCODING_DEPTH):
-            curr_p = urllib.parse.quote(curr_p, safe="")
-            curr_h = html.escape(curr_h)
-            candidates.update({curr_p, curr_h})
+            curr_percent = urllib.parse.quote(curr_percent, safe="")
+            curr_html = html.escape(curr_html)
+            candidates.update({curr_percent, curr_html})
+    return candidates
 
-    for secret in sorted(candidates, key=len, reverse=True):
+
+def _replace_known_secret_candidates(text: str) -> str:
+    result = str(text)
+    for secret in sorted(_known_secret_candidates(), key=len, reverse=True):
         if secret and secret != "[REDACTED]":
             result = result.replace(secret, "[REDACTED]")
+    return result
+
+
+def redact_crawl_body(value: str) -> str:
+    """Redact credential-shaped values without deleting otherwise useful HTML."""
+    raw = normalize_unicode_scalars(str(value))
+    result, _ = _redact_plain_text(raw)
+    return _replace_known_secret_candidates(result)
+
+
+def redact_known_values(text: str) -> str:
+    if not text:
+        return text
+    result = redact_text(str(text))
+    if result == "[REDACTED]":
+        return result
+    result = _replace_known_secret_candidates(result)
 
     shadow, unresolved = redaction_scanner.normalize_shadow(result)
+    known_secrets = _known_secrets()
     if unresolved or any(s and s in shadow for s in known_secrets if result != "[REDACTED]"):
         return "[REDACTED]"
     return result
