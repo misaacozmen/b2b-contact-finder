@@ -35,20 +35,29 @@ def _write(path: Path, headers: list[str], rows: list[dict], *, sheet: str = "Sh
     return path
 
 
-def _manual(path: Path, names: list[str]) -> Path:
+def _manual(path: Path, names: list[str], source_record_ids: list[str] | None = None) -> Path:
     headers = ["Company", "Expected Website", "Website Verified", "Expected Email", "Email Verified", "Expected Phone", "Phone Verified"]
-    rows = [{"Company": name, "Expected Website": f"https://{name.casefold().replace(' ', '-')}.example", "Website Verified": "present", "Expected Email": f"info@{name.casefold().replace(' ', '-')}.example", "Email Verified": "present", "Expected Phone": "02125550000", "Phone Verified": "present"} for name in names]
+    if source_record_ids is not None:
+        if len(source_record_ids) != len(names):
+            raise ValueError("source_record_ids length mismatch")
+        headers.append("source_record_id")
+    rows = [{"Company": name, "Expected Website": f"https://{name.casefold().replace(' ', '-')}.example", "Website Verified": "present", "Expected Email": f"info@{name.casefold().replace(' ', '-')}.example", "Email Verified": "present", "Expected Phone": "02125550000", "Phone Verified": "present", **({"source_record_id": source_record_ids[index]} if source_record_ids is not None else {})} for index, name in enumerate(names)]
     return _write(path, headers, rows, sheet="Manual Report")
 
 
-def _pipeline(path: Path, names: list[str], source: str, profile_host: str, profile_prefix: str = "", description: str = "") -> Path:
-    rows = [{"company": name, "source": source, "country": "Türkiye", "website": "", "sector": "synthetic sector", "profile_url": f"https://{profile_host}/{profile_prefix}{index}", "description": description} for index, name in enumerate(names)]
-    return _write(path, ["company", "source", "country", "website", "sector", "profile_url", "description"], rows)
+def _pipeline(path: Path, names: list[str], source: str, profile_host: str, profile_prefix: str = "", description: str = "", source_record_ids: list[str] | None = None) -> Path:
+    if source_record_ids is not None and len(source_record_ids) != len(names):
+        raise ValueError("source_record_ids length mismatch")
+    headers = ["company", "source", "country", "website", "sector", "profile_url", "description"]
+    if source_record_ids is not None:
+        headers.append("source_record_id")
+    rows = [{"company": name, "source": source, "country": "Türkiye", "website": "", "sector": "synthetic sector", "profile_url": f"https://{profile_host}/{profile_prefix}{index}", "description": description, **({"source_record_id": source_record_ids[index]} if source_record_ids is not None else {})} for index, name in enumerate(names)]
+    return _write(path, headers, rows, sheet="Pipeline Input")
 
 
 def ensure() -> Path:
     base = root()
-    marker = base / ".ready"
+    marker = base / ".ready-v2"
     if marker.exists():
         return base
     fair_rows = [{"company": f"Synthetic Company {index}", "listed_website": f"https://synthetic{index}.example", "brands": f"Synthetic{index}", "profile_url": f"https://foodist.example/profile/{index}"} for index in range(44)]
@@ -64,6 +73,7 @@ def ensure() -> Path:
     g4 = ["cormind"] + [f"Golden Four {index}" for index in range(14)]
     g5 = ["bioanalytic diagnostik kimya sanayi ve ticaret limited sirketi"] + [f"Golden Five {index}" for index in range(19)]
     g6 = [f"Golden Six {index}" for index in range(20)]
+    g6_ids = [f"synthetic_golden6:{index:04d}" for index in range(20)]
     _manual(base / "outputs/golden_3_20260715/golden_3_manual_validation_15.xlsx", g3)
     g3_rows = []
     for index, name in enumerate(g3):
@@ -75,14 +85,14 @@ def ensure() -> Path:
     _manual(base / "outputs/golden_5_20260716/golden_5_manual_validation_20_ready.xlsx", g5)
     _pipeline(base / "outputs/golden_5_20260716/golden_5_pipeline_input_20.xlsx", g5, "expomed_eurasia_2026", "expomedistanbul.com", "en/brand/", "Expomed Eurasia 2026")
     _write(base / "outputs/golden_5_20260716/golden_5_discovery_blind_input_20.xlsx", ["company", "source", "country", "website", "sector", "profile_url", "description"], [{"company": name, "source": "expomed_eurasia_2026", "country": "Türkiye", "website": "", "sector": "synthetic sector", "profile_url": "", "description": ""} for name in g5])
-    _manual(base / "outputs/golden_6_20260718/golden_6_manual_validation_20_ready.xlsx", g6)
-    _pipeline(base / "outputs/golden_6_20260718/golden_6_pipeline_input_20.xlsx", g6, "automechanika_istanbul_2026", "www.automechanikaistanbulplus.com", "company/", "Automechanika Istanbul 2026")
-    _write(base / "outputs/golden_6_20260718/golden_6_discovery_blind_input_20.xlsx", ["company", "source", "country", "website", "sector", "profile_url", "description"], [{"company": name, "source": "automechanika_istanbul_2026", "country": "Türkiye", "website": "", "sector": "synthetic sector", "profile_url": "", "description": ""} for name in g6])
+    _manual(base / "outputs/golden_6_20260718/golden_6_manual_validation_20_ready.xlsx", g6, g6_ids)
+    _pipeline(base / "outputs/golden_6_20260718/golden_6_pipeline_input_20.xlsx", g6, "automechanika_istanbul_2026", "www.automechanikaistanbulplus.com", "company/", "Automechanika Istanbul 2026", g6_ids)
+    _write(base / "outputs/golden_6_20260718/golden_6_discovery_blind_input_20.xlsx", ["company", "source", "country", "website", "sector", "profile_url", "description", "source_record_id"], [{"company": name, "source": "automechanika_istanbul_2026", "country": "Türkiye", "website": "", "sector": "synthetic sector", "profile_url": "", "description": "", "source_record_id": g6_ids[index]} for index, name in enumerate(g6)], sheet="Pipeline Input")
     manifest = {"version": 1, "policy": {"private_seen_expected_unique_companies": 71}, "sets": [
         {"name": "golden_3", "role": "golden_3", "expected": "outputs/golden_3_20260715/golden_3_manual_validation_15.xlsx", "status": "manual_validation_pending"},
         {"name": "golden_4", "role": "development_golden4", "expected": "outputs/golden_4_20260715/golden_4_manual_validation_15.xlsx", "private_seen_check": True, "status": "manual_validation_pending"},
         {"name": "golden_5", "role": "blind", "expected": "outputs/golden_5_20260716/golden_5_manual_validation_20_ready.xlsx", "private_seen_check": True, "status": "manual_validation_pending"},
-        {"name": "golden_6", "role": "blind_golden6", "expected": "outputs/golden_6_20260718/golden_6_manual_validation_20_ready.xlsx", "private_seen_check": True, "status": "manual_validation_pending"},
+        {"name": "golden_6", "role": "blind_golden6", "expected": "outputs/golden_6_20260718/golden_6_manual_validation_20_ready.xlsx", "pipeline_input": "outputs/golden_6_20260718/golden_6_discovery_blind_input_20.xlsx", "source_assisted_input": "outputs/golden_6_20260718/golden_6_pipeline_input_20.xlsx", "private_seen_check": True, "requires_source_record_id": True, "status": "manual_validation_pending"},
     ]}
     (base / "data").mkdir(parents=True, exist_ok=True)
     (base / "data/benchmark_splits.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")

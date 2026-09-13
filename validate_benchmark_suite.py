@@ -150,6 +150,53 @@ def _ordered_artifact_ids(path: Path) -> list[str]:
     return [_row_value(row, _SOURCE_ID_FIELDS) for row in _sheet_rows(path) if _row_value(row, _SOURCE_ID_FIELDS)]
 
 
+def _required_source_record_id_issues(
+    item: dict, expected: Path, manifest_base: Path, role: str,
+) -> list[str]:
+    """Require a complete, ordered ID envelope for a benchmark set."""
+    issues: list[str] = []
+    targets: list[tuple[str, Path, str | None]] = [("expected", expected, "Manual Report")]
+    for key in ("pipeline_input", "source_assisted_input"):
+        value = item.get(key)
+        if value:
+            targets.append((key, (manifest_base / str(value)).resolve(), None))
+        else:
+            issues.append(f"{role}: {key} required when requires_source_record_id=true")
+
+    ordered: dict[str, list[str]] = {}
+    companies: dict[str, list[str]] = {}
+    for label, path, sheet in targets:
+        if not path.is_file():
+            issues.append(f"{role}: {label} workbook not found: {path}")
+            continue
+        try:
+            rows = _sheet_rows(path, sheet)
+        except Exception as exc:
+            issues.append(f"{role}: {label} workbook unreadable: {exc.__class__.__name__}")
+            continue
+        ids = [_row_value(row, _SOURCE_ID_FIELDS) for row in rows]
+        if len(rows) != 20:
+            issues.append(f"{role}: {label} must contain exactly 20 records")
+        if any(not value for value in ids):
+            issues.append(f"{role}: {label} has incomplete source_record_id coverage")
+        if len(ids) != len(set(ids)):
+            issues.append(f"{role}: {label} has duplicate source_record_id")
+        ordered[label] = ids
+        companies[label] = [_row_value(row, _COMPANY_FIELDS) for row in rows]
+
+    expected_ids = ordered.get("expected")
+    if expected_ids is not None:
+        for label, ids in ordered.items():
+            if label != "expected" and ids != expected_ids:
+                issues.append(f"{role}: {label} source_record_id order does not match expected")
+    expected_companies = companies.get("expected")
+    if expected_companies is not None:
+        for label, names in companies.items():
+            if label != "expected" and names != expected_companies:
+                issues.append(f"{role}: {label} company order does not match expected")
+    return issues
+
+
 def _ordered_ids_hash(ids: list[str]) -> str:
     return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()
 
@@ -469,6 +516,8 @@ def validate_manifest(
             continue
         if item.get("readiness_mode") != "legacy" and item.get("status") != "manual_validation_pending":
             issues.extend(f"{role}: {value}" for value in readiness_issues(expected))
+        if item.get("requires_source_record_id") is True:
+            issues.extend(_required_source_record_id_issues(item, expected, manifest_base, role))
         company_sets[role] = _companies(expected)
 
     if not has_private_flag:

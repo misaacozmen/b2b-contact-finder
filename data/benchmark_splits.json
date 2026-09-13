@@ -56,7 +56,8 @@
       "source": "Automechanika Istanbul 2026",
       "source_url": "https://www.automechanikaistanbulplus.com/participants?lang=en",
       "status": "ready_for_blind_run",
-      "private_seen_check": true
+      "private_seen_check": true,
+      "requires_source_record_id": true
     }
   ]
 }

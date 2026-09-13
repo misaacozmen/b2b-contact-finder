@@ -170,7 +170,9 @@ class IdentityArchitectureTests(unittest.TestCase):
                 return "Example Makina company profile", None
             return None, "http_404"
 
-        with patch.object(config, "CRAWL_CACHE_MODE", "off"), patch(
+        with patch.object(config, "ENABLE_JS_FALLBACK", False), patch.object(
+            config, "CRAWL_CACHE_MODE", "off"
+        ), patch(
             "modules.crawler._try_fetch", side_effect=fake_fetch
         ) as fetch, patch(
             "modules.crawler._robots_and_sitemaps", side_effect=AssertionError("identity crawl used sitemap")
@@ -181,6 +183,33 @@ class IdentityArchitectureTests(unittest.TestCase):
 
     def test_identity_pages_default_is_six_without_environment_override(self):
         self.assertEqual(config.MAX_IDENTITY_PAGES, 6)
+
+    def test_js_fallback_defaults_true_when_environment_is_unset(self):
+        environment = os.environ.copy()
+        environment.pop("ENABLE_JS_FALLBACK", None)
+        environment.pop("B2B_TEST_OFFLINE", None)
+        value = subprocess.check_output(
+            [sys.executable, "-c", "import config; print(config.ENABLE_JS_FALLBACK)"],
+            cwd=str(Path(main.__file__).resolve().parent), env=environment, text=True,
+        ).strip()
+        self.assertEqual(value, "True")
+
+    def test_js_fallback_can_be_explicitly_disabled(self):
+        environment = os.environ.copy()
+        environment["ENABLE_JS_FALLBACK"] = "0"
+        value = subprocess.check_output(
+            [sys.executable, "-c", "import config; print(config.ENABLE_JS_FALLBACK)"],
+            cwd=str(Path(main.__file__).resolve().parent), env=environment, text=True,
+        ).strip()
+        self.assertEqual(value, "False")
+
+    def test_replay_domain_check_does_not_query_dns(self):
+        search._domain_has_address.cache_clear()
+        with patch.object(config, "SEARCH_CACHE_MODE", "replay"), patch.object(
+            config, "CRAWL_CACHE_MODE", "replay"
+        ), patch.object(search.socket, "getaddrinfo", side_effect=AssertionError("DNS called in replay")):
+            self.assertFalse(search._domain_has_address("example.com"))
+        search._domain_has_address.cache_clear()
 
     def test_identity_pages_environment_override_is_scoped_to_subprocess(self):
         environment = os.environ.copy()
@@ -208,7 +237,9 @@ class IdentityArchitectureTests(unittest.TestCase):
         def fake_fetch(url):
             return (links, None) if url == "https://example.com" else ("Example company", None)
 
-        with patch.object(config, "MAX_IDENTITY_PAGES", 6), patch.object(
+        with patch.object(config, "ENABLE_JS_FALLBACK", False), patch.object(
+            config, "MAX_IDENTITY_PAGES", 6
+        ), patch.object(
             config, "CRAWL_CACHE_MODE", "off"
         ), patch("modules.crawler._try_fetch", side_effect=fake_fetch) as fetch, patch(
             "modules.crawler.site_mapper.classify", return_value="about"

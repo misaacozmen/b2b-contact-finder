@@ -1482,6 +1482,8 @@ def _can_early_stop(company_name: str, candidate: dict, metadata: dict | None = 
 
 @lru_cache(maxsize=4096)
 def _domain_has_address(domain: str) -> bool:
+    if config.SEARCH_CACHE_MODE == "replay" or config.CRAWL_CACHE_MODE == "replay":
+        return False
     try:
         socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, OSError):

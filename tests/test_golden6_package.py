@@ -1,7 +1,11 @@
 import json
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import urlparse
+
+from openpyxl import load_workbook
 
 from modules import scorer
 import run_golden_6
@@ -23,6 +27,13 @@ def _names(path: Path, sheet: str | None = None, column: str = "Company") -> set
 
 
 class Golden6PackageTests(unittest.TestCase):
+    @staticmethod
+    def _ids(path: Path, sheet: str | None = None) -> list[str]:
+        return [
+            str(row.get("source_record_id") or "").strip()
+            for row in _sheet_rows(path, sheet)
+        ]
+
     def test_golden6_has_twenty_unique_companies_with_no_prior_overlap_and_private_gate(self):
         manual = GOLDEN6_DIR / "golden_6_manual_validation_20_ready.xlsx"
         current = _names(manual, "Manual Report")
@@ -70,6 +81,94 @@ class Golden6PackageTests(unittest.TestCase):
         manual = _names(GOLDEN6_DIR / "golden_6_manual_validation_20_ready.xlsx", "Manual Report")
         pipeline = _names(GOLDEN6_DIR / "golden_6_discovery_blind_input_20.xlsx", column="company")
         self.assertEqual(manual, pipeline)
+
+    def test_golden6_has_deterministic_ordered_ids_in_all_three_workbooks(self):
+        expected_ids = self._ids(GOLDEN6_DIR / "golden_6_manual_validation_20_ready.xlsx", "Manual Report")
+        self.assertEqual(expected_ids, [f"synthetic_golden6:{index:04d}" for index in range(20)])
+        self.assertEqual(
+            expected_ids,
+            self._ids(GOLDEN6_DIR / "golden_6_pipeline_input_20.xlsx"),
+        )
+        self.assertEqual(
+            expected_ids,
+            self._ids(GOLDEN6_DIR / "golden_6_discovery_blind_input_20.xlsx"),
+        )
+
+    @staticmethod
+    def _manifest_with_mutation(tmp_root: Path, mutate) -> list[str]:
+        output = tmp_root / "outputs" / "golden_6_20260718"
+        output.mkdir(parents=True)
+        for filename in (
+            "golden_6_manual_validation_20_ready.xlsx",
+            "golden_6_pipeline_input_20.xlsx",
+            "golden_6_discovery_blind_input_20.xlsx",
+        ):
+            shutil.copy2(GOLDEN6_DIR / filename, output / filename)
+        mutate(output)
+        manifest = tmp_root / "data" / "benchmark_splits.json"
+        manifest.parent.mkdir()
+        manifest.write_text(json.dumps({
+            "version": 1,
+            "policy": {"private_seen_expected_unique_companies": 71},
+            "sets": [{
+                "name": "golden_6",
+                "role": "blind_golden6",
+                "expected": "outputs/golden_6_20260718/golden_6_manual_validation_20_ready.xlsx",
+                "pipeline_input": "outputs/golden_6_20260718/golden_6_discovery_blind_input_20.xlsx",
+                "source_assisted_input": "outputs/golden_6_20260718/golden_6_pipeline_input_20.xlsx",
+                "private_seen_check": True,
+                "requires_source_record_id": True,
+                "status": "manual_validation_pending",
+            }],
+        }), encoding="utf-8")
+        _, issues = validate_manifest(manifest)
+        return issues
+
+    def test_required_ids_reject_missing_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            issues = self._manifest_with_mutation(root, lambda output: self._set_cell(
+                output / "golden_6_manual_validation_20_ready.xlsx", "Manual Report", "H2", None
+            ))
+        self.assertTrue(any("incomplete source_record_id coverage" in issue for issue in issues))
+
+    def test_required_ids_reject_duplicate_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            issues = self._manifest_with_mutation(root, lambda output: self._set_cell(
+                output / "golden_6_discovery_blind_input_20.xlsx", "Pipeline Input", "H3",
+                "synthetic_golden6:0000",
+            ))
+        self.assertTrue(any("duplicate source_record_id" in issue for issue in issues))
+
+    def test_required_ids_reject_wrong_order(self):
+        def swap(output):
+            path = output / "golden_6_discovery_blind_input_20.xlsx"
+            workbook = load_workbook(path)
+            sheet = workbook["Pipeline Input"]
+            sheet["H2"].value, sheet["H3"].value = sheet["H3"].value, sheet["H2"].value
+            workbook.save(path)
+            workbook.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            issues = self._manifest_with_mutation(Path(directory), swap)
+        self.assertTrue(any("order does not match expected" in issue for issue in issues))
+
+    def test_required_ids_reject_different_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            issues = self._manifest_with_mutation(root, lambda output: self._set_cell(
+                output / "golden_6_manual_validation_20_ready.xlsx", "Manual Report", "H2",
+                "synthetic_other:0000",
+            ))
+        self.assertTrue(any("order does not match expected" in issue for issue in issues))
+
+    @staticmethod
+    def _set_cell(path: Path, sheet: str, coordinate: str, value) -> None:
+        workbook = load_workbook(path)
+        workbook[sheet][coordinate].value = value
+        workbook.save(path)
+        workbook.close()
 
     def test_golden6_runner_uses_discovery_blind_input(self):
         self.assertEqual(
