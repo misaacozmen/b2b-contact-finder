@@ -574,6 +574,33 @@ def test_cli_maps_all_typed_outcomes_and_rejects_unknown_result(monkeypatch):
     monkeypatch.setattr(main, "run", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom"))); assert main.cli([]) == 1
 
 
+def test_cli_help_exits_before_runtime_handoff(monkeypatch, capsys):
+    def unexpected_runtime_handoff(*_args, **_kwargs):
+        raise AssertionError("runtime handoff must not run for --help")
+
+    monkeypatch.setattr(main, "_ensure_safe_project_runtime", unexpected_runtime_handoff)
+    with pytest.raises(SystemExit) as exit_info:
+        main.cli(["--help"])
+
+    assert exit_info.value.code == 0
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_cli_non_help_requires_safe_runtime_before_configuration(monkeypatch):
+    calls = []
+
+    def unsafe_runtime(*_args, **_kwargs):
+        raise RuntimeError("unsafe runtime sentinel")
+
+    monkeypatch.setattr(main, "_ensure_safe_project_runtime", unsafe_runtime)
+    monkeypatch.setattr(main, "_apply_cli_options", lambda *_args, **_kwargs: calls.append("apply"))
+
+    with pytest.raises(RuntimeError, match="unsafe runtime sentinel"):
+        main.cli(["--non-interactive"])
+
+    assert calls == []
+
+
 def test_provider_and_free_ledger_equations_gate_finalization(durable, monkeypatch):
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: Response(200, {"organic": []}))
     result = search._brightdata_text("q")

@@ -2960,8 +2960,8 @@ def resolve_cli_run_config(argv=None):
 
 
 def cli(argv=None) -> int:
-    _ensure_safe_project_runtime(argv)
     args = parse_args(argv)
+    _ensure_safe_project_runtime(argv)
     try:
         _apply_cli_options(args)
         resolve_cli_run_config(args)
