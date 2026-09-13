@@ -237,3 +237,24 @@ def _sanitize_depth(value: Any, depth: int, seen: set[int]) -> Any:
 
 def sanitize(value: Any) -> Any:
     return _sanitize_depth(value, 0, set())
+
+
+def sanitize_replay_value(value: Any) -> Any:
+    """Sanitize replay metadata while retaining useful crawl page bodies."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if _sensitive_key(key):
+                continue
+            if str(key).casefold() in {"body", "html", "raw_body"} and isinstance(item, str):
+                result[str(key)] = redact_crawl_body(item)
+            else:
+                result[str(key)] = sanitize_replay_value(item)
+        return result
+    if isinstance(value, list):
+        return [sanitize_replay_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_replay_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_known_values(value)
+    return value

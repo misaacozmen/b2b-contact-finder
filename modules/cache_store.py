@@ -94,7 +94,8 @@ def load(
                         if created_dt.tzinfo is None:
                             created_dt = created_dt.replace(tzinfo=timezone.utc)
                         is_valid_structure = True
-                        sanitized_val = redaction.sanitize(raw_payload.get("value"))
+                        sanitizer = redaction.sanitize_replay_value if store == "crawl_cache" else redaction.sanitize
+                        sanitized_val = sanitizer(raw_payload.get("value"))
                         canonical_payload = {
                             "schema_version": raw_payload["schema_version"],
                             "created_at": raw_payload["created_at"],
@@ -189,7 +190,8 @@ def save(directory: Path, namespace: str, key: str, value: Any, schema_version: 
     compressed_path = _path(directory, namespace, key, compressed=True)
     legacy_path = _path(directory, namespace, key, compressed=False)
     compressed_path.parent.mkdir(parents=True, exist_ok=True)
-    sanitized_value = redaction.normalize_unicode_scalars(redaction.sanitize(value))
+    sanitizer = redaction.sanitize_replay_value if _store_name(directory) == "crawl_cache" else redaction.sanitize
+    sanitized_value = redaction.normalize_unicode_scalars(sanitizer(value))
     payload = {
         "schema_version": schema_version,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

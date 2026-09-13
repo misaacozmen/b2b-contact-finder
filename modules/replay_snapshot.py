@@ -60,24 +60,7 @@ def _safe(value: Any) -> Any:
 
 
 def _safe_replay_value(value: Any) -> Any:
-    """Sanitize replay metadata while retaining safe, useful crawl bodies."""
-    if isinstance(value, dict):
-        result = {}
-        for key, item in value.items():
-            if redaction._sensitive_key(key):
-                continue
-            if str(key).casefold() in {"body", "html", "raw_body"} and isinstance(item, str):
-                result[str(key)] = redaction.redact_crawl_body(item)
-            else:
-                result[str(key)] = _safe_replay_value(item)
-        return result
-    if isinstance(value, list):
-        return [_safe_replay_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [_safe_replay_value(item) for item in value]
-    if isinstance(value, str):
-        return redaction.redact_known_values(value)
-    return copy.deepcopy(value)
+    return copy.deepcopy(redaction.sanitize_replay_value(value))
 
 
 def _externalize_crawl_bodies(value: Any, *, shard_root: Path) -> Any:
@@ -226,7 +209,7 @@ def lookup(
         value = _hydrate_crawl_bodies(_ENTRIES[marker]["value"])
     if record_runtime:
         runtime.record(f"snapshot.{namespace}.hit")
-    return True, _safe(value)
+    return True, _safe_replay_value(value)
 
 
 def lookup_prefix(
@@ -261,7 +244,7 @@ def lookup_prefix(
     )
     if record_runtime:
         runtime.record(f"snapshot.{namespace}.prefix_hit")
-    return True, _safe(value)
+    return True, _safe_replay_value(value)
 
 
 def _entry_rows() -> list[dict]:
