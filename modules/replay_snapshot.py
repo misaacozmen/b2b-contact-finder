@@ -41,9 +41,10 @@ def reset() -> None:
 
 def configure_run_store(db_path: Path, run_id: str, *, read_only: bool = False) -> None:
     global _STORE_DB, _STORE_RUN_ID, _STORE_READ_ONLY, _SHARD_ROOT
+    loaded_shard_root = _SHARD_ROOT if _LOADED_FROM else None
     _STORE_DB, _STORE_RUN_ID = Path(db_path), str(run_id)
     _STORE_READ_ONLY = bool(read_only)
-    _SHARD_ROOT = _STORE_DB.parent / "replay_shards"
+    _SHARD_ROOT = loaded_shard_root or (_STORE_DB.parent / "replay_shards")
     if _STORE_READ_ONLY:
         if not _STORE_DB.exists():
             raise FileNotFoundError(_STORE_DB)

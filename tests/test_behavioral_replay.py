@@ -145,6 +145,24 @@ def test_missing_dns_record_is_replay_miss_without_network(monkeypatch):
     assert discovery_coverage.payload()["replay_miss_count"] == 1
 
 
+def test_replay_body_shards_survive_run_store_configuration(tmp_path):
+    source_db = tmp_path / "source.sqlite3"
+    replay_snapshot.configure_run_store(source_db, "source-run")
+    replay_snapshot.record(
+        "replay", "site", "body-key", 1,
+        {"pages": [{"url": "https://example.com", "html": "recorded body"}]},
+    )
+    snapshot = tmp_path / "snapshot.json.gz"
+    replay_snapshot.write(snapshot)
+
+    replay_snapshot.reset()
+    replay_snapshot.load(snapshot, max_uncompressed_bytes=1024 * 1024)
+    replay_snapshot.configure_run_store(tmp_path / "replay" / "progress.sqlite3", "replay-run")
+    found, value = replay_snapshot.lookup("replay", "site", "body-key", 1)
+    assert found is True
+    assert value["pages"][0]["html"] == "recorded body"
+
+
 def test_offline_config_changes_only_the_two_cache_modes():
     live = {
         "search_cache_mode": "refresh",
