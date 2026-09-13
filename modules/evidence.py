@@ -83,7 +83,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
                     "candidate_evaluations": row.get("__candidate_evaluations", []),
                     "field_evidence": evidence_ledger.evaluation_claims(row.get("__evaluation", {})),
                 }
-                handle.write(json.dumps(_json_safe(record), ensure_ascii=False) + "\n")
+                handle.write(json.dumps(_json_safe(record), ensure_ascii=False, sort_keys=True) + "\n")
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
