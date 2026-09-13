@@ -12,6 +12,11 @@ import runpy
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.free_only_contract import validate_database as validate_free_only_database
+from tools.free_only_contract import validate_manifest as validate_free_only_manifest
+
 
 NETWORK_EVENT_PREFIXES = (
     "socket.", "http.client.", "urllib.", "ssl.", "asyncio.",
@@ -77,6 +82,10 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
     package_dir = Path(package_dir).resolve()
     package_manifest_path = package_dir / "package_manifest.json"
     package_manifest = _json(package_manifest_path)
+    try:
+        validate_free_only_manifest(package_manifest, require_complete=False)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
     replay_snapshot = package_dir / str(package_manifest.get("replay", {}).get("snapshot", ""))
     if not replay_snapshot.is_file():
         raise ValueError("replay_snapshot_missing")
@@ -99,7 +108,8 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
         os.environ.pop("ENABLE_JS_FALLBACK", None)
         sys.argv = [
             str(repo / "main.py"), "--input", str(input_path), "--rerank-cache",
-            "--replay-snapshot", str(replay_snapshot), "--allow-paid", "--non-interactive",
+            "--replay-snapshot", str(replay_snapshot), "--no-allow-paid",
+            "--finalize-without-paid", "--non-interactive",
         ]
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             try:
@@ -134,6 +144,8 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
         "stderr_sha256": hashlib.sha256(stderr.getvalue().encode("utf-8")).hexdigest(),
     }
     run_root = _complete_run(repo, receipt["input_sha256"], before)
+    paid_activity: dict[str, int] = {}
+    free_only_error = ""
     if run_root is not None:
         manifest = _json(run_root / "manifest.json")
         artifact_dir = run_root / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
@@ -143,6 +155,27 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
             "artifact_dir": str(artifact_dir),
             "artifact_set_sha256": str(manifest.get("artifact_set_sha256", "")),
         })
+        try:
+            validate_free_only_manifest(manifest)
+            paid_activity = validate_free_only_database(
+                run_root / "state" / "progress.sqlite3",
+                str(manifest.get("run_id", run_root.name)),
+                int(package_manifest.get("input", {}).get("record_count", 0)),
+            )
+        except ValueError as exc:
+            free_only_error = str(exc)
+    else:
+        free_only_error = "free_only_complete_run_missing"
+    if free_only_error:
+        receipt["exception"] = free_only_error
+        receipt["status"] = "FAIL"
+        exit_code = 3
+    receipt.update({
+        "free_only_config_valid": not free_only_error,
+        "paid_provider_calls": int(paid_activity.get("provider_calls", -1)) if not free_only_error else -1,
+        "paid_budget_nonzero": bool(free_only_error),
+        "paid_activity": paid_activity,
+    })
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = receipt_path.with_name(f".{receipt_path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")

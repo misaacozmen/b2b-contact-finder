@@ -186,6 +186,7 @@ def prepare_paid_continuation(parent_run_dir: Path, authorization: Path, destina
     effective = base.__class__(
         search_provider=base.search_provider, search_cache_mode=base.search_cache_mode,
         crawl_cache_mode=base.crawl_cache_mode, paid_enabled=True,
+        finalize_without_paid=False,
         brightdata_budget=limits["brightdata"], google_places_budget=limits["google_places"],
         brandfetch_budget=limits["brandfetch"], hunter_budget=limits["hunter"],
         linkedin_budget=limits["linkedin"], llm_budget=limits["llm"], model=base.model,

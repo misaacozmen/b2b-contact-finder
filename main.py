@@ -2789,6 +2789,7 @@ def run(
     only_statuses: set[str] | None = None,
     *,
     allow_paid: bool | None = None,
+    finalize_without_paid: bool | None = None,
     run_dir: Path | None = None,
     resume_run: Path | None = None,
     from_run_manifest: Path | None = None,
@@ -2799,7 +2800,7 @@ def run(
             name: getattr(config, name) for name in _RUN_SCOPED_CONFIG_NAMES
         }
         try:
-            return _run(input_file, output_dir, companies, only_statuses, allow_paid=allow_paid, run_dir=run_dir, resume_run=resume_run, from_run_manifest=from_run_manifest)
+            return _run(input_file, output_dir, companies, only_statuses, allow_paid=allow_paid, finalize_without_paid=finalize_without_paid, run_dir=run_dir, resume_run=resume_run, from_run_manifest=from_run_manifest)
         finally:
             try:
                 close_logging()
@@ -2815,6 +2816,7 @@ def _run(
     only_statuses: set[str] | None = None,
     *,
     allow_paid: bool | None = None,
+    finalize_without_paid: bool | None = None,
     run_dir: Path | None = None,
     resume_run: Path | None = None,
     from_run_manifest: Path | None = None,
@@ -2829,6 +2831,7 @@ def _run(
         set_output_dir_fn=_set_output_dir,
         empty_result_fn=_empty_result,
         allow_paid=allow_paid,
+        finalize_without_paid=finalize_without_paid,
         run_dir=run_dir,
         resume_run_dir=resume_run,
         from_run_manifest=from_run_manifest,
@@ -2867,13 +2870,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     paid_group = parser.add_mutually_exclusive_group()
     paid_group.add_argument("--allow-paid", dest="allow_paid", action="store_true", default=None, help="Enable paid providers for this run and persist their budgets in the manifest")
     paid_group.add_argument("--no-allow-paid", dest="allow_paid", action="store_false", help="Explicitly disable paid providers")
+    parser.add_argument(
+        "--finalize-without-paid", dest="finalize_without_paid", action="store_true", default=None,
+        help="Finalize free results without paid providers or handoff",
+    )
     parser.add_argument("--replay-manifest", type=Path, default=None, help="Validated sharded replay manifest")
     parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="Use environment/saved resolver settings without prompting",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.allow_paid is True and args.finalize_without_paid:
+        parser.error("--allow-paid and --finalize-without-paid are mutually exclusive")
+    return args
 
 
 def _apply_cli_options(args: argparse.Namespace) -> None:
@@ -2914,6 +2924,7 @@ def _cli_selected_values(args: argparse.Namespace) -> tuple[set[str], set[str]]:
 def resolve_cli_run_config(argv=None):
     """Resolve a CLI run config after selecting the exact pipeline population."""
     args = argv if isinstance(argv, argparse.Namespace) else parse_args(argv)
+    finalize_without_paid = getattr(args, "finalize_without_paid", None)
     if args.resume_run and (args.replay_snapshot is not None or args.replay_manifest is not None):
         raise checkpoint.ResumeInvariant("resume rejects external replay input override; use the durable run store")
     _apply_cli_options(args)
@@ -2939,6 +2950,7 @@ def resolve_cli_run_config(argv=None):
             brandfetch_budget=args.brandfetch_budget,
             linkedin_budget=args.linkedin_company_budget, llm_budget=args.llm_budget,
             rerank_cache=args.rerank_cache,
+            finalize_without_paid=finalize_without_paid,
         )
     records, _ = selection.select_company_records(
         args.input,
@@ -2951,6 +2963,7 @@ def resolve_cli_run_config(argv=None):
     )
     return run_context.RunConfig.from_config(
         paid_enabled=bool(args.allow_paid),
+        finalize_without_paid=bool(finalize_without_paid),
         budgets={
             **calculated_budgets,
             "linkedin": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
@@ -2961,6 +2974,7 @@ def resolve_cli_run_config(argv=None):
 
 def cli(argv=None) -> int:
     args = parse_args(argv)
+    finalize_without_paid = getattr(args, "finalize_without_paid", None)
     _ensure_safe_project_runtime(argv)
     try:
         _apply_cli_options(args)
@@ -2973,6 +2987,7 @@ def cli(argv=None) -> int:
         if args.resume_run:
             pipeline_runner.validate_resume_before_credentials(
                 args.input, args.resume_run, allow_paid=args.allow_paid,
+                finalize_without_paid=finalize_without_paid,
                 companies=selected_companies or None, only_statuses=selected_statuses or None,
                 from_run_manifest=args.from_run_manifest, search_cache=args.search_cache,
                 crawl_cache=args.crawl_cache, brightdata_budget=args.brightdata_budget,
@@ -2985,7 +3000,7 @@ def cli(argv=None) -> int:
             _apply_saved_resolver_configuration()
         else:
             configure_apis_interactively()
-        outcome = run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest)
+        outcome = run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, finalize_without_paid=finalize_without_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest)
     except checkpoint.SchedulerInvariantError:
         print("SCHEDULER_INVARIANT_VIOLATION")
         return 22

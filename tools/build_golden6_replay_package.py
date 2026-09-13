@@ -14,9 +14,13 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from openpyxl import load_workbook
 
 from modules import excel, replay_snapshot, run_context
+from tools.free_only_contract import validate_database as validate_free_only_database
+from tools.free_only_contract import validate_manifest as validate_free_only_manifest
 
 
 EXPECTED_COUNT = 20
@@ -183,6 +187,11 @@ def _snapshot_markers(path: Path) -> set[str]:
     return markers
 
 
+def _snapshot_entry_count(path: Path) -> int:
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        return int(json.load(handle).get("entry_count", 0))
+
+
 def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | None = None) -> dict:
     repo = Path(repo_root).resolve()
     input_path = Path(input_path).resolve()
@@ -199,10 +208,24 @@ def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | No
     config_hash = str(live_manifest.get("config_sha256") or "")
     if not config_hash or run_config.get("search_cache_mode") != "refresh" or run_config.get("crawl_cache_mode") != "refresh":
         raise ReplayPackageError("live_run_modes_not_refresh")
+    try:
+        validate_free_only_manifest(live_manifest)
+    except ValueError as exc:
+        raise ReplayPackageError(str(exc)) from exc
+    try:
+        resolved_config = run_context.RunConfig.from_dict(run_config)
+    except Exception as exc:
+        raise ReplayPackageError(f"live_run_config_invalid:{type(exc).__name__}") from exc
+    if resolved_config.sha256 != config_hash:
+        raise ReplayPackageError("live_run_config_hash_mismatch")
     db = live_root / "state" / "progress.sqlite3"
     source_shards = live_root / "state" / "replay_shards"
     before_integrity = _source_integrity(db, source_shards)
     _check_run_db(db, live_id, ids)
+    try:
+        paid_activity = validate_free_only_database(db, live_id, EXPECTED_COUNT)
+    except ValueError as exc:
+        raise ReplayPackageError(str(exc)) from exc
     artifacts = _artifact_dir(live_root, live_manifest, ids)
     head_sha = _git(repo, "rev-parse", "HEAD")
 
@@ -233,12 +256,15 @@ def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | No
                 files[path.relative_to(staging).as_posix()] = {"sha256": _sha256(path), "bytes": path.stat().st_size}
         package_manifest = {
             "schema_version": 1,
+            "paid_enabled": False,
+            "finalize_without_paid": True,
             "head_sha": head_sha,
             "input": {
                 "path": str(input_path), "sha256": input_hash,
                 "ordered_id_sha256": _ids_hash(ids), "record_count": len(ids),
             },
             "ordered_source_record_ids": ids,
+            "run_config": run_config,
             "live_run": {
                 "run_id": live_id, "run_dir": str(live_root),
                 "manifest_sha256": _sha256(live_root / "manifest.json"),
@@ -247,12 +273,21 @@ def build(repo_root: Path, input_path: Path, package_dir: Path, run_id: str | No
                 "artifact_set_sha256": str(live_manifest.get("artifact_set_sha256") or ""),
                 "search_cache_mode": run_config.get("search_cache_mode"),
                 "crawl_cache_mode": run_config.get("crawl_cache_mode"),
+                "finalize_without_paid": True,
+                "paid_enabled": False,
+                "paid_activity": paid_activity,
+            },
+            "free_only": {
+                "finalize_without_paid": True,
+                "paid_enabled": False,
+                "paid_budget_zero": True,
+                "provider_calls_zero": True,
             },
             "replay": {
                 "snapshot": "replay_snapshot.json.gz",
                 "snapshot_sha256": _sha256(snapshot_path),
                 "body_shards": body_shards,
-                "entry_count": int(json.loads(gzip.open(snapshot_path, "rt", encoding="utf-8").read()).get("entry_count", 0)),
+            "entry_count": _snapshot_entry_count(snapshot_path),
             },
             "source_integrity_before": before_integrity,
             "source_integrity_after": after_integrity,

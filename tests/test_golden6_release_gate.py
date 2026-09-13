@@ -11,6 +11,7 @@ def _valid_evidence() -> dict:
             "replay_miss_count": 0,
             "replay_network_events": 0,
             "provider_http_calls": 0,
+            "free_only_config_valid": True,
             "all_results_unique_ids": 20,
             "expected_all_results_order_match": True,
             "actual_is_subset": True,

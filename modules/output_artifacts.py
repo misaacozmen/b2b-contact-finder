@@ -505,7 +505,9 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
 
 def publish_manifest(*, path: Path, run_id: str, input_hash: str, config_sha256: str,
                      counts: dict, artifacts: dict, complete: bool = True,
-                     telemetry: dict | None = None) -> None:
+                     telemetry: dict | None = None,
+                     finalized: bool | None = None,
+                     status: str | None = None) -> None:
     if not complete or not artifacts:
         raise RuntimeError("cannot publish incomplete artifact set")
     payload = {}
@@ -523,6 +525,10 @@ def publish_manifest(*, path: Path, run_id: str, input_hash: str, config_sha256:
         payload["telemetry"] = telemetry
         telemetry_json = json.dumps(telemetry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         payload["telemetry_sha256"] = hashlib.sha256(telemetry_json.encode("utf-8")).hexdigest()
+    if finalized is not None:
+        payload["finalized"] = bool(finalized)
+    if status is not None:
+        payload["status"] = str(status)
     payload["phase"] = "COMPLETE"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.staging.json")

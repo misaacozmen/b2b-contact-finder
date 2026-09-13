@@ -284,12 +284,20 @@ def resolve_run_config(manifest: dict | None = None, *, allow_paid: bool | None 
                        brightdata_budget: int | None = None, google_places_budget: int | None = None,
                        hunter_budget: int | None = None, brandfetch_budget: int | None = None,
                        linkedin_budget: int | None = None, llm_budget: int | None = None,
-                       rerank_cache: bool = False) -> run_context.RunConfig:
+                       rerank_cache: bool = False,
+                       finalize_without_paid: bool | None = None) -> run_context.RunConfig:
     if manifest is None:
-        return run_context.RunConfig.from_config(paid_enabled=bool(allow_paid))
+        if bool(allow_paid) and bool(finalize_without_paid):
+            raise checkpoint.ResumeInvariant("--allow-paid and --finalize-without-paid are mutually exclusive")
+        return run_context.RunConfig.from_config(
+            paid_enabled=bool(allow_paid),
+            finalize_without_paid=bool(finalize_without_paid),
+        )
     recorded = run_context.RunConfig.from_dict(manifest.get("run_config", {}))
     if allow_paid is not None and bool(allow_paid) != recorded.paid_enabled:
         raise checkpoint.ResumeInvariant("resume rejects behavioral paid-mode override")
+    if finalize_without_paid is not None and bool(finalize_without_paid) != recorded.finalize_without_paid:
+        raise checkpoint.ResumeInvariant("resume rejects behavioral free-only finalization override")
     if search_cache is not None and search_cache != recorded.search_cache_mode:
         raise checkpoint.ResumeInvariant("resume rejects behavioral search-cache override")
     if crawl_cache is not None and crawl_cache != recorded.crawl_cache_mode:
@@ -316,7 +324,8 @@ def validate_resume_before_credentials(input_file: Path, resume_run_dir: Path, *
                                        google_places_budget: int | None = None, hunter_budget: int | None = None,
                                        brandfetch_budget: int | None = None, linkedin_budget: int | None = None,
                                        llm_budget: int | None = None,
-                                       rerank_cache: bool = False) -> None:
+                                       rerank_cache: bool = False,
+                                       finalize_without_paid: bool | None = None) -> None:
     """Read-only identity gate used before any credential setup or provider code."""
     run_root = Path(resume_run_dir).resolve()
     manifest_path = run_root / "manifest.json"
@@ -331,7 +340,7 @@ def validate_resume_before_credentials(input_file: Path, resume_run_dir: Path, *
         crawl_cache=crawl_cache, brightdata_budget=brightdata_budget,
         google_places_budget=google_places_budget, hunter_budget=hunter_budget,
         brandfetch_budget=brandfetch_budget, linkedin_budget=linkedin_budget, llm_budget=llm_budget,
-        rerank_cache=rerank_cache,
+        rerank_cache=rerank_cache, finalize_without_paid=finalize_without_paid,
     )
     if manifest.get("paid_enabled") is False and bool(allow_paid):
         raise PermissionError("paid-disabled parent requires prepare_paid_continuation.py")
@@ -425,6 +434,7 @@ def run_pipeline(
     set_output_dir_fn: Callable[..., Any],
     empty_result_fn: Callable[..., dict],
     allow_paid: bool | None = None,
+    finalize_without_paid: bool | None = None,
     run_dir: Path | None = None,
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
@@ -440,7 +450,7 @@ def run_pipeline(
             write_outputs_fn=write_outputs_fn,
             set_output_dir_fn=set_output_dir_fn,
             empty_result_fn=empty_result_fn,
-            allow_paid=allow_paid,
+            allow_paid=allow_paid, finalize_without_paid=finalize_without_paid,
             run_dir=run_dir,
             resume_run_dir=resume_run_dir,
             from_run_manifest=from_run_manifest,
@@ -460,6 +470,7 @@ def _run_pipeline_impl(
     set_output_dir_fn: Callable[..., Any],
     empty_result_fn: Callable[..., dict],
     allow_paid: bool | None = None,
+    finalize_without_paid: bool | None = None,
     run_dir: Path | None = None,
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
@@ -473,7 +484,7 @@ def _run_pipeline_impl(
             write_outputs_fn=write_outputs_fn,
             set_output_dir_fn=set_output_dir_fn,
             empty_result_fn=empty_result_fn,
-            allow_paid=allow_paid, run_dir=run_dir,
+            allow_paid=allow_paid, finalize_without_paid=finalize_without_paid, run_dir=run_dir,
             resume_run_dir=resume_run_dir,
             from_run_manifest=from_run_manifest,
             _owned_lease=owned_lease,
@@ -495,6 +506,7 @@ def _run_pipeline_impl_body(
     set_output_dir_fn: Callable[..., Any],
     empty_result_fn: Callable[..., dict],
     allow_paid: bool | None = None,
+    finalize_without_paid: bool | None = None,
     run_dir: Path | None = None,
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
@@ -547,8 +559,13 @@ def _run_pipeline_impl_body(
         require_complete_manifest_phase(resume_manifest)
         if resume_manifest.get("paid_enabled") is False and bool(allow_paid):
             raise PermissionError("complete paid-disabled runs require prepare_paid_continuation.py")
-        run_config = resolve_run_config(resume_manifest, allow_paid=allow_paid)
+        run_config = resolve_run_config(
+            resume_manifest,
+            allow_paid=allow_paid,
+            finalize_without_paid=finalize_without_paid,
+        )
         allow_paid = run_config.paid_enabled
+        finalize_without_paid = run_config.finalize_without_paid
         budget_details = resume_manifest.get("budget_details")
         if not isinstance(budget_details, dict):
             # Legacy manifests do not carry the ratio/cap calculation.  Keep
@@ -568,13 +585,17 @@ def _run_pipeline_impl_body(
                 for provider in run_budget.PAID_API_PROVIDERS
             }
     else:
-        allow_paid = bool(allow_paid)
+        if bool(allow_paid) and bool(finalize_without_paid):
+            raise checkpoint.ResumeInvariant("--allow-paid and --finalize-without-paid are mutually exclusive")
+        finalize_without_paid = bool(finalize_without_paid)
+        allow_paid = bool(allow_paid) and not finalize_without_paid
         caps = run_budget.explicit_paid_api_caps()
         calculated_budgets = run_budget.calculate_paid_api_budgets(
             len(company_records), caps,
         )
         run_config = run_context.RunConfig.from_config(
             paid_enabled=allow_paid,
+            finalize_without_paid=finalize_without_paid,
             budgets={
                 **calculated_budgets,
                 "linkedin": config.LINKEDIN_COMPANY_REQUEST_BUDGET,
@@ -787,6 +808,8 @@ def _run_pipeline_impl_body(
                 counts=prepared.get("counts", {"input_count": len(company_records), "result_count": len(company_records)}),
                 artifacts=prepared_artifacts,
                 telemetry=checkpoint.derive_telemetry(context.run_id),
+                finalized=bool(run_config.finalize_without_paid),
+                status="complete_free_only" if run_config.finalize_without_paid else None,
             )
             checkpoint.complete_finalization_intent(
                 run_id=context.run_id,
@@ -1111,15 +1134,23 @@ def _run_pipeline_impl_body(
         config.HUNTER_REQUEST_BUDGET = paid_settings["hunter_budget"] if allow_paid else 0
         config.LINKEDIN_COMPANY_REQUEST_BUDGET = paid_settings["linkedin_budget"] if allow_paid else 0
         config.LLM_ARBITER_BUDGET = paid_settings["llm_budget"] if allow_paid else 0
-        paid_indexes = checkpoint.freeze_paid_queue(context.run_id)
-        for item_index in paid_indexes:
-            existing_plan = checkpoint.load_paid_query_plan(context.run_id, item_index)
-            if not existing_plan:
-                checkpoint.freeze_paid_query_plan(
-                    run_id=context.run_id,
-                    item_index=item_index,
-                    queries=search._primary_queries(company_records[item_index]["company"], company_records[item_index])[:paid_query_limit],
-                )
+        if finalize_without_paid and resume_phase not in {"FINALIZING", "COMPLETE"}:
+            checkpoint.finalize_free_only(
+                run_id=context.run_id, expected_count=len(company_records),
+            )
+            paid_indexes = []
+        elif finalize_without_paid:
+            paid_indexes = []
+        else:
+            paid_indexes = checkpoint.freeze_paid_queue(context.run_id)
+            for item_index in paid_indexes:
+                existing_plan = checkpoint.load_paid_query_plan(context.run_id, item_index)
+                if not existing_plan:
+                    checkpoint.freeze_paid_query_plan(
+                        run_id=context.run_id,
+                        item_index=item_index,
+                        queries=search._primary_queries(company_records[item_index]["company"], company_records[item_index])[:paid_query_limit],
+                    )
         query_plan_receipt = checkpoint.paid_query_plan_receipt(context.run_id)
         run_context.write_manifest(
             manifest_path, context, run_config, complete=False,
@@ -1231,6 +1262,7 @@ def _run_pipeline_impl_body(
         manifest_path, context, run_config, complete=False,
         extra=checkpoint.paid_query_plan_receipt(context.run_id),
     )
+    checkpoint.validate_paid_evidence(context.run_id)
     manual_review_items = [
         item for item in checkpoint.load_run_items(context.run_id)
         if item.get("paid_required") and item.get("paid_state") in {"UNKNOWN", "BLOCKED_BUDGET"}
@@ -1255,7 +1287,6 @@ def _run_pipeline_impl_body(
         checkpoint.release_handoff_pending(context.run_id, expected_count=len(company_records))
 
     if resume_phase != "FINALIZING":
-        checkpoint.validate_paid_evidence(context.run_id)
         checkpoint.transition_phase(context.run_id, "FINALIZING", expected_count=len(company_records))
     runtime.set_phase("FINALIZING")
     existing_intent = checkpoint.load_finalization_intent(context.run_id)
@@ -1327,6 +1358,8 @@ def _run_pipeline_impl_body(
         counts={"input_count": len(company_records), "result_count": len(rows)},
         artifacts=artifacts,
         telemetry=frozen_telemetry,
+        finalized=bool(finalize_without_paid),
+        status="complete_free_only" if finalize_without_paid else None,
     )
     checkpoint.complete_finalization_intent(
         run_id=context.run_id,

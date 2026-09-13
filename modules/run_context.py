@@ -187,6 +187,7 @@ class RunConfig:
     search_cache_mode: str
     crawl_cache_mode: str
     paid_enabled: bool
+    finalize_without_paid: bool
     brightdata_budget: int
     google_places_budget: int
     brandfetch_budget: int
@@ -219,9 +220,14 @@ class RunConfig:
         return tuple(sorted(result))
 
     @classmethod
-    def from_config(cls, *, paid_enabled: bool, budgets: dict[str, int] | None = None) -> "RunConfig":
+    def from_config(
+        cls, *, paid_enabled: bool, budgets: dict[str, int] | None = None,
+        finalize_without_paid: bool = False,
+    ) -> "RunConfig":
         import modules.publication_policy as publication_policy
 
+        finalize_without_paid = bool(finalize_without_paid)
+        paid_enabled = bool(paid_enabled) and not finalize_without_paid
         thresholds = tuple(sorted(
             (name, int(getattr(config, name)))
             for name in ("REVIEW_SCORE", "MEDIUM_CONFIDENCE_SCORE", "HIGH_CONFIDENCE_SCORE")
@@ -240,7 +246,8 @@ class RunConfig:
             search_provider=str(config.SEARCH_PROVIDER),
             search_cache_mode=str(config.SEARCH_CACHE_MODE),
             crawl_cache_mode=str(config.CRAWL_CACHE_MODE),
-            paid_enabled=bool(paid_enabled),
+            paid_enabled=paid_enabled,
+            finalize_without_paid=finalize_without_paid,
             brightdata_budget=budget("brightdata"),
             google_places_budget=budget("google_places"),
             brandfetch_budget=budget("brandfetch"),
@@ -262,6 +269,7 @@ class RunConfig:
             "search_cache_mode": self.search_cache_mode,
             "crawl_cache_mode": self.crawl_cache_mode,
             "paid_enabled": self.paid_enabled,
+            "finalize_without_paid": self.finalize_without_paid,
             "budgets": {
                 "brightdata": self.brightdata_budget,
                 "google_places": self.google_places_budget,
@@ -286,12 +294,20 @@ class RunConfig:
             budgets = payload["budgets"]
             if set(budgets) != canonical or not isinstance(payload.get("paid_enabled"), bool):
                 raise TypeError
+            finalize_without_paid = payload.get("finalize_without_paid", False)
+            if not isinstance(finalize_without_paid, bool):
+                raise TypeError
             normalized_budgets = {}
             for provider in canonical:
                 value = budgets[provider]
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise TypeError
                 normalized_budgets[provider] = value
+            if finalize_without_paid and (
+                payload["paid_enabled"]
+                or any(normalized_budgets.values())
+            ):
+                raise TypeError
             semantic_fields = ("search_provider", "search_cache_mode", "crawl_cache_mode", "model", "thresholds", "policy_versions", "effective_settings")
             if any(field not in payload for field in semantic_fields):
                 raise KeyError
@@ -303,6 +319,7 @@ class RunConfig:
             return cls(
                 search_provider=str(payload["search_provider"]), search_cache_mode=str(payload["search_cache_mode"]),
                 crawl_cache_mode=str(payload["crawl_cache_mode"]), paid_enabled=payload["paid_enabled"],
+                finalize_without_paid=finalize_without_paid,
                 brightdata_budget=normalized_budgets["brightdata"], google_places_budget=normalized_budgets["google_places"],
                 brandfetch_budget=normalized_budgets["brandfetch"], hunter_budget=normalized_budgets["hunter"],
                 linkedin_budget=normalized_budgets["linkedin"], llm_budget=normalized_budgets["llm"],

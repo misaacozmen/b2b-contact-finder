@@ -1439,6 +1439,92 @@ def freeze_paid_queue(run_id: str, item_indexes: list[int] | None = None) -> lis
     return indexes
 
 
+def finalize_free_only(*, run_id: str, expected_count: int) -> dict[str, int]:
+    """Finalize paid recommendations without creating paid work or evidence."""
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        phase_row = connection.execute("SELECT phase FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if not phase_row or str(phase_row[0]) != "FREE":
+            connection.rollback()
+            raise StateTransitionInvariant("free-only finalization requires FREE phase")
+
+        items = connection.execute(
+            "SELECT item_index,free_state,paid_required,paid_state,paid_attempts "
+            "FROM run_items WHERE run_id=? ORDER BY item_index",
+            (run_id,),
+        ).fetchall()
+        results = connection.execute(
+            "SELECT item_index,payload FROM results WHERE run_id=? ORDER BY item_index",
+            (run_id,),
+        ).fetchall()
+        if len(items) != int(expected_count) or len(results) != int(expected_count):
+            connection.rollback()
+            raise OutcomeInvariant("free-only finalization requires an exact terminal result snapshot")
+        if any(str(row[1]) not in {"DONE", "FAILED", "NOT_REQUIRED"} for row in items):
+            connection.rollback()
+            raise OutcomeInvariant("free-only finalization requires terminal free items")
+
+        counters = {
+            "provider_calls": connection.execute("SELECT COUNT(*) FROM provider_calls WHERE run_id=?", (run_id,)).fetchone()[0],
+            "paid_attempts": connection.execute("SELECT COUNT(*) FROM paid_attempts WHERE run_id=?", (run_id,)).fetchone()[0],
+            "paid_attempt_calls": connection.execute("SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=?", (run_id,)).fetchone()[0],
+            "provider_query_flights": connection.execute("SELECT COUNT(*) FROM provider_query_flights WHERE run_id=?", (run_id,)).fetchone()[0],
+        }
+        if any(int(value) for value in counters.values()):
+            connection.rollback()
+            raise OutcomeInvariant(f"free-only finalization found paid durable activity: {counters}")
+        usage_rows = connection.execute(
+            "SELECT provider,configured_limit,effective_limit,reserved,completed,failed,unknown "
+            "FROM provider_usage WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        if any(any(int(value or 0) != 0 for value in row[1:]) for row in usage_rows):
+            connection.rollback()
+            raise OutcomeInvariant("free-only finalization found non-zero paid provider usage")
+
+        item_by_index = {int(row[0]): row for row in items}
+        seen: set[int] = set()
+        recommended = 0
+        for item_index, payload_text in results:
+            item = item_by_index.get(int(item_index))
+            if item is None:
+                connection.rollback()
+                raise OutcomeInvariant("free-only result has no scheduler item")
+            seen.add(int(item_index))
+            payload = json.loads(str(payload_text))
+            was_recommended = bool(item[2]) or bool(payload.get("paid_recommended"))
+            if was_recommended:
+                recommended += 1
+            payload["paid_recommended"] = was_recommended
+            payload["paid_skipped_reason"] = (
+                "disabled_by_explicit_free_only_finalization" if was_recommended
+                else str(payload.get("paid_skipped_reason", ""))
+            )
+            payload["paid_required"] = False
+            payload["paid_state"] = "NOT_REQUIRED"
+            payload["paid_attempts"] = int(item[4])
+            safe_payload = json.dumps(
+                _json_safe(redaction.sanitize(payload)),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            digest = hashlib.sha256(safe_payload.encode("utf-8")).hexdigest()
+            connection.execute(
+                "UPDATE run_items SET paid_required=0,paid_state='NOT_REQUIRED',payload_sha256=? "
+                "WHERE run_id=? AND item_index=?",
+                (digest, run_id, int(item_index)),
+            )
+            connection.execute(
+                "UPDATE results SET payload=? WHERE run_id=? AND item_index=?",
+                (safe_payload, run_id, int(item_index)),
+            )
+        if seen != set(item_by_index):
+            connection.rollback()
+            raise OutcomeInvariant("free-only result/item index set mismatch")
+        connection.commit()
+    return {"items": int(expected_count), "paid_recommended": recommended, **counters}
+
+
 def mark_handoff_pending(*, run_id: str, expected_count: int) -> dict[str, int]:
     """Quarantine the complete free snapshot in one durable handoff transaction."""
     with closing(_connect()) as connection:
@@ -2055,7 +2141,7 @@ def validate_paid_evidence(run_id: str) -> dict[str, int]:
             if paid_state == "FAILED" and "FAILED" not in states:
                 raise EvidenceInvariant(f"FAILED requires durable FAILED call linked to current paid attempt for item {item_index}")
             if paid_state == "UNKNOWN" and not has_unknown_or_nonterminal:
-                    raise EvidenceInvariant(f"current paid attempt lacks UNKNOWN relational evidence for item {item_index}")
+                raise OutcomeInvariant(f"zero-call UNKNOWN lacks related provider evidence for item {item_index}")
             if paid_state == "BLOCKED_BUDGET":
                 if states.intersection({"DONE", "UNKNOWN", "RESERVED", "RUNNING"}):
                     raise EvidenceInvariant("provider evidence has precedence over BLOCKED_BUDGET")

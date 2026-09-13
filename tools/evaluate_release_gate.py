@@ -17,7 +17,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from openpyxl import load_workbook
+
+from tools.free_only_contract import validate_database as validate_free_only_database
+from tools.free_only_contract import validate_manifest as validate_free_only_manifest
 
 
 REQUIRED_CI_JOBS = ("test", "browser-smoke", "ocr-smoke")
@@ -156,6 +161,7 @@ def evaluate_evidence(evidence: dict) -> dict:
         "replay_miss_zero": behavioral.get("replay_miss_count") == 0,
         "replay_network_zero": behavioral.get("replay_network_events") == 0,
         "provider_http_zero": behavioral.get("provider_http_calls") == 0,
+        "free_only_config_valid": behavioral.get("free_only_config_valid") is True,
         "all_results_unique_ids_20": behavioral.get("all_results_unique_ids") == 20,
         "expected_all_results_order_match": behavioral.get("expected_all_results_order_match") is True,
         "actual_is_subset": behavioral.get("actual_is_subset") is True,
@@ -332,12 +338,35 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
         package_manifest = _json(package_manifest_path)
         package_valid, package_failures = _package_files_valid(package_dir, package_manifest)
         failures.extend(package_failures)
+        free_only_config_valid = True
+        try:
+            validate_free_only_manifest(package_manifest, require_complete=False)
+        except ValueError as exc:
+            free_only_config_valid = False
+            failures.append(f"FREE_ONLY_PACKAGE:{exc}")
         input_path = Path(str(package_manifest.get("input", {}).get("path", ""))).resolve()
         expected_path = repo / "outputs" / "golden_6_20260718" / "golden_6_manual_validation_20_ready.xlsx"
         expected_ids = list(package_manifest.get("ordered_source_record_ids", []))
         live_artifact = Path(str(package_manifest.get("live_run", {}).get("artifact_dir", ""))).resolve()
         receipt = _json(Path(replay_receipt_path).resolve())
         offline_artifact = Path(str(receipt.get("artifact_dir", ""))).resolve()
+        live_root = Path(str(package_manifest.get("live_run", {}).get("run_dir", ""))).resolve()
+        offline_root = Path(str(receipt.get("run_dir", ""))).resolve()
+        try:
+            live_manifest = _json(live_root / "manifest.json")
+            validate_free_only_manifest(live_manifest)
+            live_config = live_manifest.get("run_config", {})
+            if str(live_manifest.get("config_sha256", "")) != str(package_manifest.get("live_run", {}).get("config_sha256", "")):
+                raise ValueError("live_config_hash_mismatch")
+            validate_free_only_database(live_root / "state" / "progress.sqlite3", str(live_manifest.get("run_id", "")), 20)
+            offline_manifest = _json(offline_root / "manifest.json")
+            validate_free_only_manifest(offline_manifest)
+            if offline_manifest.get("run_config") != live_config:
+                raise ValueError("offline_free_only_run_config_mismatch")
+            validate_free_only_database(offline_root / "state" / "progress.sqlite3", str(offline_manifest.get("run_id", "")), 20)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            free_only_config_valid = False
+            failures.append(f"FREE_ONLY_RUN:{exc}")
         live_report, live_failures = _validator_report(repo, expected_path, live_artifact, report_path.with_name(report_path.stem + ".live.validator.json"))
         offline_report, offline_failures = _validator_report(repo, expected_path, offline_artifact, report_path.with_name(report_path.stem + ".offline.validator.json"))
         failures.extend(live_failures + offline_failures)
@@ -356,6 +385,7 @@ def evaluate(repo_root: Path, package_dir: Path, replay_receipt_path: Path, repo
             "replay_network_events": receipt.get("replay_network_events", -1),
             "provider_http_calls": offline_telemetry_calls,
             "live_provider_http_calls": live_telemetry_calls,
+            "free_only_config_valid": free_only_config_valid,
             "all_results_unique_ids": len(live_ids) if len(live_ids) == len(set(live_ids)) else -1,
             "expected_all_results_order_match": live_ids == expected_ids and offline_ids == expected_ids,
             "actual_is_subset": set(live_contacts).issubset(set(live_ids)) and set(offline_contacts).issubset(set(offline_ids)),
