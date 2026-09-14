@@ -18,6 +18,10 @@ from tools.free_only_contract import validate_database as validate_free_only_dat
 from tools.free_only_contract import validate_manifest as validate_free_only_manifest
 from tools.free_only_contract import expected_offline_run_config
 from tools.free_only_contract import validate_manifest_config_sha
+from tools.free_only_contract import compare_run_configs
+from tools.free_only_contract import inspect_budget_config
+from tools.free_only_contract import inspect_database
+from tools.free_only_contract import classify_replay_receipt
 
 
 NETWORK_EVENT_PREFIXES = (
@@ -61,7 +65,7 @@ def _complete_run(repo: Path, input_hash: str, before: set[str]) -> Path | None:
             manifest = _json(path)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
-        if manifest.get("complete") is True and manifest.get("input_sha256") == input_hash:
+        if manifest.get("input_sha256") == input_hash:
             matches.append(path.parent)
     return matches[0] if len(matches) == 1 else None
 
@@ -85,12 +89,23 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
     package_dir = Path(package_dir).resolve()
     package_manifest_path = package_dir / "package_manifest.json"
     package_manifest = _json(package_manifest_path)
+    package_budget = inspect_budget_config(package_manifest)
+    preflight_error = ""
+    execution_blocked = package_budget.get("paid_budget_nonzero") is True
+    expected_config: dict = {}
     try:
-        validate_free_only_manifest(package_manifest, require_complete=False)
+        if package_budget.get("failure_reason") == "CONFIG_INVALID":
+            raise ValueError("free_only_budget_config_invalid")
+        try:
+            validate_free_only_manifest(package_manifest, require_complete=False)
+        except ValueError as exc:
+            if str(exc) != "free_only_paid_budget_nonzero":
+                raise
+            execution_blocked = True
         validate_manifest_config_sha(package_manifest)
         expected_config = expected_offline_run_config(package_manifest["run_config"])
-    except ValueError as exc:
-        raise ValueError(str(exc)) from exc
+    except Exception as exc:
+        preflight_error = f"{type(exc).__name__}:{exc}"
     replay_snapshot = package_dir / str(package_manifest.get("replay", {}).get("snapshot", ""))
     if not replay_snapshot.is_file():
         raise ValueError("replay_snapshot_missing")
@@ -99,14 +114,14 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
     if hashlib.sha256(input_path.read_bytes()).hexdigest() != package_manifest.get("input", {}).get("sha256"):
         raise ValueError("replay_input_hash_mismatch")
 
-    before = {path.parent.name for path in (repo / "runs").glob("*/manifest.json")} if (repo / "runs").is_dir() else set()
+    before = {path.name for path in (repo / "runs").iterdir() if path.is_dir()} if (repo / "runs").is_dir() else set()
     receipts: list[dict] = []
     sys.addaudithook(_audit_factory(receipts))
     old_argv = sys.argv
     old_env = os.environ.copy()
     stdout = io.StringIO()
     stderr = io.StringIO()
-    exit_code = 1
+    pipeline_exit_code = 1
     exception = ""
     try:
         os.environ.pop("B2B_TEST_OFFLINE", None)
@@ -117,17 +132,20 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
             "--finalize-without-paid", "--non-interactive",
         ]
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                runpy.run_path(str(repo / "main.py"), run_name="__main__")
-                exit_code = 0
-            except SystemExit as exc:
-                exit_code = int(exc.code) if isinstance(exc.code, int) else 1
-            except ReplayNetworkViolation as exc:
-                exception = str(exc)
-                exit_code = 2
-            except BaseException as exc:
-                exception = f"{type(exc).__name__}:{exc}"
-                exit_code = 1
+            if preflight_error or execution_blocked:
+                exception = preflight_error or "free_only_paid_budget_nonzero"
+            else:
+                try:
+                    runpy.run_path(str(repo / "main.py"), run_name="__main__")
+                    pipeline_exit_code = 0
+                except SystemExit as exc:
+                    pipeline_exit_code = int(exc.code) if isinstance(exc.code, int) else 1
+                except ReplayNetworkViolation as exc:
+                    exception = str(exc)
+                    pipeline_exit_code = 2
+                except BaseException as exc:
+                    exception = f"{type(exc).__name__}:{exc}"
+                    pipeline_exit_code = 1
     finally:
         sys.argv = old_argv
         for key in list(os.environ):
@@ -136,9 +154,10 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
         os.environ.update(old_env)
 
     receipt = {
-        "schema_version": 1,
-        "status": "PASS" if exit_code == 0 and not receipts else "FAIL",
-        "exit_code": exit_code,
+        "schema_version": 2,
+        "status": "FAIL",
+        "exit_code": pipeline_exit_code,
+        "pipeline_exit_code": pipeline_exit_code,
         "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
         "package_manifest_sha256": _sha256(package_manifest_path),
         "replay_snapshot_sha256": _sha256(replay_snapshot),
@@ -149,10 +168,26 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
         "stderr_sha256": hashlib.sha256(stderr.getvalue().encode("utf-8")).hexdigest(),
     }
     run_root = _complete_run(repo, receipt["input_sha256"], before)
-    paid_activity: dict[str, int] = {}
-    free_only_error = ""
+    complete_run_missing = run_root is None
+    paid_activity: dict[str, int] | None = None
+    run_budget: dict | None = None
+    db_observation: dict = {}
+    db_validation_error = ""
+    config_validation_error = ""
+    threshold_info = {
+        "threshold_mismatch": False,
+        "threshold_mismatch_details": [],
+        "config_mismatch": False,
+        "config_mismatch_details": [],
+    }
     if run_root is not None:
         manifest = _json(run_root / "manifest.json")
+        complete_run_missing = not (
+            manifest.get("complete") is True
+            and manifest.get("phase") == "COMPLETE"
+            and manifest.get("finalized") is True
+            and manifest.get("status") == "complete_free_only"
+        )
         artifact_dir = run_root / "output" / "artifacts" / str(manifest.get("artifact_set_sha256", ""))
         receipt.update({
             "run_id": str(manifest.get("run_id", run_root.name)),
@@ -160,35 +195,84 @@ def run(repo_root: Path, input_path: Path, package_dir: Path, receipt_path: Path
             "artifact_dir": str(artifact_dir),
             "artifact_set_sha256": str(manifest.get("artifact_set_sha256", "")),
         })
+        run_budget = inspect_budget_config(manifest)
+        actual_config = manifest.get("run_config") if isinstance(manifest.get("run_config"), dict) else {}
+        if expected_config:
+            threshold_info = compare_run_configs(expected_config, actual_config)
+        else:
+            threshold_info = {
+                "threshold_mismatch": False,
+                "threshold_mismatch_details": [],
+                "config_mismatch": True,
+                "config_mismatch_details": [{"field": "package_preflight", "expected": "valid", "actual": preflight_error}],
+            }
         try:
-            validate_free_only_manifest(manifest)
+            validate_free_only_manifest(manifest, require_complete=False)
             validate_manifest_config_sha(manifest)
-            if manifest.get("run_config") != expected_config:
-                raise ValueError("offline_free_only_run_config_mismatch")
-            paid_activity = validate_free_only_database(
-                run_root / "state" / "progress.sqlite3",
+        except Exception as exc:
+            text = str(exc)
+            if text not in {"free_only_paid_budget_nonzero", "free_only_budget_config_invalid"}:
+                config_validation_error = f"{type(exc).__name__}:{exc}"
+        db_path = run_root / "state" / "progress.sqlite3"
+        db_observation = inspect_database(
+            db_path,
+            str(manifest.get("run_id", run_root.name)),
+            int(package_manifest.get("input", {}).get("record_count", 0)),
+        )
+        if db_observation.get("paid_activity") is not None:
+            paid_activity = db_observation["paid_activity"]
+        try:
+            validate_free_only_database(
+                db_path,
                 str(manifest.get("run_id", run_root.name)),
                 int(package_manifest.get("input", {}).get("record_count", 0)),
             )
         except ValueError as exc:
-            free_only_error = str(exc)
+            db_validation_error = str(exc)
     else:
-        free_only_error = "free_only_complete_run_missing"
-    if free_only_error:
-        receipt["exception"] = free_only_error
-        receipt["status"] = "FAIL"
-        exit_code = 3
-    receipt.update({
-        "free_only_config_valid": not free_only_error,
-        "paid_provider_calls": int(paid_activity.get("provider_calls", -1)) if not free_only_error else -1,
-        "paid_budget_nonzero": bool(free_only_error),
-        "paid_activity": paid_activity,
-    })
+        db_observation = {
+            "check_completed": False,
+            "budget_check_completed": False,
+            "paid_activity": None,
+            "paid_activity_nonzero": None,
+            "paid_provider_calls": None,
+            "budget_offenders": [],
+        }
+
+    classification = classify_replay_receipt(
+        budget_checks=[package_budget] + ([run_budget] if run_budget else []),
+        threshold_info=threshold_info,
+        database=db_observation,
+        run_present=run_root is not None,
+        complete_run_missing=complete_run_missing,
+        pipeline_exit_code=pipeline_exit_code,
+        network_event_count=len(receipts),
+        config_invalid=(preflight_error != "" or config_validation_error != ""),
+        config_invalid_details=([
+            {"field": "package_validation", "reason": preflight_error}
+            for _ in [1] if preflight_error
+        ] + [
+            {"field": "run_validation", "reason": config_validation_error}
+            for _ in [1] if config_validation_error
+        ]),
+        config_validation_error=config_validation_error,
+        db_validation_error=db_validation_error,
+        base=receipt,
+    )
+    if classification["status"] != "PASS" and not receipt.get("exception"):
+        classification["exception"] = db_validation_error or config_validation_error or preflight_error or classification["failure_reason"]
+    classification["free_only_config_valid"] = classification["status"] == "PASS"
+    classification["network_events"] = receipts
+    classification["replay_network_events"] = len(receipts)
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = receipt_path.with_name(f".{receipt_path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(receipt_path)
-    return receipt
+    try:
+        temporary.write_text(json.dumps(classification, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(receipt_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return classification
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -80,7 +80,7 @@ def test_complete_resume_rejects_manifest_hash_phase_and_counts_tamper(tmp_path:
         for name, body in payloads.items(): (artifact / name).write_bytes(body)
         artifacts = {"artifact_set_sha256": artifact_hash, "files": files}
         checkpoint.mark_finalization_artifact_and_outbox(run_id=run_id, generation="g", result_snapshot_sha256="r", artifact_set_sha256=artifact_hash, artifacts=artifacts, memory_rows=[{"source_record_id": "input:0"}])
-        base_manifest = {"complete": True, "phase": "COMPLETE", "artifact_set_sha256": artifact_hash, "files": files, "telemetry": telemetry, "telemetry_sha256": hashlib.sha256(telemetry_json.encode()).hexdigest()}
+        base_manifest = {"run_id": run_id, "complete": True, "phase": "COMPLETE", "artifact_set_sha256": artifact_hash, "files": files, "telemetry": telemetry, "telemetry_sha256": hashlib.sha256(telemetry_json.encode()).hexdigest()}
         manifest_path.write_text(json.dumps(base_manifest), encoding="utf-8")
         checkpoint.complete_finalization_intent(run_id=run_id, artifact_set_sha256=artifact_hash, manifest_sha256=checkpoint.file_hash(manifest_path))
         with sqlite3.connect(config.PROGRESS_DB_FILE) as connection:

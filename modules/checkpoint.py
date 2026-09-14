@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import sqlite3
 import os
@@ -1613,9 +1614,9 @@ def derive_provider_budgets(run_id: str) -> dict[str, dict[str, object]]:
     return provider_budgets
 
 
-def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
-    """Derive the stable scheduler receipt solely from durable scheduler rows."""
-    with closing(_connect()) as connection:
+def canonical_scheduler_receipt_from_connection(connection: sqlite3.Connection, run_id: str) -> dict[str, Any]:
+    """Derive the stable scheduler receipt from one caller-owned SQLite connection."""
+    if connection is not None:
         total = int(connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=?", (run_id,)).fetchone()[0])
         free_completed = int(connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=? AND free_state='DONE'", (run_id,)).fetchone()[0])
         item_terminal = int(connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=? AND free_state IN ('DONE','FAILED','NOT_REQUIRED')", (run_id,)).fetchone()[0])
@@ -1637,23 +1638,36 @@ def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
         context_row = connection.execute("SELECT context_json,budgets_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
         frozen_context = json.loads(context_row[0] or "{}") if context_row else {}
         frozen_budgets = json.loads(context_row[1] or "{}") if context_row else {}
-        call_states = {
-            (str(provider), str(state)): int(count)
-            for provider, state, count in connection.execute(
-                "SELECT provider,state,COUNT(*) FROM provider_calls WHERE run_id=? GROUP BY provider,state",
-                (run_id,),
-            ).fetchall()
-        }
+        call_states = {}
+        for provider, state, count in connection.execute(
+            "SELECT provider,state,COUNT(*) FROM provider_calls WHERE run_id=? GROUP BY provider,state",
+            (run_id,),
+        ).fetchall():
+            if type(provider) is not str or type(state) is not str or state not in {"RESERVED", "RUNNING", "DONE", "FAILED", "UNKNOWN"}:
+                raise LedgerInvariant("canonical provider call state is invalid")
+            call_states[(provider, state)] = int(count)
         http_counts = {str(provider): int(count) for provider, count in connection.execute("SELECT provider,COUNT(*) FROM provider_calls WHERE run_id=? AND http_started_at<>'' GROUP BY provider", (run_id,)).fetchall()}
         retry_counts = {str(provider): int(count) for provider, count in connection.execute("SELECT provider,COUNT(*) FROM provider_calls WHERE run_id=? AND http_started_at<>'' AND attempt_ordinal>1 GROUP BY provider", (run_id,)).fetchall()}
         inherited_counts = {str(provider): int(count) for provider, count in connection.execute("SELECT provider,COUNT(*) FROM provider_query_flight_consumers WHERE run_id=? AND relation='INHERITED' GROUP BY provider", (run_id,)).fetchall()}
         blocked_counts = {str(provider): int(count) for provider, count in connection.execute("SELECT provider,COUNT(*) FROM provider_budget_blocks WHERE run_id=? AND provider<>'ddgs' GROUP BY provider", (run_id,)).fetchall()}
         free_blocks = {(str(bucket), str(kind)): int(count) for bucket, kind, count in connection.execute("SELECT bucket,block_kind,COUNT(*) FROM provider_budget_blocks WHERE run_id=? AND provider='ddgs' GROUP BY bucket,block_kind", (run_id,)).fetchall()}
         plan_rows = connection.execute("SELECT item_index,plan_version,query_kind,round_ordinal,query_ordinal,normalized_query,query_sha256 FROM paid_query_plan_entries WHERE run_id=? ORDER BY item_index,plan_version,query_kind,round_ordinal,query_ordinal", (run_id,)).fetchall()
-    if set(frozen_budgets) != CANONICAL_PROVIDERS or {str(row[0]) for row in provider_rows} != CANONICAL_PROVIDERS or not {provider for provider, _state in call_states}.issubset(CANONICAL_PROVIDERS):
+        if type(free_rows) is not tuple or any(type(value) is not int or value < 0 for value in free_rows):
+            raise LedgerInvariant("canonical free query counters are invalid")
+        if type(frozen_context) is not dict or type(frozen_budgets) is not dict:
+            raise LedgerInvariant("canonical run context is invalid")
+    if (
+        type(frozen_budgets) is not dict
+        or len(provider_rows) != len(CANONICAL_PROVIDERS)
+        or set(frozen_budgets) != CANONICAL_PROVIDERS
+        or {str(row[0]) for row in provider_rows} != CANONICAL_PROVIDERS
+        or not {provider for provider, _state in call_states}.issubset(CANONICAL_PROVIDERS)
+    ):
         raise LedgerInvariant("canonical scheduler receipt requires exactly six providers")
     provider_budgets = {}
-    budget_metadata = frozen_context.get("budget_details", {}) if isinstance(frozen_context, dict) else {}
+    budget_metadata = frozen_context.get("budget_details", {})
+    if type(budget_metadata) is not dict:
+        raise LedgerInvariant("canonical budget metadata is invalid")
     for provider, configured, effective, reserved_aggregate, completed_aggregate, failed_aggregate, reserved_total_aggregate, unknown_aggregate in provider_rows:
         reserved_state = call_states.get((provider, "RESERVED"), 0)
         running_state = call_states.get((provider, "RUNNING"), 0)
@@ -1661,7 +1675,15 @@ def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
         done_state = call_states.get((provider, "DONE"), 0)
         failed_state = call_states.get((provider, "FAILED"), 0)
         values = (configured, effective, reserved_aggregate, completed_aggregate, failed_aggregate, reserved_total_aggregate, unknown_aggregate)
-        if any(isinstance(value, bool) or int(value) < 0 for value in values) or int(configured) != int(frozen_budgets[provider]) or int(effective) != int(frozen_budgets[provider]) or int(effective) > int(configured):
+        frozen_limit = frozen_budgets.get(provider)
+        if (
+            any(type(value) is not int or value < 0 for value in values)
+            or type(frozen_limit) is not int
+            or frozen_limit < 0
+            or configured != frozen_limit
+            or effective != frozen_limit
+            or effective > configured
+        ):
             raise LedgerInvariant(f"provider frozen budget mismatch: {provider}")
         expected_aggregate = {
             "reserved_total": reserved_state + running_state + done_state + failed_state + unknown,
@@ -1670,17 +1692,45 @@ def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
         actual_aggregate = {"reserved_total": int(reserved_total_aggregate), "reserved": int(reserved_aggregate), "completed": int(completed_aggregate), "failed": int(failed_aggregate), "unknown": int(unknown_aggregate)}
         if actual_aggregate != expected_aggregate or int(reserved_total_aggregate) > int(effective):
             raise LedgerInvariant(f"provider aggregate ledger mismatch: {provider}")
-        detail = dict(budget_metadata.get(provider, {})) if isinstance(budget_metadata, dict) else {}
+        detail = budget_metadata.get(provider, {})
+        if type(detail) is not dict:
+            raise LedgerInvariant(f"canonical budget metadata is invalid: {provider}")
+        population_count = detail.get("population_count", total)
+        ratio = detail.get("ratio")
+        explicit_cap = detail.get("explicit_cap", int(configured))
+        ratio_numerator = detail.get("ratio_numerator")
+        ratio_denominator = detail.get("ratio_denominator")
+        if (
+            type(population_count) is not int or population_count < 0
+            or (ratio is not None and (type(ratio) not in {int, float} or isinstance(ratio, bool) or ratio < 0 or type(ratio) is float and not math.isfinite(ratio)))
+            or (explicit_cap is not None and (type(explicit_cap) is not int or explicit_cap < 0))
+            or (ratio_numerator is not None and (type(ratio_numerator) is not int or ratio_numerator < 0))
+            or (ratio_denominator is not None and (type(ratio_denominator) is not int or ratio_denominator < 0))
+        ):
+            raise LedgerInvariant(f"canonical budget metadata is invalid: {provider}")
         provider_budgets[str(provider)] = {
-            "population_count": int(detail.get("population_count", total)),
-            "ratio": detail.get("ratio"), "ratio_numerator": detail.get("ratio_numerator"), "ratio_denominator": detail.get("ratio_denominator"),
-            "explicit_cap": detail.get("explicit_cap", int(configured)),
+            "population_count": population_count,
+            "ratio": ratio, "ratio_numerator": ratio_numerator, "ratio_denominator": ratio_denominator,
+            "explicit_cap": explicit_cap,
             "configured_limit": int(configured), "effective_limit": int(effective),
             "reserved_total": int(reserved_total_aggregate), "done": int(completed_aggregate), "failed": int(failed_aggregate),
             "unknown": int(unknown_aggregate), "reserved": reserved_state, "running": running_state,
             "physical_http_attempts": http_counts.get(str(provider), 0), "retry_attempts": retry_counts.get(str(provider), 0),
             "inherited_uses": inherited_counts.get(str(provider), 0), "budget_blocked_items": blocked_counts.get(str(provider), 0),
         }
+    paid_query_limit = frozen_context.get("paid_query_limit_per_company", 0)
+    if type(paid_query_limit) is not int or paid_query_limit < 0:
+        raise LedgerInvariant("canonical paid query limit is invalid")
+    for plan_row in plan_rows:
+        if (
+            len(plan_row) != 7
+            or any(type(value) is not int or value < 0 for value in plan_row[:2] + plan_row[3:5])
+            or type(plan_row[2]) is not str
+            or type(plan_row[5]) is not str
+            or type(plan_row[6]) is not str
+            or not _is_sha256(plan_row[6])
+        ):
+            raise LedgerInvariant("canonical paid query plan is invalid")
     plan_material = json.dumps([list(row) for row in plan_rows], ensure_ascii=False, separators=(",", ":"))
     return {
         "receipt_schema_version": 1,
@@ -1705,13 +1755,19 @@ def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
             },
         },
         "provider_budgets": provider_budgets,
-        "paid_query_limit_per_company": int(frozen_context.get("paid_query_limit_per_company", 0)),
+        "paid_query_limit_per_company": paid_query_limit,
         "paid_query_plan": {
             "plan_version": 1,
             "paid_query_plan_count": len(plan_rows),
             "paid_query_plan_sha256": hashlib.sha256(plan_material.encode("utf-8")).hexdigest(),
         },
     }
+
+
+def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
+    """Derive the stable scheduler receipt solely from durable scheduler rows."""
+    with closing(_connect()) as connection:
+        return canonical_scheduler_receipt_from_connection(connection, run_id)
 
 
 def canonical_scheduler_receipt_json(run_id: str) -> str:
@@ -2784,31 +2840,177 @@ def validate_ledger_equations(run_id: str, *, require_terminal: bool = False) ->
     return telemetry
 
 
-def _validate_finalization_telemetry_replicas(run_id: str, manifest: dict[str, Any], intent: dict[str, Any], artifact_dir: Path) -> None:
-    canonical = canonical_scheduler_receipt(run_id)
-    canonical_json = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    canonical_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+_CANONICAL_FREE_ONLY_ZERO_FIELDS = (
+    "configured_limit", "effective_limit", "reserved_total", "reserved", "running",
+    "done", "failed", "unknown", "physical_http_attempts", "retry_attempts",
+    "inherited_uses", "budget_blocked_items",
+)
+
+
+def _strict_json_equal(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return (
+            set(left) == set(right)
+            and all(_strict_json_equal(left[key], right[key]) for key in left)
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _strict_json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
+def _canonical_json(value: dict[str, Any]) -> tuple[str, str]:
+    serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return serialized, hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _validate_free_only_canonical_telemetry(canonical: dict[str, Any]) -> None:
+    if type(canonical.get("receipt_schema_version")) is not int or canonical["receipt_schema_version"] != 1:
+        raise EvidenceInvariant("TELEMETRY_CANONICAL_SCHEMA")
+    if type(canonical.get("paid_required")) is not int or canonical["paid_required"] != 0:
+        raise EvidenceInvariant("TELEMETRY_CANONICAL_PAID_REQUIRED")
+    if type(canonical.get("paid_completed")) is not int or canonical["paid_completed"] != 0:
+        raise EvidenceInvariant("TELEMETRY_CANONICAL_PAID_COMPLETED")
+    provider_budgets = canonical.get("provider_budgets")
+    if type(provider_budgets) is not dict or set(provider_budgets) != CANONICAL_PROVIDERS:
+        raise EvidenceInvariant("TELEMETRY_CANONICAL_PROVIDER_SET")
+    for provider in CANONICAL_PROVIDERS:
+        values = provider_budgets.get(provider)
+        if type(values) is not dict:
+            raise EvidenceInvariant(f"TELEMETRY_CANONICAL_PROVIDER:{provider}")
+        for field in _CANONICAL_FREE_ONLY_ZERO_FIELDS:
+            value = values.get(field)
+            if type(value) is not int or value != 0:
+                raise EvidenceInvariant(f"TELEMETRY_CANONICAL_NONZERO:{provider}.{field}")
+    plan = canonical.get("paid_query_plan")
+    if type(plan) is not dict or type(plan.get("paid_query_plan_count")) is not int or plan["paid_query_plan_count"] != 0:
+        raise EvidenceInvariant("TELEMETRY_CANONICAL_PAID_QUERY_PLAN")
+
+
+def validate_free_only_canonical_telemetry(canonical: dict[str, Any]) -> None:
+    """Validate the canonical free-only zero invariants without duplicating its schema."""
+    _validate_free_only_canonical_telemetry(canonical)
+
+
+def validate_external_finalization_telemetry(
+    database_path: Path,
+    run_root: Path,
+    run_id: str,
+    *,
+    manifest: dict[str, Any] | None = None,
+    require_free_only: bool = False,
+) -> dict[str, Any]:
+    """Validate all immutable telemetry replicas against a path-bound read-only DB."""
+    database_path = Path(database_path).resolve()
+    run_root = Path(run_root).resolve()
+    manifest_path = run_root / "manifest.json"
+    if not database_path.is_file():
+        raise EvidenceInvariant("TELEMETRY_REPLICA_DATABASE_MISSING")
+    if not manifest_path.is_file():
+        raise EvidenceInvariant("TELEMETRY_REPLICA_MANIFEST_MISSING")
     try:
-        intent_telemetry = json.loads(str(intent.get("telemetry_snapshot_json") or "{}"))
-    except json.JSONDecodeError as exc:
-        raise EvidenceInvariant("finalization intent telemetry is invalid JSON") from exc
-    if intent_telemetry != canonical or str(intent.get("telemetry_sha256", "")) != canonical_hash:
-        raise EvidenceInvariant("database and finalization intent telemetry receipts differ")
-    if manifest.get("telemetry") != canonical or str(manifest.get("telemetry_sha256", "")) != canonical_hash:
-        raise EvidenceInvariant("manifest telemetry receipt differs from database")
+        manifest_value = manifest if manifest is not None else json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_MANIFEST_INVALID") from exc
+    if type(manifest_value) is not dict or manifest_value.get("run_id") != run_id:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_MANIFEST_IDENTITY")
+    try:
+        with closing(sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)) as connection:
+            canonical = canonical_scheduler_receipt_from_connection(connection, run_id)
+            intent_row = connection.execute(
+                "SELECT status,finalization_schema_version,artifact_set_sha256,manifest_sha256,telemetry_snapshot_json,telemetry_sha256 "
+                "FROM finalization_intent WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_DATABASE_INVALID") from exc
+    if not intent_row:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_INTENT_MISSING")
+    status, schema_version, artifact_hash, manifest_hash, intent_json, intent_hash = intent_row
+    if status != "COMPLETE" or type(schema_version) is not int or schema_version != 3:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_INTENT_STATE")
+    if (
+        type(artifact_hash) is not str or not _is_sha256(artifact_hash)
+        or type(manifest_hash) is not str or not _is_sha256(manifest_hash)
+        or type(intent_json) is not str or type(intent_hash) is not str
+    ):
+        raise EvidenceInvariant("TELEMETRY_REPLICA_INTENT_SHAPE")
+    canonical_json, canonical_hash = _canonical_json(canonical)
+    if require_free_only:
+        _validate_free_only_canonical_telemetry(canonical)
+    if not _strict_json_equal(manifest_value.get("telemetry"), canonical) or manifest_value.get("telemetry_sha256") != canonical_hash:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_MANIFEST")
+    try:
+        intent_telemetry = json.loads(intent_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_INTENT_JSON") from exc
+    if not _strict_json_equal(intent_telemetry, canonical) or intent_hash != canonical_hash:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_INTENT")
+    if manifest_value.get("artifact_set_sha256") != artifact_hash or hashlib.sha256(manifest_path.read_bytes()).hexdigest() != manifest_hash:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_MANIFEST_HASH")
+    artifact_dir = run_root / "output" / "artifacts" / artifact_hash
+    files = manifest_value.get("files")
+    if not artifact_dir.is_dir() or type(files) is not dict or not files:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET")
+    artifact_entries = list(artifact_dir.iterdir())
+    if any(path.is_symlink() or not path.is_file() for path in artifact_entries):
+        raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET")
+    actual_files = {path.name for path in artifact_entries}
+    if set(files) != actual_files:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET")
+    aggregate: list[str] = []
+    for name, info in sorted(files.items()):
+        if type(name) is not str or not name or Path(name).name != name or "/" in name or "\\" in name or type(info) is not dict:
+            raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET")
+        artifact = artifact_dir / name
+        try:
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET") from exc
+        if type(info.get("sha256")) is not str or info["sha256"] != digest or type(info.get("bytes")) is not int or info["bytes"] != artifact.stat().st_size:
+            raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET")
+        aggregate.append(f"{name}:{digest}\n")
+    if hashlib.sha256("".join(aggregate).encode("utf-8")).hexdigest() != artifact_hash:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_ARTIFACT_SET")
     telemetry_artifact = artifact_dir / Path(config.TELEMETRY_FILE).name
     report_artifact = artifact_dir / Path(config.REPORT_FILE).name
-    if not telemetry_artifact.is_file() or not report_artifact.is_file():
-        raise EvidenceInvariant("canonical telemetry/report artifact is missing")
+    if not telemetry_artifact.is_file():
+        raise EvidenceInvariant("TELEMETRY_REPLICA_IMMUTABLE_MISSING")
+    if not report_artifact.is_file():
+        raise EvidenceInvariant("TELEMETRY_REPLICA_REPORT_MISSING")
     try:
         artifact_telemetry = json.loads(telemetry_artifact.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise EvidenceInvariant("immutable telemetry artifact is unreadable") from exc
-    if artifact_telemetry != canonical:
-        raise EvidenceInvariant("immutable telemetry artifact differs from database")
-    receipt_lines = [line.removeprefix("SCHEDULER_RECEIPT_JSON=") for line in report_artifact.read_text(encoding="utf-8").splitlines() if line.startswith("SCHEDULER_RECEIPT_JSON=")]
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_IMMUTABLE") from exc
+    if not _strict_json_equal(artifact_telemetry, canonical):
+        raise EvidenceInvariant("TELEMETRY_REPLICA_IMMUTABLE")
+    try:
+        receipt_lines = [
+            line.removeprefix("SCHEDULER_RECEIPT_JSON=")
+            for line in report_artifact.read_text(encoding="utf-8").splitlines()
+            if line.startswith("SCHEDULER_RECEIPT_JSON=")
+        ]
+    except (OSError, UnicodeError) as exc:
+        raise EvidenceInvariant("TELEMETRY_REPLICA_REPORT") from exc
     if receipt_lines != [canonical_json]:
-        raise EvidenceInvariant("report scheduler receipt differs from database")
+        raise EvidenceInvariant("TELEMETRY_REPLICA_REPORT")
+    return {"canonical": canonical, "canonical_json": canonical_json, "canonical_hash": canonical_hash}
+
+
+def validate_finalization_telemetry(database_path: Path, run_root: Path, run_id: str, *, manifest: dict[str, Any] | None = None, require_free_only: bool = False) -> dict[str, Any]:
+    """Public alias for path-bound external finalization telemetry validation."""
+    return validate_external_finalization_telemetry(database_path, run_root, run_id, manifest=manifest, require_free_only=require_free_only)
+
+
+def _validate_finalization_telemetry_replicas(run_id: str, manifest: dict[str, Any], intent: dict[str, Any], artifact_dir: Path) -> None:
+    """Compatibility wrapper used by the in-process finalization contract."""
+    validate_external_finalization_telemetry(
+        Path(config.PROGRESS_DB_FILE), artifact_dir.parents[2], run_id, manifest=manifest,
+    )
 
 
 def validate_finalization_contract(run_id: str, run_root: Path | None = None, *, require_complete: bool = True) -> dict[str, Any]:
