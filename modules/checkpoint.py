@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import errno
 import shutil
 import sqlite3
 import os
@@ -24,6 +25,8 @@ from modules import redaction, runtime
 
 
 CANONICAL_PROVIDERS = frozenset({"brightdata", "google_places", "brandfetch", "hunter", "linkedin", "llm"})
+# Keep the public scheduler schema version at 12: the incident additions are
+# additive/idempotent and must remain readable by the existing v12 verifier.
 SCHEDULER_SCHEMA_VERSION = 12
 SCHEDULER_REQUIRED_RECEIPT_TRIGGERS = frozenset({
     "paid_attempt_calls_owner_scope_insert", "paid_attempt_calls_owner_scope_update",
@@ -37,6 +40,19 @@ SCHEDULER_REQUIRED_RECEIPT_TRIGGERS = frozenset({
     "flight_terminal_receipt_update", "flight_terminal_receipt_delete",
     "provider_call_transport_receipt_update",
 })
+_GENERATION_VALIDATION_UPDATE_COLUMNS = {
+    "provider_query_flights": ("run_id", "provider", "query_fingerprint", "state", "execution_generation", "provider_call_id", "result_json", "call_ids_json"),
+    "provider_query_flight_results": ("run_id", "provider", "query_fingerprint", "execution_generation", "provider_call_id", "result_json", "result_sha256"),
+    "provider_query_flight_terminals": ("run_id", "provider", "query_fingerprint", "execution_generation", "state", "provider_call_id", "result_sha256", "call_ids_json"),
+    "provider_query_flight_consumers": ("run_id", "provider", "query_fingerprint", "execution_generation", "paid_attempt_id", "item_index", "provider_call_id", "relation"),
+    "provider_calls": ("run_id", "provider", "call_id", "item_index", "state", "http_started_at", "endpoint_sha256", "request_shape_sha256", "flight_fingerprint"),
+    "paid_attempt_calls": ("run_id", "item_index", "paid_attempt_id", "provider", "provider_call_id", "query_fingerprint", "execution_generation", "relation"),
+}
+_GENERATION_VALIDATION_TRIGGER_NAMES = frozenset(
+    f"generation_validation_{table}_{operation}"
+    for table in _GENERATION_VALIDATION_UPDATE_COLUMNS
+    for operation in ("insert", "update", "delete")
+)
 ITEM_STATES = frozenset({"PENDING", "RUNNING", "DONE", "FAILED", "UNKNOWN", "BLOCKED_BUDGET", "NOT_REQUIRED"})
 PHASE_TRANSITIONS = {
     "FREE": {"PAID", "FINALIZING"},
@@ -93,6 +109,10 @@ class LedgerInvariant(SchedulerInvariantError):
     pass
 
 
+class DispatchAllocationUnavailable(LedgerInvariant):
+    """The immutable dispatch job cannot be consumed by this request."""
+
+
 class EvidenceInvariant(SchedulerInvariantError):
     pass
 
@@ -112,14 +132,181 @@ class ReplayInvariantError(SchedulerInvariantError):
 
 
 _SCHEMA_READY: set[tuple[str, int, int]] = set()
+_GENERATION_VALIDATION_CACHE: dict[tuple[str, int, int], int] = {}
+_GENERATION_VALIDATION_CACHE_LOCK = threading.RLock()
 
 
-def _open_connection(path: Path) -> sqlite3.Connection:
+def _ensure_provider_dispatch_columns(connection: sqlite3.Connection) -> None:
+    """Add crash/replay fields to the dispatch ledger without rewriting history."""
+    allocation_columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_dispatch_allocations)")}
+    for name, definition in {
+        "job_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "consumed_call_id": "TEXT NOT NULL DEFAULT ''",
+        "terminal_state": "TEXT NOT NULL DEFAULT ''",
+        "released_reason": "TEXT NOT NULL DEFAULT ''",
+        "consumed_at": "TEXT NOT NULL DEFAULT ''",
+        "terminal_at": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in allocation_columns:
+            connection.execute(f"ALTER TABLE provider_dispatch_allocations ADD COLUMN {name} {definition}")
+    round_columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_dispatch_rounds)")}
+    if "completed_at" not in round_columns:
+        connection.execute("ALTER TABLE provider_dispatch_rounds ADD COLUMN completed_at TEXT NOT NULL DEFAULT ''")
+
+
+def _ensure_provider_work_schema(connection: sqlite3.Connection) -> None:
+    """Create the durable concrete-job ledger and round progress receipts.
+
+    The dispatch-round tables predate concrete work identities and therefore
+    cannot distinguish "this company still needs another operation" from an
+    already terminal provider row.  These tables are additive: old call,
+    flight, allocation, and result rows remain untouched.
+    """
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS provider_work_items ("
+        "run_id TEXT NOT NULL, item_index INTEGER NOT NULL, source_record_id TEXT NOT NULL, "
+        "provider TEXT NOT NULL, operation TEXT NOT NULL, request_fingerprint TEXT NOT NULL, "
+        "query_fingerprint TEXT NOT NULL DEFAULT '', plan_version INTEGER NOT NULL DEFAULT 1, "
+        "need_class TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'READY', terminal_reason TEXT NOT NULL DEFAULT '', "
+        "call_id TEXT NOT NULL DEFAULT '', execution_generation INTEGER NOT NULL DEFAULT 0, "
+        "dependency_job_fingerprint TEXT NOT NULL DEFAULT '', job_fingerprint TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+        "PRIMARY KEY(run_id,job_fingerprint), "
+        "UNIQUE(run_id,item_index,provider,operation,request_fingerprint))"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_provider_work_ready "
+        "ON provider_work_items(run_id,provider,state,item_index,created_at)"
+    )
+    allocation_columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_dispatch_allocations)")}
+    for name, definition in {
+        "operation": "TEXT NOT NULL DEFAULT ''",
+        "request_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "query_fingerprint": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in allocation_columns:
+            connection.execute(f"ALTER TABLE provider_dispatch_allocations ADD COLUMN {name} {definition}")
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS scheduler_progress_snapshots ("
+        "run_id TEXT NOT NULL, round_ordinal INTEGER NOT NULL, phase TEXT NOT NULL, kind TEXT NOT NULL, "
+        "snapshot_json TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "PRIMARY KEY(run_id,round_ordinal,phase,kind))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS scheduler_heartbeat_events ("
+        "event_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, round_ordinal INTEGER NOT NULL, "
+        "phase TEXT NOT NULL, sequence INTEGER NOT NULL, snapshot_json TEXT NOT NULL, "
+        "snapshot_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "UNIQUE(run_id,round_ordinal,phase,sequence))"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_scheduler_heartbeat_timeline "
+        "ON scheduler_heartbeat_events(run_id,phase,round_ordinal,created_at)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS provider_failure_events ("
+        "run_id TEXT NOT NULL, call_id TEXT NOT NULL, provider TEXT NOT NULL, item_index INTEGER NOT NULL, "
+        "failure_class TEXT NOT NULL, failure_group_key TEXT NOT NULL, result_ref TEXT NOT NULL DEFAULT '', "
+        "created_at TEXT NOT NULL, PRIMARY KEY(run_id,call_id), UNIQUE(run_id,call_id))"
+    )
+    run_columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
+    for name, definition in {
+        "termination_reason": "TEXT NOT NULL DEFAULT ''",
+        "stopped_at": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in run_columns:
+            connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+    paid_link_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(paid_attempt_calls)")}
+    if {
+        "run_id", "provider", "provider_call_id", "query_fingerprint",
+        "execution_generation", "relation", "item_index", "paid_attempt_id",
+    }.issubset(paid_link_columns):
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_paid_attempt_calls_generation_owner "
+            "ON paid_attempt_calls(run_id,provider,provider_call_id,query_fingerprint,execution_generation,relation)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_paid_attempt_calls_generation_consumer "
+            "ON paid_attempt_calls(run_id,item_index,paid_attempt_id,provider,provider_call_id,query_fingerprint,execution_generation,relation)"
+        )
+    _ensure_generation_validation_schema(connection)
+
+
+def _ensure_retrieval_receipt_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS retrieval_receipts ("
+        "run_id TEXT NOT NULL, receipt_key TEXT NOT NULL, normalized_url TEXT NOT NULL, "
+        "method TEXT NOT NULL, capability_sha256 TEXT NOT NULL, state TEXT NOT NULL, "
+        "owner_token TEXT NOT NULL DEFAULT '', owner_pid INTEGER NOT NULL DEFAULT 0, "
+        "lease_expires_at REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, "
+        "outcome TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', body BLOB, "
+        "body_sha256 TEXT NOT NULL DEFAULT '', meta_json TEXT NOT NULL DEFAULT '{}', "
+        "updated_at TEXT NOT NULL, PRIMARY KEY(run_id,receipt_key), "
+        "CHECK(state IN ('IN_PROGRESS','SUCCEEDED','FAILED')))"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_retrieval_receipts_lease "
+        "ON retrieval_receipts(run_id,state,lease_expires_at)"
+    )
+
+
+def _ensure_generation_validation_schema(connection: sqlite3.Connection) -> None:
+    """Track writes that can invalidate the expensive generation-link audit."""
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS generation_validation_state ("
+        "singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL)"
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO generation_validation_state(singleton,revision) VALUES(1,0)"
+    )
+    tables = {
+        str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    for table, update_columns in _GENERATION_VALIDATION_UPDATE_COLUMNS.items():
+        if table not in tables:
+            continue
+        columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        if not set(update_columns).issubset(columns):
+            continue
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            trigger_name = f"generation_validation_{table}_{operation.casefold()}"
+            update_of = f" OF {','.join(update_columns)}" if operation == "UPDATE" else ""
+            connection.execute(
+                f"CREATE TRIGGER IF NOT EXISTS {trigger_name} AFTER {operation}{update_of} ON {table} "
+                "BEGIN UPDATE generation_validation_state SET revision=revision+1 WHERE singleton=1; END"
+            )
+    paid_attempt_call_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(paid_attempt_calls)")
+    } if "paid_attempt_calls" in tables else set()
+    if {
+        "run_id", "provider", "provider_call_id", "query_fingerprint",
+        "execution_generation", "relation", "item_index", "paid_attempt_id",
+    }.issubset(paid_attempt_call_columns):
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_paid_attempt_calls_generation_audit "
+            "ON paid_attempt_calls(run_id,provider,provider_call_id,query_fingerprint,"
+            "execution_generation,relation,item_index,paid_attempt_id)"
+        )
+
+
+def _open_connection(path: Path, *, timeout_seconds: float = 30.0) -> sqlite3.Connection:
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=30)
+    connection = sqlite3.connect(path, timeout=max(0.0, float(timeout_seconds)))
     connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA journal_mode=WAL")
+    # Switching journal mode needs an exclusive lock; existing WAL databases
+    # should not repeat that transition on every checkpoint connection.
+    journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+    if journal_mode != "wal":
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+            if journal_mode != "wal":
+                connection.close()
+                raise
     connection.execute("PRAGMA synchronous=FULL")
     return connection
 
@@ -127,6 +314,45 @@ def _open_connection(path: Path) -> sqlite3.Connection:
 def _migrate_schema(connection: sqlite3.Connection) -> None:
     schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     if schema_version == SCHEDULER_SCHEMA_VERSION:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS discovery_execution_counters ("
+            "run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, parent_execution_id TEXT NOT NULL DEFAULT '', "
+            "stage TEXT NOT NULL, execution_kind TEXT NOT NULL DEFAULT '', next_ordinal INTEGER NOT NULL DEFAULT 1, "
+            "PRIMARY KEY(run_id,source_record_id,parent_execution_id,stage,execution_kind))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS provider_dispatch_allocations ("
+            "run_id TEXT NOT NULL, provider TEXT NOT NULL, round_ordinal INTEGER NOT NULL, item_index INTEGER NOT NULL, "
+            "source_record_id TEXT NOT NULL, need_class TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'RESERVED', allocated_at TEXT NOT NULL, "
+            "job_fingerprint TEXT NOT NULL DEFAULT '', consumed_call_id TEXT NOT NULL DEFAULT '', terminal_state TEXT NOT NULL DEFAULT '', "
+            "released_reason TEXT NOT NULL DEFAULT '', consumed_at TEXT NOT NULL DEFAULT '', terminal_at TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY(run_id,provider,round_ordinal,item_index), UNIQUE(run_id,provider,round_ordinal,source_record_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS provider_dispatch_rounds ("
+            "run_id TEXT NOT NULL, provider TEXT NOT NULL, round_ordinal INTEGER NOT NULL, "
+            "need_snapshot_sha256 TEXT NOT NULL, plan_version INTEGER NOT NULL, requested_cap INTEGER NOT NULL, "
+            "remaining_limit INTEGER NOT NULL, selected_work_hash TEXT NOT NULL, selected_count INTEGER NOT NULL, "
+            "state TEXT NOT NULL DEFAULT 'RESERVED', created_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY(run_id,provider,round_ordinal))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS operational_metrics ("
+            "run_id TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, "
+            "updated_at TEXT NOT NULL, PRIMARY KEY(run_id,metric))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS operational_unique ("
+            "run_id TEXT NOT NULL, metric TEXT NOT NULL, key_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "PRIMARY KEY(run_id,metric,key_sha256))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS discovery_executions (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, execution_id TEXT NOT NULL, ordinal INTEGER NOT NULL, parent_execution_id TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, execution_kind TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,source_record_id,execution_id))"
+        )
+        _ensure_provider_dispatch_columns(connection)
+        _ensure_provider_work_schema(connection)
+        _ensure_retrieval_receipt_schema(connection)
+        connection.commit()
         return
     connection.execute("BEGIN IMMEDIATE")
     for trigger in (
@@ -167,6 +393,47 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS immutable_input_snapshots (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, snapshot_sha256 TEXT NOT NULL, snapshot_json TEXT NOT NULL, PRIMARY KEY(run_id,item_index))"
     )
     connection.execute(
+        "CREATE TABLE IF NOT EXISTS discovery_attempts ("
+        "run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, attempt_id TEXT NOT NULL, "
+        "parent_attempt_id TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '', "
+        "query_id TEXT NOT NULL DEFAULT '', candidate_url TEXT NOT NULL DEFAULT '', "
+        "transport_outcome TEXT NOT NULL DEFAULT '', semantic_result TEXT NOT NULL DEFAULT '', "
+        "reason TEXT NOT NULL DEFAULT '', evidence_refs_json TEXT NOT NULL DEFAULT '[]', "
+        "reservation_json TEXT NOT NULL DEFAULT '{}', duration_ms INTEGER NOT NULL DEFAULT 0, "
+        "created_at TEXT NOT NULL, PRIMARY KEY(run_id,source_record_id,attempt_id))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS discovery_execution_counters ("
+        "run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, parent_execution_id TEXT NOT NULL DEFAULT '', "
+        "stage TEXT NOT NULL, execution_kind TEXT NOT NULL DEFAULT '', next_ordinal INTEGER NOT NULL DEFAULT 1, "
+        "PRIMARY KEY(run_id,source_record_id,parent_execution_id,stage,execution_kind))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS provider_dispatch_allocations ("
+        "run_id TEXT NOT NULL, provider TEXT NOT NULL, round_ordinal INTEGER NOT NULL, item_index INTEGER NOT NULL, "
+        "source_record_id TEXT NOT NULL, need_class TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'RESERVED', allocated_at TEXT NOT NULL, "
+        "job_fingerprint TEXT NOT NULL DEFAULT '', consumed_call_id TEXT NOT NULL DEFAULT '', terminal_state TEXT NOT NULL DEFAULT '', "
+        "released_reason TEXT NOT NULL DEFAULT '', consumed_at TEXT NOT NULL DEFAULT '', terminal_at TEXT NOT NULL DEFAULT '', "
+        "PRIMARY KEY(run_id,provider,round_ordinal,item_index), UNIQUE(run_id,provider,round_ordinal,source_record_id))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS provider_dispatch_rounds ("
+        "run_id TEXT NOT NULL, provider TEXT NOT NULL, round_ordinal INTEGER NOT NULL, "
+        "need_snapshot_sha256 TEXT NOT NULL, plan_version INTEGER NOT NULL, requested_cap INTEGER NOT NULL, "
+        "remaining_limit INTEGER NOT NULL, selected_work_hash TEXT NOT NULL, selected_count INTEGER NOT NULL, "
+        "state TEXT NOT NULL DEFAULT 'RESERVED', created_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '', "
+        "PRIMARY KEY(run_id,provider,round_ordinal))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS operational_metrics (run_id TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,metric))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS operational_unique (run_id TEXT NOT NULL, metric TEXT NOT NULL, key_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(run_id,metric,key_sha256))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS discovery_executions (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, execution_id TEXT NOT NULL, ordinal INTEGER NOT NULL, parent_execution_id TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, execution_kind TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,source_record_id,execution_id))"
+    )
+    connection.execute(
         "CREATE TABLE IF NOT EXISTS run_phase_transitions (run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, from_phase TEXT NOT NULL, to_phase TEXT NOT NULL, transitioned_at TEXT NOT NULL, PRIMARY KEY(run_id,ordinal))"
     )
     item_columns = {row[1] for row in connection.execute("PRAGMA table_info(run_items)")}
@@ -187,6 +454,9 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS provider_calls (run_id TEXT NOT NULL, call_id TEXT PRIMARY KEY, provider TEXT NOT NULL, item_index INTEGER NOT NULL, phase TEXT NOT NULL, operation TEXT NOT NULL DEFAULT '', request_fingerprint TEXT NOT NULL, state TEXT NOT NULL, result_ref TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS provider_call_recovery_receipts (run_id TEXT NOT NULL,call_id TEXT NOT NULL,provider TEXT NOT NULL,item_index INTEGER NOT NULL,phase TEXT NOT NULL,operation TEXT NOT NULL,request_fingerprint TEXT NOT NULL,flight_fingerprint TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL,http_started_at TEXT NOT NULL DEFAULT '',attempt_ordinal INTEGER NOT NULL DEFAULT 1,recovered_at TEXT NOT NULL,PRIMARY KEY(run_id,call_id))"
+    )
     columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_calls)")}
     if "operation" not in columns:
         connection.execute("ALTER TABLE provider_calls ADD COLUMN operation TEXT NOT NULL DEFAULT ''")
@@ -199,8 +469,12 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
     }.items():
         if name not in columns:
             connection.execute(f"ALTER TABLE provider_calls ADD COLUMN {name} {definition}")
+    # A request fingerprint identifies one logical job.  Bounded transport
+    # retries may produce more than one physical call for that same job, so it
+    # must not be a uniqueness constraint on provider_calls.
+    connection.execute("DROP INDEX IF EXISTS uq_provider_call_identity")
     connection.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_provider_call_identity ON provider_calls(run_id,provider,item_index,phase,request_fingerprint)"
+        "CREATE INDEX IF NOT EXISTS ix_provider_call_identity ON provider_calls(run_id,provider,item_index,phase,request_fingerprint)"
     )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS replay_entries (run_id TEXT NOT NULL, store TEXT NOT NULL, namespace TEXT NOT NULL, key_sha256 TEXT NOT NULL, schema_version INTEGER NOT NULL, prefix_json TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(run_id,store,namespace,key_sha256,schema_version))"
@@ -233,6 +507,9 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS paid_no_call_evidence (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, paid_attempt_id TEXT NOT NULL, evidence_kind TEXT NOT NULL, input_snapshot_sha256 TEXT NOT NULL, normalized_input_website TEXT NOT NULL, evaluation_payload_sha256 TEXT NOT NULL, result_payload_sha256 TEXT NOT NULL, publication_eligible INTEGER NOT NULL, evaluator_schema_version INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(run_id,item_index,paid_attempt_id))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS paid_local_failure_receipts (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, source_record_id TEXT NOT NULL DEFAULT '', paid_attempt_id TEXT NOT NULL, input_snapshot_sha256 TEXT NOT NULL, stage TEXT NOT NULL, typed_reason TEXT NOT NULL, dispatch_started INTEGER NOT NULL CHECK(dispatch_started=0), created_at TEXT NOT NULL, PRIMARY KEY(run_id,item_index,paid_attempt_id))"
     )
     connection.execute(
         "CREATE TABLE IF NOT EXISTS paid_attempt_provider_plan (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, paid_attempt_id TEXT NOT NULL, provider TEXT NOT NULL, plan_ordinal INTEGER NOT NULL, authorized INTEGER NOT NULL, effective_limit INTEGER NOT NULL, PRIMARY KEY(run_id,item_index,paid_attempt_id,provider))"
@@ -333,7 +610,8 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
             targeted_used = physical_used - discovery_used
             completed = failed = 0
             connection.execute("UPDATE free_query_usage SET discovery_physical_used=?,targeted_physical_used=?,physical_completed=0,physical_failed=0 WHERE run_id=? AND item_index=?", (discovery_used, targeted_used, run_id, int(item_index)))
-        if min(physical_used, completed, failed, discovery_used, targeted_used) < 0 or completed + failed > physical_used or discovery_used + targeted_used != physical_used or physical_used > 10 or discovery_used > 6 or targeted_used > 4:
+        physical_multiplier = int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
+        if min(physical_used, completed, failed, discovery_used, targeted_used) < 0 or completed + failed > physical_used or discovery_used + targeted_used != physical_used or physical_used > 10 * physical_multiplier or discovery_used > 6 * physical_multiplier or targeted_used > 4 * physical_multiplier:
             raise LedgerInvariant("legacy free physical counters are inconsistent")
         buckets = ["discovery"] * discovery_used + ["targeted"] * targeted_used
         states = ["DONE"] * completed + ["FAILED"] * failed + ["RESERVED"] * (physical_used - completed - failed)
@@ -447,7 +725,7 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
         trigger_specs = {
             "paid_attempt_calls_owner_scope": "NEW.relation='OWNER' AND NOT EXISTS(SELECT 1 FROM provider_calls c WHERE c.run_id=NEW.run_id AND c.item_index=NEW.item_index AND c.call_id=NEW.provider_call_id AND c.provider=NEW.provider AND ((NEW.query_fingerprint='' AND c.flight_fingerprint='' AND NEW.execution_generation=1) OR (NEW.query_fingerprint<>'' AND c.flight_fingerprint=NEW.query_fingerprint AND (EXISTS(SELECT 1 FROM provider_query_flight_terminals t,json_each(t.call_ids_json) j WHERE t.run_id=NEW.run_id AND t.provider=NEW.provider AND t.query_fingerprint=NEW.query_fingerprint AND t.execution_generation=NEW.execution_generation AND j.value=NEW.provider_call_id) OR (EXISTS(SELECT 1 FROM provider_query_flights f WHERE f.run_id=NEW.run_id AND f.provider=NEW.provider AND f.query_fingerprint=NEW.query_fingerprint AND f.execution_generation=NEW.execution_generation) AND NOT EXISTS(SELECT 1 FROM provider_query_flight_terminals t,json_each(t.call_ids_json) j WHERE t.run_id=NEW.run_id AND t.provider=NEW.provider AND t.query_fingerprint=NEW.query_fingerprint AND j.value=NEW.provider_call_id))))))",
             "paid_attempt_calls_inherited_scope": "NEW.relation='INHERITED' AND NOT EXISTS(SELECT 1 FROM provider_query_flight_consumers x JOIN provider_query_flight_terminals t ON t.run_id=x.run_id AND t.provider=x.provider AND t.query_fingerprint=x.query_fingerprint AND t.execution_generation=x.execution_generation JOIN provider_calls c ON c.run_id=x.run_id AND c.provider=x.provider AND c.call_id=x.provider_call_id LEFT JOIN provider_query_flight_results r ON r.run_id=x.run_id AND r.provider=x.provider AND r.query_fingerprint=x.query_fingerprint AND r.execution_generation=x.execution_generation WHERE x.run_id=NEW.run_id AND x.item_index=NEW.item_index AND x.paid_attempt_id=NEW.paid_attempt_id AND x.provider=NEW.provider AND x.query_fingerprint=NEW.query_fingerprint AND x.execution_generation=NEW.execution_generation AND x.provider_call_id=NEW.provider_call_id AND x.relation='INHERITED' AND ((t.state='DONE' AND r.provider_call_id IS NOT NULL) OR (t.state='FAILED' AND c.state='FAILED')))",
-            "flight_consumer_scope": "NOT EXISTS(SELECT 1 FROM paid_attempts a JOIN provider_calls c ON c.run_id=NEW.run_id AND c.provider=NEW.provider AND c.call_id=NEW.provider_call_id JOIN provider_query_flights f ON f.run_id=NEW.run_id AND f.provider=NEW.provider AND f.query_fingerprint=NEW.query_fingerprint WHERE a.run_id=NEW.run_id AND a.item_index=NEW.item_index AND a.paid_attempt_id=NEW.paid_attempt_id AND f.execution_generation=NEW.execution_generation AND (NEW.relation='INHERITED' OR c.item_index=NEW.item_index))",
+            "flight_consumer_scope": "NOT EXISTS(SELECT 1 FROM paid_attempts a JOIN provider_calls c ON c.run_id=NEW.run_id AND c.provider=NEW.provider AND c.call_id=NEW.provider_call_id JOIN provider_query_flight_terminals t ON t.run_id=NEW.run_id AND t.provider=NEW.provider AND t.query_fingerprint=NEW.query_fingerprint AND t.execution_generation=NEW.execution_generation JOIN json_each(t.call_ids_json) j ON j.value=NEW.provider_call_id WHERE a.run_id=NEW.run_id AND a.item_index=NEW.item_index AND a.paid_attempt_id=NEW.paid_attempt_id AND (NEW.relation='INHERITED' OR c.item_index=NEW.item_index))",
             "paid_attempt_block_scope": "NOT EXISTS(SELECT 1 FROM paid_attempts a JOIN provider_budget_blocks b ON b.run_id=NEW.run_id AND b.item_index=NEW.item_index AND b.provider=NEW.provider AND b.block_id=NEW.block_id WHERE a.run_id=NEW.run_id AND a.item_index=NEW.item_index AND a.paid_attempt_id=NEW.paid_attempt_id)",
             "flight_result_scope": "NOT EXISTS(SELECT 1 FROM provider_query_flights f JOIN provider_calls c ON c.run_id=NEW.run_id AND c.provider=NEW.provider AND c.call_id=NEW.provider_call_id JOIN paid_attempt_calls l ON l.run_id=c.run_id AND l.provider=c.provider AND l.provider_call_id=c.call_id AND l.query_fingerprint=NEW.query_fingerprint AND l.execution_generation=NEW.execution_generation AND l.relation='OWNER' WHERE f.run_id=NEW.run_id AND f.provider=NEW.provider AND f.query_fingerprint=NEW.query_fingerprint AND f.execution_generation=NEW.execution_generation AND c.flight_fingerprint=NEW.query_fingerprint AND c.state='DONE' AND c.http_started_at<>'' AND length(c.endpoint_sha256)=64 AND length(c.request_shape_sha256)=64)",
             "flight_terminal_scope": "NOT EXISTS(SELECT 1 FROM provider_query_flights f WHERE f.run_id=NEW.run_id AND f.provider=NEW.provider AND f.query_fingerprint=NEW.query_fingerprint AND f.execution_generation=NEW.execution_generation AND json_valid(NEW.call_ids_json) AND ((NEW.state='DONE' AND NEW.provider_call_id<>'' AND EXISTS(SELECT 1 FROM provider_query_flight_results r JOIN provider_calls c ON c.run_id=r.run_id AND c.provider=r.provider AND c.call_id=r.provider_call_id JOIN paid_attempt_calls l ON l.run_id=c.run_id AND l.provider=c.provider AND l.provider_call_id=c.call_id AND l.query_fingerprint=r.query_fingerprint AND l.execution_generation=r.execution_generation AND l.relation='OWNER' WHERE r.run_id=NEW.run_id AND r.provider=NEW.provider AND r.query_fingerprint=NEW.query_fingerprint AND r.execution_generation=NEW.execution_generation AND r.provider_call_id=NEW.provider_call_id AND r.result_sha256=NEW.result_sha256 AND c.state='DONE' AND c.http_started_at<>'' AND length(c.endpoint_sha256)=64 AND length(c.request_shape_sha256)=64 AND c.flight_fingerprint=NEW.query_fingerprint AND EXISTS(SELECT 1 FROM json_each(NEW.call_ids_json) j WHERE j.value=NEW.provider_call_id))) OR (NEW.state IN ('FAILED','UNKNOWN') AND NEW.provider_call_id='')))"
@@ -487,6 +765,9 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
     probe_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_probes)")}
     if "lease_expires_at" not in probe_columns:
         connection.execute("ALTER TABLE source_probes ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''")
+    _ensure_provider_dispatch_columns(connection)
+    _ensure_provider_work_schema(connection)
+    _ensure_retrieval_receipt_schema(connection)
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:
         connection.rollback()
@@ -501,6 +782,26 @@ def _db_identity(path: Path) -> tuple[str, int, int] | None:
     except FileNotFoundError:
         return None
     return str(path.resolve()), int(stat.st_dev), int(stat.st_ino)
+
+
+def _generation_validation_revision(connection: sqlite3.Connection) -> int | None:
+    """Return a trustworthy relation revision, or disable caching for this DB."""
+    try:
+        row = connection.execute(
+            "SELECT revision FROM generation_validation_state WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            return None
+        placeholders = ",".join("?" for _ in _GENERATION_VALIDATION_TRIGGER_NAMES)
+        present = int(connection.execute(
+            f"SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ({placeholders})",
+            tuple(_GENERATION_VALIDATION_TRIGGER_NAMES),
+        ).fetchone()[0])
+        if present != len(_GENERATION_VALIDATION_TRIGGER_NAMES):
+            return None
+        return int(row[0])
+    except sqlite3.Error:
+        return None
 
 
 def _generation_relation_violations(connection: sqlite3.Connection) -> list[str]:
@@ -557,7 +858,12 @@ def _initialize_schema_once(path: Path) -> None:
         if identity is not None and identity in _SCHEMA_READY:
             return
         if identity is not None:
+            with _GENERATION_VALIDATION_CACHE_LOCK:
+                _GENERATION_VALIDATION_CACHE.pop(identity, None)
+        if identity is not None:
             try:
+                dispatch_allocation_columns: set[str] = set()
+                dispatch_round_columns: set[str] = set()
                 with tempfile.TemporaryDirectory(prefix="scheduler-schema-probe-") as probe_dir:
                     probe_path = Path(probe_dir) / target.name
                     shutil.copyfile(target, probe_path)
@@ -570,6 +876,9 @@ def _initialize_schema_once(path: Path) -> None:
                         tables = {str(row[0]) for row in probe.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                         phases = {str(row[0]) for row in probe.execute("SELECT phase FROM runs")} if "runs" in tables else set()
                         provider_call_columns = {str(row[1]) for row in probe.execute("PRAGMA table_info(provider_calls)")}
+                        receipt_columns = {str(row[1]) for row in probe.execute("PRAGMA table_info(paid_local_failure_receipts)")} if "paid_local_failure_receipts" in tables else set()
+                        dispatch_allocation_columns = {str(row[1]) for row in probe.execute("PRAGMA table_info(provider_dispatch_allocations)")} if "provider_dispatch_allocations" in tables else set()
+                        dispatch_round_columns = {str(row[1]) for row in probe.execute("PRAGMA table_info(provider_dispatch_rounds)")} if "provider_dispatch_rounds" in tables else set()
                         triggers = {str(row[0]) for row in probe.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
             except sqlite3.Error as exc:
                 raise EvidenceInvariant("scheduler schema cannot be inspected read-only") from exc
@@ -593,6 +902,61 @@ def _initialize_schema_once(path: Path) -> None:
                     or not required_triggers.issubset(triggers)
                 ):
                     raise EvidenceInvariant("scheduler schema 12 is missing required generation receipt constraints")
+                if "COMPLETE" in phases:
+                    required_read_only_tables = {
+                        "discovery_attempts", "paid_local_failure_receipts",
+                        "discovery_execution_counters", "provider_dispatch_allocations",
+                        "provider_dispatch_rounds", "operational_metrics", "operational_unique",
+                        "discovery_executions", "provider_work_items", "scheduler_progress_snapshots",
+                        "provider_failure_events",
+                    }
+                    if not required_read_only_tables.issubset(tables):
+                        raise StateTransitionInvariant("completed checkpoint schema is read-only")
+                    if not {
+                        "job_fingerprint", "consumed_call_id", "terminal_state",
+                        "released_reason", "consumed_at", "terminal_at", "operation",
+                        "request_fingerprint", "query_fingerprint",
+                    }.issubset(dispatch_allocation_columns) or "completed_at" not in dispatch_round_columns:
+                        raise StateTransitionInvariant("completed checkpoint schema is read-only")
+                    _SCHEMA_READY.add(identity)
+                    return
+                if "discovery_attempts" not in tables or "paid_local_failure_receipts" not in tables:
+                    with closing(_open_connection(target)) as ensure_connection:
+                        ensure_connection.execute("CREATE TABLE IF NOT EXISTS discovery_attempts (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, attempt_id TEXT NOT NULL, parent_attempt_id TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '', query_id TEXT NOT NULL DEFAULT '', candidate_url TEXT NOT NULL DEFAULT '', transport_outcome TEXT NOT NULL DEFAULT '', semantic_result TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', evidence_refs_json TEXT NOT NULL DEFAULT '[]', reservation_json TEXT NOT NULL DEFAULT '{}', duration_ms INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, PRIMARY KEY(run_id,source_record_id,attempt_id))")
+                        ensure_connection.execute("CREATE TABLE IF NOT EXISTS paid_local_failure_receipts (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, source_record_id TEXT NOT NULL DEFAULT '', paid_attempt_id TEXT NOT NULL, input_snapshot_sha256 TEXT NOT NULL, stage TEXT NOT NULL, typed_reason TEXT NOT NULL, dispatch_started INTEGER NOT NULL CHECK(dispatch_started=0), created_at TEXT NOT NULL, PRIMARY KEY(run_id,item_index,paid_attempt_id))")
+                        ensure_connection.commit()
+                if "COMPLETE" not in phases:
+                    with closing(_open_connection(target)) as ensure_connection:
+                        ensure_connection.execute(
+                            "CREATE TABLE IF NOT EXISTS discovery_execution_counters (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, parent_execution_id TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, execution_kind TEXT NOT NULL DEFAULT '', next_ordinal INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(run_id,source_record_id,parent_execution_id,stage,execution_kind))"
+                        )
+                        ensure_connection.execute(
+                            "CREATE TABLE IF NOT EXISTS provider_dispatch_allocations (run_id TEXT NOT NULL, provider TEXT NOT NULL, round_ordinal INTEGER NOT NULL, item_index INTEGER NOT NULL, source_record_id TEXT NOT NULL, need_class TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'RESERVED', allocated_at TEXT NOT NULL, PRIMARY KEY(run_id,provider,round_ordinal,item_index), UNIQUE(run_id,provider,round_ordinal,source_record_id))"
+                        )
+                        ensure_connection.execute(
+                            "CREATE TABLE IF NOT EXISTS provider_dispatch_rounds (run_id TEXT NOT NULL, provider TEXT NOT NULL, round_ordinal INTEGER NOT NULL, need_snapshot_sha256 TEXT NOT NULL, plan_version INTEGER NOT NULL, requested_cap INTEGER NOT NULL, remaining_limit INTEGER NOT NULL, selected_work_hash TEXT NOT NULL, selected_count INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'RESERVED', created_at TEXT NOT NULL, PRIMARY KEY(run_id,provider,round_ordinal))"
+                        )
+                        ensure_connection.execute(
+                            "CREATE TABLE IF NOT EXISTS operational_metrics (run_id TEXT NOT NULL, metric TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,metric))"
+                        )
+                        ensure_connection.execute(
+                            "CREATE TABLE IF NOT EXISTS operational_unique (run_id TEXT NOT NULL, metric TEXT NOT NULL, key_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(run_id,metric,key_sha256))"
+                        )
+                        ensure_connection.execute(
+                            "CREATE TABLE IF NOT EXISTS discovery_executions (run_id TEXT NOT NULL, source_record_id TEXT NOT NULL, execution_id TEXT NOT NULL, ordinal INTEGER NOT NULL, parent_execution_id TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, execution_kind TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(run_id,source_record_id,execution_id))"
+                        )
+                        ensure_connection.commit()
+                if "source_record_id" not in receipt_columns:
+                    if "COMPLETE" in phases:
+                        raise StateTransitionInvariant("completed checkpoint schema is read-only and cannot be migrated")
+                    with closing(_open_connection(target)) as ensure_connection:
+                        ensure_connection.execute("ALTER TABLE paid_local_failure_receipts ADD COLUMN source_record_id TEXT NOT NULL DEFAULT ''")
+                        ensure_connection.commit()
+                with closing(_open_connection(target)) as ensure_connection:
+                    _ensure_provider_dispatch_columns(ensure_connection)
+                    _ensure_provider_work_schema(ensure_connection)
+                    _ensure_retrieval_receipt_schema(ensure_connection)
+                    ensure_connection.commit()
                 _SCHEMA_READY.add(identity)
                 return
             if "COMPLETE" in phases:
@@ -614,12 +978,384 @@ def _connect() -> sqlite3.Connection:
     if incomplete:
         violations = connection.execute("PRAGMA foreign_key_check").fetchall()
         schema_violations = _schema_constraint_violations(connection)
-        generation_violations = _generation_relation_violations(connection)
+        identity = _db_identity(target)
+        revision = _generation_validation_revision(connection)
+        with _GENERATION_VALIDATION_CACHE_LOCK:
+            validated_revision = _GENERATION_VALIDATION_CACHE.get(identity) if identity is not None else None
+        generation_violations: list[str] = []
+        if revision is None or validated_revision != revision:
+            generation_violations = _generation_relation_violations(connection)
+            if not generation_violations and revision is not None and identity is not None:
+                with _GENERATION_VALIDATION_CACHE_LOCK:
+                    _GENERATION_VALIDATION_CACHE[identity] = revision
         if violations or schema_violations or generation_violations:
             connection.close()
             detail = "foreign key" if violations else ",".join(schema_violations or generation_violations)
             raise EvidenceInvariant(f"relational evidence check failed for incomplete run: {detail}")
     return connection
+
+
+def retrieval_receipt_key(*, run_id: str, normalized_url: str, method: str,
+                          capability_sha256: str) -> str:
+    material = "\0".join((str(run_id), str(normalized_url), str(method), str(capability_sha256)))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _retrieval_owner_is_alive(pid: int) -> bool:
+    owner_pid = int(pid)
+    if owner_pid <= 0:
+        return False
+    if owner_pid == os.getpid():
+        return True
+    if os.name == "nt":
+        # Windows' os.kill(pid, 0) is not a liveness probe: it commonly raises
+        # WinError 87 even for the current live process. Query the process
+        # handle instead, and fail closed (assume alive) on access/API errors
+        # so an uncertain owner is never stolen.
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            open_process.restype = wintypes.HANDLE
+            handle = open_process(0x1000, False, owner_pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                error = ctypes.get_last_error()
+                return error not in {6, 87, 1168}  # invalid handle/parameter, not found
+            try:
+                exit_code = wintypes.DWORD()
+                get_exit_code = kernel32.GetExitCodeProcess
+                get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+                get_exit_code.restype = wintypes.BOOL
+                if not get_exit_code(handle, ctypes.byref(exit_code)):
+                    return True
+                return int(exit_code.value) == 259  # STILL_ACTIVE
+            finally:
+                close_handle = kernel32.CloseHandle
+                close_handle.argtypes = (wintypes.HANDLE,)
+                close_handle.restype = wintypes.BOOL
+                close_handle(handle)
+        except Exception:
+            return True
+    try:
+        os.kill(owner_pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH and getattr(exc, "winerror", None) not in {87, 1168}
+
+
+def _retrieval_receipt_value(row: tuple[Any, ...]) -> dict[str, Any]:
+    fields = (
+        "run_id", "receipt_key", "normalized_url", "method", "capability_sha256",
+        "state", "owner_token", "owner_pid", "lease_expires_at", "attempts",
+        "outcome", "error", "body", "body_sha256", "meta_json", "updated_at",
+    )
+    value = dict(zip(fields, row))
+    value["owner_pid"] = int(value["owner_pid"] or 0)
+    value["lease_expires_at"] = float(value["lease_expires_at"] or 0)
+    value["attempts"] = int(value["attempts"] or 0)
+    body = bytes(value["body"]) if value["body"] is not None else None
+    if body is not None and hashlib.sha256(body).hexdigest() != str(value["body_sha256"]):
+        raise EvidenceInvariant("retrieval receipt body hash mismatch")
+    value["body"] = body
+    try:
+        value["meta"] = json.loads(str(value.pop("meta_json") or "{}"))
+    except (TypeError, ValueError) as exc:
+        raise EvidenceInvariant("retrieval receipt metadata is invalid") from exc
+    return value
+
+
+def claim_retrieval_receipt(
+    *, run_id: str, receipt_key: str, normalized_url: str, method: str,
+    capability_sha256: str, owner_token: str, max_attempts: int,
+    lease_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Acquire one cross-process retrieval owner or return its durable receipt."""
+    if not all(str(value).strip() for value in (run_id, receipt_key, normalized_url, method, owner_token)):
+        raise EvidenceInvariant("retrieval receipt identity is incomplete")
+    if not _is_sha256(receipt_key) or not _is_sha256(capability_sha256):
+        raise EvidenceInvariant("retrieval receipt identity hash is invalid")
+    now = time.time()
+    pid = os.getpid()
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT run_id,receipt_key,normalized_url,method,capability_sha256,state,owner_token,owner_pid,lease_expires_at,attempts,outcome,error,body,body_sha256,meta_json,updated_at "
+            "FROM retrieval_receipts WHERE run_id=? AND receipt_key=?",
+            (str(run_id), str(receipt_key)),
+        ).fetchone()
+        if row:
+            value = _retrieval_receipt_value(row)
+            if (value["normalized_url"] != str(normalized_url)
+                    or value["method"] != str(method)
+                    or value["capability_sha256"] != str(capability_sha256)):
+                connection.rollback()
+                raise EvidenceInvariant("retrieval receipt key collision")
+            if value["state"] in {"SUCCEEDED", "FAILED"}:
+                connection.commit()
+                return {**value, "claim": "TERMINAL"}
+            live_owner = (
+                str(value["owner_token"]) != str(owner_token)
+                and _retrieval_owner_is_alive(value["owner_pid"])
+            )
+            if live_owner:
+                connection.commit()
+                return {**value, "claim": "WAIT"}
+            if value["attempts"] >= max(1, int(max_attempts)):
+                connection.execute(
+                    "UPDATE retrieval_receipts SET state='FAILED',owner_token='',owner_pid=0,lease_expires_at=0, "
+                    "outcome='ATTEMPT_BUDGET_EXHAUSTED',error='retrieval_attempt_budget_exhausted',updated_at=? "
+                    "WHERE run_id=? AND receipt_key=? AND state='IN_PROGRESS'",
+                    (datetime.now(timezone.utc).isoformat(timespec="microseconds"), str(run_id), str(receipt_key)),
+                )
+                connection.commit()
+                value.update({"state": "FAILED", "owner_token": "", "owner_pid": 0,
+                              "outcome": "ATTEMPT_BUDGET_EXHAUSTED",
+                              "error": "retrieval_attempt_budget_exhausted"})
+                return {**value, "claim": "TERMINAL"}
+            connection.execute(
+                "UPDATE retrieval_receipts SET owner_token=?,owner_pid=?,lease_expires_at=?,updated_at=? "
+                "WHERE run_id=? AND receipt_key=? AND state='IN_PROGRESS'",
+                (str(owner_token), pid, now + max(1.0, float(lease_seconds)),
+                 datetime.now(timezone.utc).isoformat(timespec="microseconds"), str(run_id), str(receipt_key)),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO retrieval_receipts(run_id,receipt_key,normalized_url,method,capability_sha256,state,owner_token,owner_pid,lease_expires_at,attempts,updated_at) "
+                "VALUES(?,?,?,?,?,'IN_PROGRESS',?,?,?,0,?)",
+                (str(run_id), str(receipt_key), str(normalized_url), str(method), str(capability_sha256),
+                 str(owner_token), pid, now + max(1.0, float(lease_seconds)),
+                 datetime.now(timezone.utc).isoformat(timespec="microseconds")),
+            )
+        connection.commit()
+    return {
+        "run_id": str(run_id), "receipt_key": str(receipt_key), "normalized_url": str(normalized_url),
+        "method": str(method), "capability_sha256": str(capability_sha256), "state": "IN_PROGRESS",
+        "owner_token": str(owner_token), "owner_pid": pid, "attempts": int(row[9]) if row else 0,
+        "claim": "OWNER",
+    }
+
+
+def consume_retrieval_attempt(*, run_id: str, receipt_key: str, owner_token: str,
+                              max_attempts: int, lease_seconds: float = 30.0) -> int | None:
+    now = time.time()
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT attempts FROM retrieval_receipts WHERE run_id=? AND receipt_key=? "
+            "AND state='IN_PROGRESS' AND owner_token=? AND owner_pid=?",
+            (str(run_id), str(receipt_key), str(owner_token), os.getpid()),
+        ).fetchone()
+        if not row:
+            connection.rollback()
+            return None
+        attempts = int(row[0])
+        if attempts >= max(1, int(max_attempts)):
+            connection.commit()
+            return None
+        attempts += 1
+        connection.execute(
+            "UPDATE retrieval_receipts SET attempts=?,lease_expires_at=?,updated_at=? "
+            "WHERE run_id=? AND receipt_key=? AND state='IN_PROGRESS' AND owner_token=? AND owner_pid=?",
+            (attempts, now + max(1.0, float(lease_seconds)),
+             datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+             str(run_id), str(receipt_key), str(owner_token), os.getpid()),
+        )
+        connection.commit()
+    return attempts
+
+
+def complete_retrieval_receipt(
+    *, run_id: str, receipt_key: str, owner_token: str, outcome: str,
+    error: str = "", body: bytes | None = None, meta: dict[str, Any] | None = None,
+) -> None:
+    state = "SUCCEEDED" if body is not None and not error else "FAILED"
+    body_sha256 = hashlib.sha256(body).hexdigest() if body is not None else ""
+    meta_json = json.dumps(_json_safe(meta or {}), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.execute(
+            "UPDATE retrieval_receipts SET state=?,owner_token='',owner_pid=0,lease_expires_at=0, "
+            "outcome=?,error=?,body=?,body_sha256=?,meta_json=?,updated_at=? "
+            "WHERE run_id=? AND receipt_key=? AND state='IN_PROGRESS' AND owner_token=? AND owner_pid=?",
+            (state, str(outcome), str(error or ""), body, body_sha256, meta_json, now,
+             str(run_id), str(receipt_key), str(owner_token), os.getpid()),
+        )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            raise StateTransitionInvariant("retrieval receipt owner changed before completion")
+        connection.commit()
+
+
+def read_retrieval_receipt(*, run_id: str, receipt_key: str) -> dict[str, Any] | None:
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT run_id,receipt_key,normalized_url,method,capability_sha256,state,owner_token,owner_pid,lease_expires_at,attempts,outcome,error,body,body_sha256,meta_json,updated_at "
+            "FROM retrieval_receipts WHERE run_id=? AND receipt_key=?",
+            (str(run_id), str(receipt_key)),
+        ).fetchone()
+    return _retrieval_receipt_value(row) if row else None
+
+
+def record_discovery_attempt(
+    *, run_id: str, source_record_id: str, attempt_id: str = "", parent_attempt_id: str = "",
+    execution_id: str = "",
+    stage: str, provider: str = "", query_id: str = "", candidate_url: str = "",
+    transport_outcome: str = "", semantic_result: str = "", reason: str = "",
+    evidence_refs: list[str] | tuple[str, ...] | None = None,
+    reservation: dict[str, Any] | None = None, duration_ms: int = 0,
+) -> str:
+    """Append one idempotent discovery trace row; never overwrite history."""
+    run_id = str(run_id or "").strip()
+    source_record_id = str(source_record_id or "").strip()
+    if not run_id or not source_record_id or not str(stage or "").strip():
+        raise EvidenceInvariant("discovery attempt requires run and source identity")
+    execution_id = str(execution_id or "").strip()
+    parent_attempt_id = execution_id or str(parent_attempt_id or "")
+    payload = {
+        "run_id": run_id, "source_record_id": source_record_id,
+        "parent_attempt_id": parent_attempt_id, "stage": str(stage),
+        "provider": str(provider or ""), "query_id": str(query_id or ""),
+        "candidate_url": str(candidate_url or ""),
+    }
+    attempt_id = str(attempt_id or "").strip() or hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    evidence_json = json.dumps(_json_safe(list(evidence_refs or ())), ensure_ascii=False, sort_keys=True)
+    reservation_payload = dict(reservation or {})
+    if execution_id:
+        reservation_payload.setdefault("execution_id", execution_id)
+    reservation_json = json.dumps(_json_safe(reservation_payload), ensure_ascii=False, sort_keys=True)
+    values = (
+        run_id, source_record_id, attempt_id, parent_attempt_id,
+        str(stage), str(provider or ""), str(query_id or ""),
+        str(candidate_url or ""), str(transport_outcome or ""),
+        str(semantic_result or ""), str(reason or ""), evidence_json,
+        reservation_json, max(0, int(duration_ms or 0)),
+    )
+    with closing(_connect()) as connection:
+        existing = connection.execute(
+            "SELECT parent_attempt_id,stage,provider,query_id,candidate_url,transport_outcome,semantic_result,reason,evidence_refs_json,reservation_json,duration_ms FROM discovery_attempts WHERE run_id=? AND source_record_id=? AND attempt_id=?",
+            (run_id, source_record_id, attempt_id),
+        ).fetchone()
+        if existing:
+            if tuple(existing) != values[3:]:
+                raise EvidenceInvariant("discovery attempt id reused with different payload")
+            connection.commit()
+            return attempt_id
+        connection.execute(
+            "INSERT INTO discovery_attempts(run_id,source_record_id,attempt_id,parent_attempt_id,stage,provider,query_id,candidate_url,transport_outcome,semantic_result,reason,evidence_refs_json,reservation_json,duration_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (*values, datetime.now(timezone.utc).isoformat(timespec="microseconds")),
+        )
+        if execution_id:
+            outcome = str(transport_outcome or "").strip().upper()
+            state = "DONE" if outcome == "DONE" else "UNKNOWN" if outcome == "UNKNOWN" else "FAILED" if outcome else "UNKNOWN"
+            connection.execute(
+                "UPDATE discovery_executions SET state=?,updated_at=? WHERE run_id=? AND source_record_id=? AND execution_id=?",
+                (state, datetime.now(timezone.utc).isoformat(timespec="microseconds"), run_id, source_record_id, execution_id),
+            )
+        connection.commit()
+    return attempt_id
+
+
+def discovery_event_id(base: str, **payload: Any) -> str:
+    """Return an event id; physical executions are ordinal, not outcome hashes."""
+    execution_id = str(payload.pop("execution_id", "") or "").strip()
+    if execution_id:
+        return f"{str(base or 'attempt').strip()}:execution-{execution_id}"
+    material = json.dumps(_json_safe(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    suffix = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"{str(base or 'attempt').strip()}:event-{suffix}"
+
+
+def reserve_discovery_execution(
+    *, run_id: str, source_record_id: str, stage: str, execution_kind: str = "",
+    parent_execution_id: str = "",
+) -> dict[str, Any]:
+    """Reserve a monotonic physical execution before dispatch.
+
+    The returned id is carried by all start/result writes.  Re-persisting that
+    execution is idempotent; a new reservation represents a new physical call.
+    """
+    run_id = str(run_id or "").strip()
+    source_record_id = str(source_record_id or "").strip()
+    stage = str(stage or "").strip()
+    execution_kind = str(execution_kind or "").strip()
+    parent_execution_id = str(parent_execution_id or "").strip()
+    if not run_id or not source_record_id or not stage:
+        raise EvidenceInvariant("discovery execution requires run, source, and stage")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT next_ordinal FROM discovery_execution_counters WHERE run_id=? AND source_record_id=? AND parent_execution_id=? AND stage=? AND execution_kind=?",
+            (run_id, source_record_id, parent_execution_id, stage, execution_kind),
+        ).fetchone()
+        ordinal = int(row[0]) if row else 1
+        if row:
+            connection.execute(
+                "UPDATE discovery_execution_counters SET next_ordinal=? WHERE run_id=? AND source_record_id=? AND parent_execution_id=? AND stage=? AND execution_kind=?",
+                (ordinal + 1, run_id, source_record_id, parent_execution_id, stage, execution_kind),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO discovery_execution_counters(run_id,source_record_id,parent_execution_id,stage,execution_kind,next_ordinal) VALUES(?,?,?,?,?,?)",
+                (run_id, source_record_id, parent_execution_id, stage, execution_kind, 2),
+            )
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        execution_id = hashlib.sha256(
+            f"{run_id}\0{source_record_id}\0{parent_execution_id}\0{stage}\0{execution_kind}\0{ordinal}".encode()
+        ).hexdigest()[:24]
+        connection.execute(
+            "INSERT OR IGNORE INTO discovery_executions(run_id,source_record_id,execution_id,ordinal,parent_execution_id,stage,execution_kind,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (run_id, source_record_id, execution_id, ordinal, parent_execution_id, stage, execution_kind, "STARTED", now, now),
+        )
+        connection.commit()
+    return {"execution_id": execution_id, "ordinal": ordinal, "parent_execution_id": parent_execution_id, "stage": stage, "execution_kind": execution_kind}
+
+
+def load_discovery_attempts(run_id: str, source_record_id: str | None = None) -> list[dict[str, Any]]:
+    with closing(_connect()) as connection:
+        query = "SELECT run_id,source_record_id,attempt_id,parent_attempt_id,stage,provider,query_id,candidate_url,transport_outcome,semantic_result,reason,evidence_refs_json,reservation_json,duration_ms,created_at FROM discovery_attempts WHERE run_id=?"
+        args: list[Any] = [str(run_id)]
+        if source_record_id:
+            query += " AND source_record_id=?"
+            args.append(str(source_record_id))
+        query += " ORDER BY source_record_id,created_at,attempt_id"
+        rows = connection.execute(query, tuple(args)).fetchall()
+    fields = ("run_id", "source_record_id", "attempt_id", "parent_attempt_id", "stage", "provider", "query_id", "candidate_url", "transport_outcome", "semantic_result", "reason", "evidence_refs_json", "reservation_json", "duration_ms", "created_at")
+    result = []
+    for row in rows:
+        item = dict(zip(fields, row))
+        for key in ("evidence_refs_json", "reservation_json"):
+            try:
+                item[key.removesuffix("_json")] = json.loads(item[key])
+            except json.JSONDecodeError:
+                item[key.removesuffix("_json")] = [] if key.startswith("evidence") else {}
+        result.append(item)
+    with closing(_connect()) as connection:
+        executions = connection.execute(
+            "SELECT e.run_id,e.source_record_id,e.execution_id,e.parent_execution_id,e.stage,e.execution_kind,e.created_at FROM discovery_executions e LEFT JOIN discovery_attempts a ON a.run_id=e.run_id AND a.source_record_id=e.source_record_id AND a.attempt_id LIKE '%' || e.execution_id WHERE e.run_id=? AND e.state='STARTED' AND a.attempt_id IS NULL",
+            (str(run_id),),
+        ).fetchall()
+    for run_value, source_value, execution_value, parent_value, stage_value, kind_value, created_at in executions:
+        result.append({
+            "run_id": run_value, "source_record_id": source_value,
+            "attempt_id": f"execution:{execution_value}:UNKNOWN", "parent_attempt_id": parent_value or execution_value,
+            "stage": stage_value, "provider": "", "query_id": "", "candidate_url": "",
+            "transport_outcome": "UNKNOWN", "semantic_result": "INCOMPLETE_EXECUTION",
+            "reason": "restart_incomplete_execution", "evidence_refs": [],
+            "reservation": {"execution_id": execution_value, "execution_kind": kind_value},
+            "duration_ms": 0, "created_at": created_at,
+        })
+    result.sort(key=lambda item: (str(item.get("source_record_id")), str(item.get("created_at")), str(item.get("attempt_id"))))
+    return result
 
 
 def claim_source_probe(*, run_id: str, host: str) -> dict[str, Any]:
@@ -680,6 +1416,7 @@ def _reserve_free_query(*, run_id: str, item_index: int, bucket: str, kind: str)
     if bucket not in {"discovery", "targeted"}:
         bucket = "discovery"
     bucket_limit = 6 if bucket == "discovery" else 4
+    physical_quota = 10 * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
     used_column = f"{bucket}_{kind}_used"
     total_column = f"{kind}_used"
     quota_column = f"{kind}_quota"
@@ -688,8 +1425,8 @@ def _reserve_free_query(*, run_id: str, item_index: int, bucket: str, kind: str)
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,discovery_used,targeted_used,logical_quota,physical_quota) VALUES(?,?,0,10,0,0,10,10)",
-            (run_id, int(item_index)),
+            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,discovery_used,targeted_used,logical_quota,physical_quota) VALUES(?,?,0,10,0,0,10,?)",
+            (run_id, int(item_index), physical_quota),
         )
         row = connection.execute(
             f"SELECT logical_used,logical_quota,physical_used,physical_quota,{used_column},{quota_column} FROM free_query_usage WHERE run_id=? AND item_index=?",
@@ -737,23 +1474,27 @@ def reserve_free_physical_attempt(*, run_id: str, item_index: int, bucket: str, 
     bucket = bucket if bucket in {"discovery", "targeted"} else "discovery"
     provider = str(backend or "ddgs").casefold()
     fingerprint = str(query_fingerprint or "")
-    bucket_limit = 6 if bucket == "discovery" else 4
+    bucket_limit = (6 if bucket == "discovery" else 4) * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
+    physical_limit = 10 * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
     now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,discovery_used,targeted_used,logical_quota,physical_quota) VALUES(?,?,0,10,0,0,10,10)",
-            (run_id, int(item_index)),
+            "INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,discovery_used,targeted_used,logical_quota,physical_quota) VALUES(?,?,0,10,0,0,10,?)",
+            (run_id, int(item_index), physical_limit),
         )
         totals = connection.execute(
             "SELECT COUNT(*),SUM(CASE WHEN bucket=? THEN 1 ELSE 0 END) FROM free_provider_attempts WHERE run_id=? AND item_index=?",
             (bucket, run_id, int(item_index)),
         ).fetchone()
-        counters = connection.execute(f"SELECT physical_used,{bucket}_physical_used FROM free_query_usage WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
+        counters = connection.execute(f"SELECT physical_used,{bucket}_physical_used,physical_quota FROM free_query_usage WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
+        physical_limit = min(physical_limit, int(counters[2] or physical_limit))
+        if int(counters[2] or physical_limit) <= 10:
+            bucket_limit = min(bucket_limit, 6 if bucket == "discovery" else 4)
         total_used = max(int(totals[0] or 0), int(counters[0] or 0))
         bucket_used = max(int(totals[1] or 0), int(counters[1] or 0))
-        if total_used >= 10 or bucket_used >= bucket_limit:
-            reason = "physical_total_exhausted" if total_used >= 10 else "physical_bucket_exhausted"
+        if total_used >= physical_limit or bucket_used >= bucket_limit:
+            reason = "physical_total_exhausted" if total_used >= physical_limit else "physical_bucket_exhausted"
             block_id = hashlib.sha256(f"{run_id}\0{int(item_index)}\0ddgs\0{bucket}\0physical".encode()).hexdigest()
             block = connection.execute(
                 "INSERT OR IGNORE INTO provider_budget_blocks(run_id,item_index,provider,bucket,block_kind,created_at,block_id,backend) VALUES(?,?,?,?,?,?,?,?)",
@@ -765,7 +1506,7 @@ def reserve_free_physical_attempt(*, run_id: str, item_index: int, bucket: str, 
                     (now, bucket, run_id, int(item_index)),
                 )
             connection.commit()
-            return {"accepted": False, "reason": reason, "bucket": bucket, "attempt_id": "", "attempt_ordinal": 0, "logical_used": 0, "logical_limit": 10, "physical_used": total_used, "physical_limit": 10}
+            return {"accepted": False, "reason": reason, "bucket": bucket, "attempt_id": "", "attempt_ordinal": 0, "logical_used": 0, "logical_limit": 10, "physical_used": total_used, "physical_limit": physical_limit}
         ordinal = int(connection.execute(
             "SELECT COALESCE(MAX(attempt_ordinal),0)+1 FROM free_provider_attempts WHERE run_id=? AND item_index=? AND bucket=? AND provider=? AND query_fingerprint=?",
             (run_id, int(item_index), bucket, provider, fingerprint),
@@ -789,12 +1530,17 @@ def free_search_capacity(*, run_id: str, item_index: int, bucket: str) -> dict[s
     logical_column = f"{bucket}_logical_used"
     physical_column = f"{bucket}_physical_used"
     bucket_limit = 6 if bucket == "discovery" else 4
+    physical_bucket_limit = bucket_limit * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
+    physical_total_limit = 10 * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
     with closing(_connect()) as connection:
         row = connection.execute(f"SELECT logical_used,logical_quota,physical_used,physical_quota,{logical_column},{physical_column} FROM free_query_usage WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
     if not row:
-        return {"available": True, "bucket": bucket, "logical_used": 0, "logical_limit": bucket_limit, "physical_used": 0, "physical_limit": bucket_limit}
-    available = int(row[0]) < int(row[1]) and int(row[2]) < int(row[3]) and int(row[4]) < bucket_limit and int(row[5]) < bucket_limit
-    return {"available": available, "bucket": bucket, "logical_used": int(row[0]), "logical_limit": int(row[1]), "physical_used": int(row[2]), "physical_limit": int(row[3])}
+        return {"available": True, "bucket": bucket, "logical_used": 0, "logical_limit": bucket_limit, "physical_used": 0, "physical_limit": physical_total_limit}
+    physical_total_limit = min(physical_total_limit, int(row[3] or physical_total_limit))
+    if int(row[3] or physical_total_limit) <= 10:
+        physical_bucket_limit = min(physical_bucket_limit, bucket_limit)
+    available = int(row[0]) < int(row[1]) and int(row[2]) < physical_total_limit and int(row[4]) < bucket_limit and int(row[5]) < physical_bucket_limit
+    return {"available": available, "bucket": bucket, "logical_used": int(row[0]), "logical_limit": int(row[1]), "physical_used": int(row[2]), "physical_limit": physical_total_limit}
 
 
 def complete_free_physical_attempt(*, attempt_id: str, success: bool, error_class: str | None = None, run_id: str | None = None) -> None:
@@ -832,7 +1578,7 @@ def reserve_free_search_query(*, run_id: str, item_index: int, limit: int = 10, 
     limit = max(1, min(10, int(limit)))
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,logical_quota,physical_quota) VALUES(?,?,0,?,?,10)", (run_id, int(item_index), limit, limit))
+        connection.execute("INSERT OR IGNORE INTO free_query_usage(run_id,item_index,used,quota,logical_quota,physical_quota) VALUES(?,?,0,?,?,?)", (run_id, int(item_index), limit, limit, 10 * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))))
         cursor = connection.execute("UPDATE free_query_usage SET used=used+1,logical_used=logical_used+1 WHERE run_id=? AND item_index=? AND logical_used<logical_quota", (run_id, int(item_index)))
         connection.commit()
     return cursor.rowcount == 1
@@ -855,7 +1601,12 @@ def wait_source_probe(*, run_id: str, host: str, timeout_seconds: float = 30.0) 
 
 def initialize_schema(path: Path | None = None) -> None:
     """Create the canonical run schema at an explicitly selected path."""
-    _initialize_schema_once(Path(path) if path is not None else config.PROGRESS_DB_FILE)
+    target = Path(path if path is not None else config.PROGRESS_DB_FILE).resolve()
+    identity = _db_identity(target)
+    if identity is not None:
+        with _GENERATION_VALIDATION_CACHE_LOCK:
+            _GENERATION_VALIDATION_CACHE.pop(identity, None)
+    _initialize_schema_once(target)
 
 
 def seal_checkpoint_for_handoff(
@@ -1122,7 +1873,14 @@ def seed_recovered_run(*, path: Path, run_id: str, input_hash: str, run_signatur
                 (run_id, input_hash, run_signature, now, str(context.get("phase", "FREE")), json.dumps(_json_safe(context), ensure_ascii=False), json.dumps(_json_safe(budgets), ensure_ascii=False), 1, json.dumps({"phase": context.get("phase", "FREE"), "counters": {}}, ensure_ascii=False)),
             )
             for item in normalized_items:
-                snapshot_payload = (input_snapshots or {}).get(int(item["item_index"]), item)
+                snapshot_payload = dict((input_snapshots or {}).get(int(item["item_index"]), item))
+                snapshot_payload.setdefault("item_index", int(item["item_index"]))
+                snapshot_payload.setdefault("source_record_id", str(item["source_record_id"]))
+                snapshot_payload.setdefault("_snapshot_schema_version", int(getattr(config, "INPUT_SNAPSHOT_SCHEMA_VERSION", 1)))
+                content_payload = dict(snapshot_payload)
+                content_payload.pop("_snapshot_content_sha256", None)
+                content_json = json.dumps(_json_safe(content_payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                snapshot_payload["_snapshot_content_sha256"] = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
                 snapshot_json = json.dumps(_json_safe(snapshot_payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 snapshot_sha256 = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
                 connection.execute("INSERT OR IGNORE INTO immutable_input_snapshots(run_id,item_index,snapshot_sha256,snapshot_json) VALUES(?,?,?,?)", (run_id, int(item["item_index"]), snapshot_sha256, snapshot_json))
@@ -1252,7 +2010,8 @@ def save_run_context(
 
 
 def initialize_run(*, run_id: str, input_hash: str, run_signature: str, context: dict[str, Any],
-                   budgets: dict[str, int], items: list[dict[str, Any]]) -> None:
+                   budgets: dict[str, int], items: list[dict[str, Any]],
+                   input_snapshots: dict[int, dict[str, Any]] | None = None) -> None:
     """Create the durable run and item state without deriving another run ID."""
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
@@ -1272,7 +2031,15 @@ def initialize_run(*, run_id: str, input_hash: str, run_signature: str, context:
             (run_id, str(context.get("phase", "FREE")), timestamp),
         )
         for item in items:
-            snapshot_json = json.dumps(_json_safe(item), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            snapshot_payload = dict((input_snapshots or {}).get(int(item["item_index"]), item))
+            snapshot_payload.setdefault("item_index", int(item["item_index"]))
+            snapshot_payload.setdefault("source_record_id", str(item["source_record_id"]))
+            snapshot_payload.setdefault("_snapshot_schema_version", int(getattr(config, "INPUT_SNAPSHOT_SCHEMA_VERSION", 1)))
+            content_payload = dict(snapshot_payload)
+            content_payload.pop("_snapshot_content_sha256", None)
+            content_json = json.dumps(_json_safe(content_payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            snapshot_payload["_snapshot_content_sha256"] = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+            snapshot_json = json.dumps(_json_safe(snapshot_payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             snapshot_sha256 = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
             existing_snapshot = connection.execute("SELECT snapshot_sha256 FROM immutable_input_snapshots WHERE run_id=? AND item_index=?", (run_id, int(item["item_index"]))).fetchone()
             if existing_snapshot and str(existing_snapshot[0]) != snapshot_sha256:
@@ -1296,6 +2063,24 @@ def load_run_items(run_id: str) -> list[dict[str, Any]]:
         rows = connection.execute("SELECT item_index,source_record_id,free_state,paid_required,paid_state,free_attempts,paid_attempts,last_error,payload_sha256,quarantine_state,quarantine_status,publication_blockers FROM run_items WHERE run_id=? ORDER BY item_index", (run_id,)).fetchall()
     fields = ("item_index", "source_record_id", "free_state", "paid_required", "paid_state", "free_attempts", "paid_attempts", "last_error", "payload_sha256", "quarantine_state", "quarantine_status", "publication_blockers")
     return [dict(zip(fields, row)) for row in rows]
+
+
+def load_input_snapshots(run_id: str) -> dict[int, dict[str, Any]]:
+    """Load immutable input rows for recovery/reporting after a RAM reset."""
+    with closing(_connect()) as connection:
+        rows = connection.execute(
+            "SELECT item_index,snapshot_json FROM immutable_input_snapshots WHERE run_id=? ORDER BY item_index",
+            (str(run_id),),
+        ).fetchall()
+    result: dict[int, dict[str, Any]] = {}
+    for item_index, payload in rows:
+        try:
+            value = json.loads(str(payload))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise EvidenceInvariant("immutable input snapshot is not valid JSON") from exc
+        if isinstance(value, dict):
+            result[int(item_index)] = value
+    return result
 
 
 def immutable_input_snapshot_sha256(run_id: str, item_index: int) -> str:
@@ -1322,13 +2107,58 @@ def claim_item(*, run_id: str, item_index: int, phase: str) -> bool:
 
 
 def recover_interrupted_items(run_id: str) -> dict[str, int]:
-    """Recover only scheduler state; payloads never make an item runnable."""
+    """Recover interrupted work only when its durable transport marker permits it."""
+    recovery_receipts_before = len(provider_call_recovery_receipts(run_id))
+    reconcile_unknown_provider_calls(run_id)
+    recovery_receipts_after = len(provider_call_recovery_receipts(run_id))
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
         free_reset = connection.execute("UPDATE run_items SET free_state='PENDING' WHERE run_id=? AND free_state='RUNNING'", (run_id,)).rowcount
-        paid_unknown = connection.execute("UPDATE run_items SET paid_state='UNKNOWN' WHERE run_id=? AND paid_state IN ('RUNNING','RESERVED')", (run_id,)).rowcount
+        paid_rows = connection.execute(
+            "SELECT item_index FROM run_items WHERE run_id=? AND paid_state IN ('RUNNING','RESERVED')",
+            (run_id,),
+        ).fetchall()
+        paid_reset = 0
+        for (item_index,) in paid_rows:
+            unresolved = connection.execute(
+                "SELECT 1 FROM provider_calls WHERE run_id=? AND item_index=? AND state='UNKNOWN' LIMIT 1",
+                (run_id, int(item_index)),
+            ).fetchone()
+            unknown_work = connection.execute(
+                "SELECT 1 FROM provider_work_items WHERE run_id=? AND item_index=? AND state='UNKNOWN' LIMIT 1",
+                (run_id, int(item_index)),
+            ).fetchone()
+            if unresolved or unknown_work:
+                connection.execute(
+                    "UPDATE run_items SET paid_state='UNKNOWN',last_error='provider_call_reconciled_unknown' WHERE run_id=? AND item_index=? AND paid_state IN ('RUNNING','RESERVED')",
+                    (run_id, int(item_index)),
+                )
+            else:
+                paid_reset += connection.execute(
+                    "UPDATE run_items SET paid_state='PENDING',last_error='recovered_interrupted_paid_work' WHERE run_id=? AND item_index=? AND paid_state IN ('RUNNING','RESERVED')",
+                    (run_id, int(item_index)),
+                ).rowcount
+        paid_unknown = int(connection.execute(
+            "SELECT COUNT(*) FROM run_items WHERE run_id=? AND paid_required=1 AND paid_state='UNKNOWN'",
+            (run_id,),
+        ).fetchone()[0])
         connection.commit()
-    return {"free_reset": free_reset, "paid_unknown": paid_unknown}
+    return {
+        "free_reset": free_reset,
+        "paid_reset": paid_reset,
+        "paid_unknown": paid_unknown,
+        "pre_http_calls_recovered": recovery_receipts_after - recovery_receipts_before,
+    }
+
+
+def provider_call_recovery_receipts(run_id: str) -> list[dict[str, Any]]:
+    with closing(_connect()) as connection:
+        rows = connection.execute(
+            "SELECT call_id,provider,item_index,phase,operation,request_fingerprint,flight_fingerprint,reason,http_started_at,attempt_ordinal,recovered_at FROM provider_call_recovery_receipts WHERE run_id=? ORDER BY recovered_at,call_id",
+            (str(run_id),),
+        ).fetchall()
+    fields = ("call_id", "provider", "item_index", "phase", "operation", "request_fingerprint", "flight_fingerprint", "reason", "http_started_at", "attempt_ordinal", "recovered_at")
+    return [dict(zip(fields, row)) for row in rows]
 
 
 def validate_run_invariants(run_id: str, *, expected_count: int, require_payloads: bool = False) -> dict[str, int]:
@@ -1614,7 +2444,7 @@ def derive_provider_budgets(run_id: str) -> dict[str, dict[str, object]]:
     return provider_budgets
 
 
-def canonical_scheduler_receipt_from_connection(connection: sqlite3.Connection, run_id: str) -> dict[str, Any]:
+def _canonical_scheduler_receipt_from_connection_impl(connection: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     """Derive the stable scheduler receipt from one caller-owned SQLite connection."""
     if connection is not None:
         total = int(connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=?", (run_id,)).fetchone()[0])
@@ -1764,6 +2594,18 @@ def canonical_scheduler_receipt_from_connection(connection: sqlite3.Connection, 
     }
 
 
+def canonical_scheduler_receipt_from_connection(connection: sqlite3.Connection, run_id: str) -> dict[str, Any]:
+    """Read all scheduler receipt fields from one SQLite snapshot."""
+    if connection.in_transaction:
+        return _canonical_scheduler_receipt_from_connection_impl(connection, run_id)
+    connection.execute("BEGIN")
+    try:
+        return _canonical_scheduler_receipt_from_connection_impl(connection, run_id)
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+
+
 def canonical_scheduler_receipt(run_id: str) -> dict[str, Any]:
     """Derive the stable scheduler receipt solely from durable scheduler rows."""
     with closing(_connect()) as connection:
@@ -1778,6 +2620,131 @@ def derive_telemetry(run_id: str) -> dict[str, Any]:
     return canonical_scheduler_receipt(run_id)
 
 
+def record_operational_metric(run_id: str, metric: str, amount: int = 1) -> None:
+    run_id = str(run_id or "").strip()
+    metric = str(metric or "").strip()
+    if not run_id or not metric or not int(amount):
+        return
+    record_operational_metrics_batch(run_id, {metric: int(amount)})
+
+
+def record_operational_metrics_batch(
+    run_id: str, metrics: dict[str, int], *, timeout_seconds: float = 30.0,
+) -> None:
+    run_id = str(run_id or "").strip()
+    values = {
+        str(metric).strip(): int(amount)
+        for metric, amount in metrics.items()
+        if str(metric).strip() and int(amount)
+    }
+    if not run_id or not values:
+        return
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    target = Path(config.PROGRESS_DB_FILE).resolve()
+    _initialize_schema_once(target)
+    with closing(_open_connection(target, timeout_seconds=timeout_seconds)) as connection:
+        connection.executemany(
+            "INSERT INTO operational_metrics(run_id,metric,value,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(run_id,metric) DO UPDATE SET value=value+excluded.value,updated_at=excluded.updated_at",
+            [(run_id, metric, amount, now) for metric, amount in values.items()],
+        )
+        connection.commit()
+
+
+def record_operational_unique(run_id: str, metric: str, key_sha256: str) -> None:
+    run_id = str(run_id or "").strip()
+    metric = str(metric or "").strip()
+    key_sha256 = str(key_sha256 or "").strip().casefold()
+    if not run_id or not metric or not _is_sha256(key_sha256):
+        return
+    target = Path(config.PROGRESS_DB_FILE).resolve()
+    _initialize_schema_once(target)
+    with closing(_open_connection(target)) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO operational_unique(run_id,metric,key_sha256,created_at) VALUES(?,?,?,?)",
+            (run_id, metric, key_sha256, datetime.now(timezone.utc).isoformat(timespec="microseconds")),
+        )
+        connection.commit()
+
+
+def operational_metrics_snapshot(run_id: str) -> dict[str, Any]:
+    """Freeze non-ledger operational counters from durable rows, not RAM."""
+    try:
+        runtime.flush_operational_metrics()
+    except Exception:
+        pass
+    with closing(_connect()) as connection:
+        discovery = int(connection.execute("SELECT COUNT(*) FROM discovery_attempts WHERE run_id=?", (run_id,)).fetchone()[0])
+        provider_calls = int(connection.execute("SELECT COUNT(*) FROM provider_calls WHERE run_id=?", (run_id,)).fetchone()[0])
+        free_attempts = int(connection.execute("SELECT COUNT(*) FROM free_provider_attempts WHERE run_id=?", (run_id,)).fetchone()[0])
+        query_flights = int(connection.execute("SELECT COUNT(*) FROM provider_query_flights WHERE run_id=?", (run_id,)).fetchone()[0])
+        failure_events = connection.execute(
+            "SELECT provider,failure_class,failure_group_key,COUNT(*) FROM provider_failure_events "
+            "WHERE run_id=? GROUP BY provider,failure_class,failure_group_key ORDER BY provider,failure_class,failure_group_key",
+            (run_id,),
+        ).fetchall()
+        metric_rows = connection.execute(
+            "SELECT metric,value FROM operational_metrics WHERE run_id=? ORDER BY metric",
+            (run_id,),
+        ).fetchall()
+        unique_rows = connection.execute(
+            "SELECT metric,COUNT(*) FROM operational_unique WHERE run_id=? GROUP BY metric ORDER BY metric",
+            (run_id,),
+        ).fetchall()
+    counters = {str(metric): int(value) for metric, value in metric_rows}
+    unique_counts = {str(metric): int(value) for metric, value in unique_rows}
+    expected_fields = {
+        "api.brightdata.requests", "api.brightdata.queries", "api.brightdata.retries",
+        "api.brightdata.cooldown_retries", "api.brightdata.budget_blocked",
+        "api.linkedin_company.requests", "api.linkedin_company.matches",
+        "api.linkedin_company.budget_blocked", "api.llm_arbiter.requests",
+        "api.llm_arbiter.budget_blocked", "api.llm_arbiter.total_tokens",
+        "api.google_places.requests", "http.crawler.requests",
+        "http.crawler.budget_blocked", "search.provider_failures",
+        "search.serp.raw_result_count", "search.serp.resolved_result_count",
+        "search.serp.unresolved_redirect_count", "search.serp.candidate_accepted",
+        "recovery.static_attempts", "recovery.static_successes",
+        "recovery.static_skips", "recovery.host_variant_attempts",
+        "recovery.host_variant_successes", "recovery.browser_attempts",
+        "recovery.browser_successes", "recovery.browser.root.attempts",
+        "recovery.browser.root.successes", "recovery.browser.root.errors",
+        "recovery.browser.identity.attempts", "recovery.browser.identity.successes",
+        "recovery.browser.identity.errors", "recovery.browser.contact.attempts",
+        "recovery.browser.contact.successes", "recovery.browser.contact.errors",
+        "recovery.pdf_attempts", "recovery.pdf_text_successes",
+        "snapshot.entries_loaded", "contact_policy.email.allowed",
+        "contact_policy.email.suppressed", "contact_policy.phone.allowed",
+        "contact_policy.phone.suppressed",
+    } | {
+        "recovery.browser_recovered_companies", "recovery.browser_publication_companies",
+        "recovery.security_interstitial_hosts",
+    }
+    measured_fields = sorted({
+        "discovery_event_count", "provider_call_count", "free_physical_attempt_count",
+        "provider_query_flight_count", *counters.keys(), *unique_counts.keys(),
+    })
+    unmeasured_fields = sorted(expected_fields.difference(counters).difference(unique_counts))
+    return {
+        "schema_version": 2,
+        "run_id": str(run_id),
+        "measured": bool(measured_fields),
+        "discovery_event_count": discovery,
+        "provider_call_count": provider_calls,
+        "free_physical_attempt_count": free_attempts,
+        "provider_query_flight_count": query_flights,
+        "provider_failure_groups": [
+            {"provider": str(provider), "failure_class": str(failure_class), "failure_group_key": str(group_key), "count": int(count)}
+            for provider, failure_class, group_key, count in failure_events
+        ],
+        "counters": counters,
+        "runtime_counters": counters,
+        "unique_counts": unique_counts,
+        "measured_fields": measured_fields,
+        "unmeasured_fields": unmeasured_fields,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+    }
+
+
 def initialize_run_items(run_id: str, items: list[dict[str, Any]]) -> None:
     normalized = [dict(item, item_index=index, free_state="DONE", paid_required=True, paid_state="RUNNING") for index, item in enumerate(items)]
     initialize_run(run_id=run_id, input_hash="test", run_signature="test", context={"phase": "PAID"}, budgets={"brightdata": 20}, items=normalized)
@@ -1790,6 +2757,1343 @@ def ensure_provider_budget(run_id: str, provider: str, *, configured_limit: int,
             raise ResumeInvariant(f"provider budget changed during run: {provider}")
         connection.execute("INSERT OR IGNORE INTO provider_usage(run_id,provider,configured_limit,effective_limit) VALUES(?,?,?,?)", (run_id, provider, int(configured_limit), int(effective_limit)))
         connection.commit()
+
+
+_PROVIDER_WORK_TERMINAL_STATES = frozenset({
+    "DONE", "FAILED", "NOT_REQUIRED", "BLOCKED_BUDGET", "UNKNOWN",
+})
+_PROVIDER_WORK_STATES = frozenset({
+    "READY", "ALLOCATED", "WAITING_DEPENDENCY", *_PROVIDER_WORK_TERMINAL_STATES,
+})
+
+
+def provider_work_job_fingerprint(
+    *, run_id: str, item_index: int, provider: str, operation: str,
+    request_fingerprint: str,
+) -> str:
+    """Return the immutable logical identity of one concrete provider job."""
+    values = (
+        str(run_id), int(item_index), str(provider), str(operation),
+        str(request_fingerprint),
+    )
+    return hashlib.sha256("\0".join(map(str, values)).encode("utf-8")).hexdigest()
+
+
+def _provider_work_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    fields = (
+        "run_id", "item_index", "source_record_id", "provider", "operation",
+        "request_fingerprint", "query_fingerprint", "plan_version", "need_class",
+        "state", "terminal_reason", "call_id", "execution_generation",
+        "dependency_job_fingerprint", "job_fingerprint", "created_at", "updated_at",
+    )
+    value = dict(zip(fields, row))
+    value["item_index"] = int(value["item_index"])
+    value["plan_version"] = int(value["plan_version"])
+    value["execution_generation"] = int(value["execution_generation"])
+    return value
+
+
+def ensure_provider_work_item(
+    *, run_id: str, item_index: int, source_record_id: str, provider: str,
+    operation: str, request_fingerprint: str, query_fingerprint: str = "",
+    plan_version: int = 1, need_class: str = "website", state: str = "READY",
+    dependency_job_fingerprint: str = "", terminal_reason: str = "",
+) -> dict[str, Any]:
+    """Insert one concrete job, preserving terminal history on replay."""
+    provider = str(provider)
+    operation = str(operation or "").strip()
+    request_fingerprint = str(request_fingerprint or "").strip()
+    source_record_id = str(source_record_id or "").strip()
+    state = str(state or "READY").upper()
+    if provider not in CANONICAL_PROVIDERS:
+        raise LedgerInvariant(f"unknown provider work item: {provider}")
+    if not operation or not request_fingerprint or not source_record_id:
+        raise LedgerInvariant("provider work item requires operation, request fingerprint, and source")
+    if state not in _PROVIDER_WORK_STATES:
+        raise LedgerInvariant(f"invalid provider work state: {state}")
+    if state == "WAITING_DEPENDENCY" and not _is_sha256(str(dependency_job_fingerprint or "")):
+        raise LedgerInvariant("WAITING_DEPENDENCY requires an exact dependency job fingerprint")
+    job_fingerprint = provider_work_job_fingerprint(
+        run_id=str(run_id), item_index=int(item_index), provider=provider,
+        operation=operation, request_fingerprint=request_fingerprint,
+    )
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT run_id,item_index,source_record_id,provider,operation,request_fingerprint,query_fingerprint,plan_version,need_class,state,terminal_reason,call_id,execution_generation,dependency_job_fingerprint,job_fingerprint,created_at,updated_at "
+            "FROM provider_work_items WHERE run_id=? AND job_fingerprint=?",
+            (str(run_id), job_fingerprint),
+        ).fetchone()
+        if existing:
+            value = _provider_work_row(existing)
+            if (
+                value["source_record_id"] != source_record_id
+                or value["query_fingerprint"] != str(query_fingerprint or "")
+                or value["plan_version"] != int(plan_version)
+                or value["need_class"] != str(need_class)
+            ):
+                connection.rollback()
+                raise ResumeInvariant("provider work item identity drift")
+            connection.commit()
+            return value
+        connection.execute(
+            "INSERT INTO provider_work_items(run_id,item_index,source_record_id,provider,operation,request_fingerprint,query_fingerprint,plan_version,need_class,state,terminal_reason,call_id,execution_generation,dependency_job_fingerprint,job_fingerprint,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(run_id), int(item_index), source_record_id, provider, operation,
+                request_fingerprint, str(query_fingerprint or ""), int(plan_version),
+                str(need_class), state, str(terminal_reason or ""), "", 0,
+                str(dependency_job_fingerprint or ""), job_fingerprint, now, now,
+            ),
+        )
+        connection.commit()
+    return {
+        "run_id": str(run_id), "item_index": int(item_index),
+        "source_record_id": source_record_id, "provider": provider,
+        "operation": operation, "request_fingerprint": request_fingerprint,
+        "query_fingerprint": str(query_fingerprint or ""),
+        "plan_version": int(plan_version), "need_class": str(need_class),
+        "state": state, "terminal_reason": str(terminal_reason or ""), "call_id": "",
+        "execution_generation": 0,
+        "dependency_job_fingerprint": str(dependency_job_fingerprint or ""),
+        "job_fingerprint": job_fingerprint, "created_at": now, "updated_at": now,
+    }
+
+
+def provider_work_item_for_request(
+    *, run_id: str, item_index: int, provider: str, operation: str,
+    request_fingerprint: str,
+) -> dict[str, Any] | None:
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT run_id,item_index,source_record_id,provider,operation,request_fingerprint,query_fingerprint,plan_version,need_class,state,terminal_reason,call_id,execution_generation,dependency_job_fingerprint,job_fingerprint,created_at,updated_at "
+            "FROM provider_work_items WHERE run_id=? AND item_index=? AND provider=? AND operation=? AND request_fingerprint=?",
+            (str(run_id), int(item_index), str(provider), str(operation), str(request_fingerprint)),
+        ).fetchone()
+    return _provider_work_row(row) if row else None
+
+
+def provider_work_items_exist(run_id: str, provider: str) -> bool:
+    with closing(_connect()) as connection:
+        return connection.execute(
+            "SELECT 1 FROM provider_work_items WHERE run_id=? AND provider=? LIMIT 1",
+            (str(run_id), str(provider)),
+        ).fetchone() is not None
+
+
+def load_provider_work_items(
+    run_id: str, *, provider: str | None = None, item_index: int | None = None,
+    states: set[str] | tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    query = (
+        "SELECT run_id,item_index,source_record_id,provider,operation,request_fingerprint,query_fingerprint,plan_version,need_class,state,terminal_reason,call_id,execution_generation,dependency_job_fingerprint,job_fingerprint,created_at,updated_at "
+        "FROM provider_work_items WHERE run_id=?"
+    )
+    params: list[Any] = [str(run_id)]
+    if provider is not None:
+        query += " AND provider=?"; params.append(str(provider))
+    if item_index is not None:
+        query += " AND item_index=?"; params.append(int(item_index))
+    if states:
+        normalized = tuple(sorted({str(value).upper() for value in states}))
+        query += " AND state IN (" + ",".join("?" for _ in normalized) + ")"
+        params.extend(normalized)
+    query += " ORDER BY item_index,provider,created_at,job_fingerprint"
+    with closing(_connect()) as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return [_provider_work_row(row) for row in rows]
+
+
+def ready_provider_dispatch_candidates(
+    run_id: str, provider: str, *, item_indexes: set[int] | list[int] | tuple[int, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Return at most one READY concrete job per company for one round.
+
+    Jobs repeatedly selected without producing a physical dispatch yield to
+    untried jobs for the same item, while remaining eligible for later retry.
+    """
+    rows = load_provider_work_items(run_id, provider=provider, states={"READY"})
+    allowed = {int(value) for value in item_indexes} if item_indexes is not None else None
+    priority = {"website": 0, "website_discovery": 0, "identity": 1, "contact": 2}
+    no_dispatch_counts: dict[str, int] = {}
+    with closing(_connect()) as connection:
+        no_dispatch_counts = {
+            str(row[0]): int(row[1])
+            for row in connection.execute(
+                "SELECT job_fingerprint,COUNT(*) FROM provider_dispatch_allocations "
+                "WHERE run_id=? AND provider=? AND state='RELEASED' "
+                "AND released_reason='no_physical_dispatch' "
+                "GROUP BY job_fingerprint",
+                (str(run_id), str(provider)),
+            ).fetchall()
+        }
+    selected: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        if allowed is not None and row["item_index"] not in allowed:
+            continue
+        current = selected.get(row["item_index"])
+        rank = (
+            no_dispatch_counts.get(row["job_fingerprint"], 0),
+            priority.get(row["need_class"], 99),
+            row["created_at"],
+            row["job_fingerprint"],
+        )
+        if current is None or rank < (
+            no_dispatch_counts.get(current["job_fingerprint"], 0),
+            priority.get(current["need_class"], 99),
+            current["created_at"],
+            current["job_fingerprint"],
+        ):
+            selected[row["item_index"]] = row
+    return [
+        {
+            "item_index": row["item_index"], "source_record_id": row["source_record_id"],
+            "need_class": row["need_class"], "job_fingerprint": row["job_fingerprint"],
+            "operation": row["operation"], "request_fingerprint": row["request_fingerprint"],
+            "query_fingerprint": row["query_fingerprint"], "plan_version": row["plan_version"],
+        }
+        for row in sorted(selected.values(), key=lambda value: (priority.get(value["need_class"], 99), value["item_index"]))
+    ]
+
+
+def pending_provider_work(run_id: str, item_index: int | None = None) -> list[dict[str, Any]]:
+    return load_provider_work_items(
+        run_id, item_index=item_index,
+        states={"READY", "ALLOCATED", "WAITING_DEPENDENCY"},
+    )
+
+
+def pending_provider_names(run_id: str, item_index: int) -> list[str]:
+    return sorted({row["provider"] for row in pending_provider_work(run_id, item_index)})
+
+
+def resolve_provider_work_dependencies(run_id: str) -> dict[str, Any]:
+    """Release only dependents whose exact same-item prerequisite is terminal-successful."""
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            "SELECT job_fingerprint,item_index,state,dependency_job_fingerprint "
+            "FROM provider_work_items WHERE run_id=?",
+            (str(run_id),),
+        ).fetchall()
+        by_fingerprint = {str(row[0]): row for row in rows}
+        waiting = {str(row[0]): row for row in rows if str(row[2]) == "WAITING_DEPENDENCY"}
+        missing: list[dict[str, Any]] = []
+        released: list[str] = []
+        edges: dict[str, str] = {}
+        for fingerprint, row in waiting.items():
+            dependency = str(row[3] or "")
+            parent = by_fingerprint.get(dependency)
+            if not _is_sha256(dependency) or parent is None or int(parent[1]) != int(row[1]):
+                missing.append({"job_fingerprint": fingerprint, "dependency_job_fingerprint": dependency})
+                continue
+            edges[fingerprint] = dependency
+            if str(parent[2]) in {"DONE", "NOT_REQUIRED"}:
+                connection.execute(
+                    "UPDATE provider_work_items SET state='READY',terminal_reason=?,updated_at=? "
+                    "WHERE run_id=? AND job_fingerprint=? AND state='WAITING_DEPENDENCY'",
+                    (f"dependency_satisfied:{dependency}", now, str(run_id), fingerprint),
+                )
+                released.append(fingerprint)
+        cycles: list[list[str]] = []
+        finished: set[str] = set()
+        for start in sorted(waiting):
+            chain: list[str] = []
+            positions: dict[str, int] = {}
+            current = start
+            while current in waiting and current not in finished:
+                if current in positions:
+                    cycles.append(chain[positions[current]:])
+                    break
+                positions[current] = len(chain)
+                chain.append(current)
+                next_job = edges.get(current)
+                if not next_job:
+                    break
+                current = next_job
+            finished.update(chain)
+        connection.commit()
+    unique_cycles = sorted({tuple(sorted(cycle)) for cycle in cycles})
+    return {
+        "released": sorted(released),
+        "missing": sorted(missing, key=lambda row: row["job_fingerprint"]),
+        "cycles": [list(cycle) for cycle in unique_cycles],
+        "waiting": sorted(set(waiting) - set(released)),
+    }
+
+
+def mark_item_paid_pending_for_work(*, run_id: str, item_index: int) -> list[str]:
+    """Reopen a paid item when newly materialized durable jobs remain runnable."""
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        item = connection.execute(
+            "SELECT paid_required,paid_state FROM run_items WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if not item or int(item[0]) != 1:
+            connection.commit()
+            return []
+        if str(item[1]) in {"UNKNOWN", "BLOCKED_BUDGET", "NOT_REQUIRED"}:
+            connection.commit()
+            return []
+        if connection.execute(
+            "SELECT 1 FROM provider_work_items WHERE run_id=? AND item_index=? AND state='UNKNOWN' LIMIT 1",
+            (str(run_id), int(item_index)),
+        ).fetchone():
+            connection.commit()
+            return []
+        providers = [
+            str(row[0]) for row in connection.execute(
+                "SELECT DISTINCT provider FROM provider_work_items WHERE run_id=? AND item_index=? "
+                "AND state IN ('READY','ALLOCATED','WAITING_DEPENDENCY') ORDER BY provider",
+                (str(run_id), int(item_index)),
+            ).fetchall()
+        ]
+        if not providers:
+            connection.commit()
+            return []
+        result = connection.execute(
+            "SELECT payload FROM results WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        try:
+            payload = json.loads(str(result[0])) if result else {}
+        except (TypeError, json.JSONDecodeError) as exc:
+            connection.rollback()
+            raise EvidenceInvariant("paid pending-work payload is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            connection.rollback()
+            raise EvidenceInvariant("paid pending-work payload is not an object")
+        payload["paid_state"] = "PENDING"
+        payload["dispatch_pending_providers"] = providers
+        safe_payload = json.dumps(_json_safe(redaction.sanitize(payload)), ensure_ascii=False, separators=(",", ":"))
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        connection.execute(
+            "UPDATE run_items SET paid_state='PENDING',last_error='',payload_sha256=? "
+            "WHERE run_id=? AND item_index=? AND paid_required=1 AND paid_state=?",
+            (hashlib.sha256(safe_payload.encode("utf-8")).hexdigest(), str(run_id), int(item_index), str(item[1])),
+        )
+        connection.execute(
+            "UPDATE results SET payload=? WHERE run_id=? AND item_index=?",
+            (safe_payload, str(run_id), int(item_index)),
+        )
+        connection.execute("UPDATE runs SET updated_at=? WHERE run_id=?", (now, str(run_id)))
+        connection.commit()
+        return providers
+
+
+def reconcile_paid_item_state_after_work_materialization(*, run_id: str, item_index: int) -> dict[str, Any] | None:
+    """Clear stale PENDING only when durable work and the latest attempt are terminal."""
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        item = connection.execute(
+            "SELECT paid_required,paid_state,paid_attempts FROM run_items WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if not item or int(item[0]) != 1 or str(item[1]) != "PENDING":
+            connection.commit()
+            return None
+        work = connection.execute(
+            "SELECT state,provider FROM provider_work_items WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchall()
+        pending = sorted({str(row[1]) for row in work if str(row[0]) in {"READY", "ALLOCATED", "WAITING_DEPENDENCY"}})
+        if pending:
+            connection.commit()
+            return {"paid_state": "PENDING", "dispatch_pending_providers": pending}
+        attempt = connection.execute(
+            "SELECT result FROM paid_attempts WHERE run_id=? AND item_index=? AND phase='PAID' "
+            "ORDER BY attempt_number DESC LIMIT 1",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if not attempt:
+            connection.rollback()
+            raise EvidenceInvariant("terminal provider work has no current paid attempt")
+        if any(str(row[0]) == "UNKNOWN" for row in work):
+            state = "UNKNOWN"
+            if str(attempt[0]) != "UNKNOWN":
+                connection.rollback()
+                raise EvidenceInvariant("UNKNOWN provider work conflicts with the current paid attempt")
+        else:
+            state = {
+                "COMPLETED": "DONE", "NO_CALL_NEEDED": "DONE",
+                "FAILED": "FAILED", "UNKNOWN": "UNKNOWN",
+                "BLOCKED_BUDGET": "BLOCKED_BUDGET",
+            }.get(str(attempt[0]))
+            if not state:
+                connection.rollback()
+                raise EvidenceInvariant("current paid attempt has no terminal state mapping")
+        payload_row = connection.execute(
+            "SELECT payload FROM results WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if not payload_row:
+            connection.rollback()
+            raise EvidenceInvariant("terminal paid item payload is missing")
+        try:
+            payload = json.loads(str(payload_row[0]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            connection.rollback()
+            raise EvidenceInvariant("terminal paid item payload is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            connection.rollback()
+            raise EvidenceInvariant("terminal paid item payload is not an object")
+        payload["paid_state"] = state
+        payload["dispatch_pending_providers"] = []
+        payload["__paid_escalation_complete"] = True
+        safe_payload = json.dumps(_json_safe(redaction.sanitize(payload)), ensure_ascii=False, separators=(",", ":"))
+        payload_hash = hashlib.sha256(safe_payload.encode("utf-8")).hexdigest()
+        connection.execute(
+            "UPDATE results SET payload=? WHERE run_id=? AND item_index=?",
+            (safe_payload, str(run_id), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE run_items SET paid_state=?,last_error='',payload_sha256=? "
+            "WHERE run_id=? AND item_index=? AND paid_state='PENDING'",
+            (state, payload_hash, str(run_id), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE runs SET updated_at=? WHERE run_id=?",
+            (datetime.now(timezone.utc).isoformat(timespec="microseconds"), str(run_id)),
+        )
+        connection.commit()
+    return {"paid_state": state, "dispatch_pending_providers": []}
+
+
+def provider_work_has_unknown(run_id: str, item_index: int) -> bool:
+    return bool(load_provider_work_items(run_id, item_index=item_index, states={"UNKNOWN"}))
+
+
+def transition_provider_work_item(
+    *, run_id: str, job_fingerprint: str, state: str, terminal_reason: str = "",
+    call_id: str = "", execution_generation: int = 0,
+    dependency_job_fingerprint: str | None = None,
+) -> bool:
+    state = str(state).upper()
+    if state not in _PROVIDER_WORK_STATES:
+        raise LedgerInvariant(f"invalid provider work transition: {state}")
+    if state == "WAITING_DEPENDENCY" and not _is_sha256(str(dependency_job_fingerprint or "")):
+        raise LedgerInvariant("WAITING_DEPENDENCY requires an exact dependency job fingerprint")
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT state,call_id,execution_generation FROM provider_work_items WHERE run_id=? AND job_fingerprint=?",
+            (str(run_id), str(job_fingerprint)),
+        ).fetchone()
+        if not row:
+            connection.rollback(); raise LedgerInvariant("provider work item is missing")
+        old = str(row[0])
+        if old in _PROVIDER_WORK_TERMINAL_STATES:
+            if old != state:
+                connection.rollback(); raise StateTransitionInvariant("terminal provider work item was reopened")
+            connection.commit(); return False
+        if state == "READY" and old not in {"WAITING_DEPENDENCY", "ALLOCATED"}:
+            connection.rollback(); raise StateTransitionInvariant("provider work item is not waiting")
+        if state == "ALLOCATED" and old != "READY":
+            connection.rollback(); raise StateTransitionInvariant("provider work item is not READY")
+        connection.execute(
+            "UPDATE provider_work_items SET state=?,terminal_reason=?,call_id=CASE WHEN ?<>'' THEN ? ELSE call_id END,execution_generation=CASE WHEN ? > 0 THEN ? ELSE execution_generation END,dependency_job_fingerprint=CASE WHEN ? IS NOT NULL THEN ? ELSE dependency_job_fingerprint END,updated_at=? WHERE run_id=? AND job_fingerprint=?",
+            (state, str(terminal_reason or ""), str(call_id or ""), str(call_id or ""),
+             int(execution_generation), int(execution_generation), dependency_job_fingerprint,
+             str(dependency_job_fingerprint or ""), now, str(run_id), str(job_fingerprint)),
+        )
+        connection.commit()
+    return True
+
+
+def reconcile_provider_work_item_to_flight(*, run_id: str, job_fingerprint: str) -> bool:
+    """Make a follower's durable work item reflect its exact terminal flight."""
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        work = connection.execute(
+            "SELECT provider,query_fingerprint,state,call_id,execution_generation,item_index,terminal_reason "
+            "FROM provider_work_items WHERE run_id=? AND job_fingerprint=?",
+            (str(run_id), str(job_fingerprint)),
+        ).fetchone()
+        if not work:
+            connection.rollback()
+            raise LedgerInvariant("provider work item is missing during flight reconciliation")
+        provider, query_fingerprint, old_state, old_call_id, old_generation, item_index, old_reason = work
+        if not str(query_fingerprint or ""):
+            connection.commit()
+            return False
+        flight = connection.execute(
+            "SELECT f.state,f.result_json,f.execution_generation,t.state,t.call_ids_json,t.provider_call_id "
+            "FROM provider_query_flights f JOIN provider_query_flight_terminals t "
+            "ON t.run_id=f.run_id AND t.provider=f.provider AND t.query_fingerprint=f.query_fingerprint "
+            "AND t.execution_generation=f.execution_generation "
+            "WHERE f.run_id=? AND f.provider=? AND f.query_fingerprint=?",
+            (str(run_id), str(provider), str(query_fingerprint)),
+        ).fetchone()
+        if not flight:
+            connection.commit()
+            return False
+        state, result_json, generation, terminal_state, call_ids_json, terminal_call_id = flight
+        try:
+            result = json.loads(str(result_json or "{}"))
+            call_ids = json.loads(str(call_ids_json or "[]"))
+        except (TypeError, json.JSONDecodeError) as exc:
+            connection.rollback()
+            raise EvidenceInvariant("terminal provider flight receipt is invalid") from exc
+        state = str(state).upper()
+        if (
+            state not in {"DONE", "FAILED", "UNKNOWN"}
+            or str(terminal_state).upper() != state
+            or not isinstance(result, dict)
+            or str(result.get("result_reason", "")) == "dispatch_not_allocated"
+        ):
+            connection.commit()
+            return False
+        call_id = str(terminal_call_id or next((value for value in call_ids if str(value)), ""))
+        if call_id:
+            call = connection.execute(
+                "SELECT provider FROM provider_calls WHERE run_id=? AND call_id=?",
+                (str(run_id), call_id),
+            ).fetchone()
+            if not call or str(call[0]) != str(provider):
+                connection.rollback()
+                raise EvidenceInvariant("terminal flight call does not match provider work")
+        elif state in {"DONE", "FAILED"}:
+            connection.rollback()
+            raise EvidenceInvariant("terminal provider flight lacks a related call receipt")
+        old_state = str(old_state).upper()
+        flight_reason = str(result.get("result_reason", "") or "")
+        preserved_failure_reason = (
+            flight_reason[:300]
+            if state in {"FAILED", "UNKNOWN"}
+            and flight_reason
+            and flight_reason != "dispatch_not_allocated"
+            else ""
+        )
+        correct_no_call_to_done = False
+        if old_state in _PROVIDER_WORK_TERMINAL_STATES and old_state != state:
+            if old_state == "NOT_REQUIRED" and state == "DONE" and str(old_reason) == "no_call_needed":
+                inherited = connection.execute(
+                    "SELECT 1 FROM provider_query_flight_consumers c "
+                    "JOIN paid_attempt_calls p ON p.run_id=c.run_id AND p.item_index=c.item_index "
+                    "AND p.paid_attempt_id=c.paid_attempt_id AND p.provider=c.provider "
+                    "AND p.provider_call_id=c.provider_call_id AND p.query_fingerprint=c.query_fingerprint "
+                    "AND p.execution_generation=c.execution_generation AND p.relation='INHERITED' "
+                    "JOIN paid_attempts a ON a.run_id=p.run_id AND a.item_index=p.item_index "
+                    "AND a.paid_attempt_id=p.paid_attempt_id "
+                    "WHERE c.run_id=? AND c.item_index=? AND c.provider=? AND c.query_fingerprint=? "
+                    "AND c.execution_generation=? AND c.provider_call_id=? AND c.relation='INHERITED' "
+                    "AND a.phase='PAID' AND a.result IN ('COMPLETED','NO_CALL_NEEDED') "
+                    "AND c.paid_attempt_id=(SELECT paid_attempt_id FROM paid_attempts "
+                    "WHERE run_id=? AND item_index=? AND phase='PAID' ORDER BY attempt_number DESC LIMIT 1) LIMIT 1",
+                    (str(run_id), int(item_index), str(provider), str(query_fingerprint), int(generation), call_id,
+                     str(run_id), int(item_index)),
+                ).fetchone()
+                correct_no_call_to_done = inherited is not None
+            if not correct_no_call_to_done:
+                connection.rollback()
+                raise StateTransitionInvariant("provider work and terminal flight states conflict")
+        if old_call_id and call_id and str(old_call_id) != call_id:
+            connection.rollback()
+            raise EvidenceInvariant("provider work call link conflicts with terminal flight")
+        if int(old_generation or 0) not in {0, int(generation)}:
+            connection.rollback()
+            raise EvidenceInvariant("provider work execution generation conflicts with terminal flight")
+        if old_state in _PROVIDER_WORK_TERMINAL_STATES:
+            if correct_no_call_to_done:
+                connection.execute(
+                    "UPDATE provider_work_items SET state='DONE',terminal_reason='durable_flight_terminal',"
+                    "call_id=?,execution_generation=?,updated_at=? WHERE run_id=? AND job_fingerprint=?",
+                    (call_id, int(generation), now, str(run_id), str(job_fingerprint)),
+                )
+            else:
+                if preserved_failure_reason and old_state == state:
+                    connection.execute(
+                        "UPDATE provider_work_items SET terminal_reason=?,"
+                        "call_id=CASE WHEN call_id='' THEN ? ELSE call_id END,"
+                        "execution_generation=CASE WHEN execution_generation=0 THEN ? ELSE execution_generation END,"
+                        "updated_at=? WHERE run_id=? AND job_fingerprint=?",
+                        (preserved_failure_reason, call_id, int(generation), now, str(run_id), str(job_fingerprint)),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE provider_work_items SET call_id=CASE WHEN call_id='' THEN ? ELSE call_id END,"
+                        "execution_generation=CASE WHEN execution_generation=0 THEN ? ELSE execution_generation END,"
+                        "updated_at=? WHERE run_id=? AND job_fingerprint=?",
+                        (call_id, int(generation), now, str(run_id), str(job_fingerprint)),
+                    )
+        else:
+            terminal_reason = (
+                preserved_failure_reason
+                if preserved_failure_reason
+                else "durable_flight_terminal"
+            )
+            connection.execute(
+                "UPDATE provider_work_items SET state=?,terminal_reason=?,"
+                "call_id=?,execution_generation=?,updated_at=? WHERE run_id=? AND job_fingerprint=?",
+                (state, terminal_reason, call_id, int(generation), now, str(run_id), str(job_fingerprint)),
+            )
+        connection.commit()
+    return True
+
+
+def record_scheduler_progress_snapshot(
+    *, run_id: str, round_ordinal: int, phase: str, kind: str,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    payload = json.dumps(_json_safe(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute(
+            "INSERT INTO scheduler_progress_snapshots(run_id,round_ordinal,phase,kind,snapshot_json,snapshot_sha256,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,round_ordinal,phase,kind) DO UPDATE SET snapshot_json=excluded.snapshot_json,snapshot_sha256=excluded.snapshot_sha256,created_at=excluded.created_at",
+            (str(run_id), int(round_ordinal), str(phase), str(kind), payload, digest, now),
+        )
+        connection.commit()
+    return {"snapshot": _json_safe(snapshot), "sha256": digest, "created_at": now}
+
+
+def record_scheduler_heartbeat(
+    *, run_id: str, round_ordinal: int, phase: str, sequence: int,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    if int(sequence) < 1:
+        raise ValueError("scheduler heartbeat sequence must be positive")
+    payload = json.dumps(_json_safe(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    target = Path(config.PROGRESS_DB_FILE).resolve()
+    _initialize_schema_once(target)
+    connection = sqlite3.connect(target, timeout=5)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT OR IGNORE INTO scheduler_heartbeat_events "
+            "(run_id,round_ordinal,phase,sequence,snapshot_json,snapshot_sha256,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (str(run_id), int(round_ordinal), str(phase), int(sequence), payload, digest,
+             datetime.now(timezone.utc).isoformat(timespec="microseconds")),
+        )
+        event = connection.execute(
+            "SELECT event_id,snapshot_sha256,created_at FROM scheduler_heartbeat_events "
+            "WHERE run_id=? AND round_ordinal=? AND phase=? AND sequence=?",
+            (str(run_id), int(round_ordinal), str(phase), int(sequence)),
+        ).fetchone()
+        if not event or str(event[1]) != digest:
+            raise EvidenceInvariant("scheduler heartbeat sequence conflicts with durable evidence")
+        created_at = str(event[2])
+        connection.execute(
+            "INSERT INTO scheduler_progress_snapshots "
+            "(run_id,round_ordinal,phase,kind,snapshot_json,snapshot_sha256,created_at) "
+            "VALUES(?,?,?,'HEARTBEAT',?,?,?) "
+            "ON CONFLICT(run_id,round_ordinal,phase,kind) DO UPDATE SET "
+            "snapshot_json=excluded.snapshot_json,snapshot_sha256=excluded.snapshot_sha256,created_at=excluded.created_at",
+            (str(run_id), int(round_ordinal), str(phase), payload, digest, created_at),
+        )
+        connection.commit()
+        return {
+            "event_id": int(event[0]), "sequence": int(sequence),
+            "snapshot": _json_safe(snapshot), "sha256": digest, "created_at": created_at,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def scheduler_progress_snapshot(run_id: str) -> dict[str, Any]:
+    with closing(_connect()) as connection:
+        work_rows = connection.execute(
+            "SELECT job_fingerprint,state,call_id,execution_generation FROM provider_work_items WHERE run_id=? ORDER BY job_fingerprint",
+            (str(run_id),),
+        ).fetchall()
+        call_rows = connection.execute(
+            "SELECT call_id,provider,state,http_started_at FROM provider_calls WHERE run_id=? ORDER BY call_id",
+            (str(run_id),),
+        ).fetchall()
+        budget_rows = connection.execute(
+            "SELECT provider,effective_limit,reserved_total,reserved,completed,failed,unknown FROM provider_usage WHERE run_id=? ORDER BY provider",
+            (str(run_id),),
+        ).fetchall()
+        inherited_count = int(connection.execute(
+            "SELECT COUNT(*) FROM provider_query_flight_consumers WHERE run_id=? AND relation='INHERITED'",
+            (str(run_id),),
+        ).fetchone()[0])
+        cache_count = int(connection.execute(
+            "SELECT COALESCE(SUM(value),0) FROM operational_metrics WHERE run_id=? AND metric LIKE '%cache_hit%'",
+            (str(run_id),),
+        ).fetchone()[0])
+    work = [{"job_fingerprint": str(row[0]), "state": str(row[1]), "call_id": str(row[2] or ""), "execution_generation": int(row[3] or 0)} for row in work_rows]
+    calls = [{"call_id": str(row[0]), "provider": str(row[1]), "state": str(row[2]), "http_started": bool(row[3])} for row in call_rows]
+    return {
+        "work": work,
+        "work_hash": hashlib.sha256(json.dumps(work, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "calls": calls,
+        "inherited_or_cache_count": inherited_count + cache_count,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "physical_calls": sorted(row["call_id"] for row in calls if row["http_started"]),
+        "terminal_jobs": sorted(row["job_fingerprint"] for row in work if row["state"] in _PROVIDER_WORK_TERMINAL_STATES),
+        "pending_jobs": sorted(row["job_fingerprint"] for row in work if row["state"] in {"READY", "ALLOCATED", "WAITING_DEPENDENCY"}),
+        "budgets": [dict(zip(("provider", "effective_limit", "reserved_total", "reserved", "completed", "failed", "unknown"), row)) for row in budget_rows],
+    }
+
+
+def provider_dispatch_selected_count(run_id: str, round_ordinal: int) -> int:
+    """Count allocations selected for this durable scheduler round only."""
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM provider_dispatch_allocations WHERE run_id=? AND round_ordinal=?",
+            (str(run_id), int(round_ordinal)),
+        ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def mark_scheduler_stalled(*, run_id: str, reason: str) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT phase,termination_reason,stopped_at FROM runs WHERE run_id=?", (str(run_id),)).fetchone()
+        if not row:
+            connection.rollback(); raise LedgerInvariant("scheduler stall references unknown run")
+        if str(row[0]) == "COMPLETE":
+            connection.rollback(); raise StateTransitionInvariant("COMPLETE run cannot be stalled")
+        connection.execute("UPDATE runs SET phase='PAID',termination_reason=?,stopped_at=?,updated_at=? WHERE run_id=?", (str(reason), now, now, str(run_id)))
+        connection.commit()
+    return {"termination_reason": str(reason), "stopped_at": now, "phase": "PAID"}
+
+
+def _refresh_provider_dispatch_round_state(
+    connection: sqlite3.Connection, *, run_id: str, provider: str, round_ordinal: int,
+    now: str | None = None,
+) -> str:
+    row = connection.execute(
+        "SELECT selected_count,state FROM provider_dispatch_rounds WHERE run_id=? AND provider=? AND round_ordinal=?",
+        (str(run_id), str(provider), int(round_ordinal)),
+    ).fetchone()
+    if not row:
+        raise LedgerInvariant("provider dispatch round does not exist")
+    allocations = [
+        str(value[0]) for value in connection.execute(
+            "SELECT state FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=?",
+            (str(run_id), str(provider), int(round_ordinal)),
+        ).fetchall()
+    ]
+    terminal = {"DONE", "FAILED", "UNKNOWN", "RELEASED", "BLOCKED_BUDGET"}
+    selected_count = int(row[0])
+    if selected_count == 0 or len(allocations) == selected_count and all(state in terminal for state in allocations):
+        state = "BLOCKED_UNKNOWN" if "UNKNOWN" in allocations else "COMPLETE"
+        connection.execute(
+            "UPDATE provider_dispatch_rounds SET state=?,completed_at=? WHERE run_id=? AND provider=? AND round_ordinal=?",
+            (state, str(now or datetime.now(timezone.utc).isoformat(timespec="microseconds")), str(run_id), str(provider), int(round_ordinal)),
+        )
+        return state
+    state = "IN_PROGRESS" if any(value in {"CONSUMED", "DONE", "FAILED", "UNKNOWN", "BLOCKED_BUDGET"} for value in allocations) else "RESERVED"
+    if str(row[1]) != state:
+        connection.execute(
+            "UPDATE provider_dispatch_rounds SET state=? WHERE run_id=? AND provider=? AND round_ordinal=?",
+            (state, str(run_id), str(provider), int(round_ordinal)),
+        )
+    return state
+
+
+def reserve_provider_dispatch_round(
+    *, run_id: str, provider: str, round_ordinal: int,
+    candidates: list[dict[str, Any]], cap: int, plan_version: int = 1,
+) -> list[dict[str, Any]]:
+    """Freeze one immutable round; resume reads its stored allocation receipt."""
+    if str(provider) not in CANONICAL_PROVIDERS:
+        raise LedgerInvariant(f"unknown provider: {provider}")
+    priority = {"website": 0, "website_discovery": 0, "identity": 1, "contact": 2}
+    has_round_receipt = provider_dispatch_round_exists(
+        run_id=str(run_id), provider=str(provider), round_ordinal=int(round_ordinal),
+    )
+    concrete_items = load_provider_work_items(
+        str(run_id), provider=str(provider),
+        states=None if has_round_receipt else {"READY"},
+    )
+    concrete_by_job = {str(item["job_fingerprint"]): item for item in concrete_items}
+    concrete_mode = bool(concrete_items) or provider_work_items_exist(str(run_id), str(provider))
+    by_source: dict[str, tuple[str, int, str, str, str, str, str, int]] = {}
+    for item in candidates:
+        source = str(item.get("source_record_id") or "").strip()
+        try:
+            item_index = int(item.get("item_index", -1))
+        except (TypeError, ValueError):
+            item_index = -1
+        need = str(item.get("need_class") or "website").strip().casefold()
+        if not source or item_index < 0:
+            continue
+        if need not in priority:
+            raise LedgerInvariant(f"unknown provider dispatch need class: {need}")
+        candidate_job = str(item.get("job_fingerprint") or "")
+        concrete = concrete_by_job.get(candidate_job)
+        if concrete_mode and not concrete:
+            continue
+        if concrete_mode:
+            current = (
+                source, item_index, need, candidate_job,
+                str(item.get("operation") or concrete["operation"]),
+                str(item.get("request_fingerprint") or concrete["request_fingerprint"]),
+                str(item.get("query_fingerprint") or concrete["query_fingerprint"]),
+                int(item.get("plan_version") or concrete["plan_version"]),
+            )
+        else:
+            legacy_job = hashlib.sha256(
+                f"legacy\0{run_id}\0{provider}\0{item_index}\0{source}\0{need}".encode()
+            ).hexdigest()
+            current = (source, item_index, need, legacy_job, "", "", "", 1)
+        previous = by_source.get(source)
+        if previous is not None and previous != current:
+            raise ResumeInvariant("provider dispatch source maps to multiple items or needs")
+        by_source[source] = current
+    normalized = sorted(
+        by_source.values(), key=lambda value: (priority[value[2]], value[1], value[0])
+    )
+    snapshot_material = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+    need_snapshot_sha256 = hashlib.sha256(snapshot_material.encode("utf-8")).hexdigest()
+    requested_cap = max(0, int(cap))
+    plan_version = int(plan_version)
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        usage = connection.execute(
+            "SELECT effective_limit,reserved_total FROM provider_usage WHERE run_id=? AND provider=?",
+            (run_id, provider),
+        ).fetchone()
+        if not usage:
+            connection.rollback()
+            raise LedgerInvariant(f"provider usage ledger is missing for dispatch: {provider}")
+        effective_limit, reserved_total = int(usage[0]), int(usage[1])
+        remaining_limit = max(0, effective_limit - reserved_total)
+        existing = connection.execute(
+            "SELECT need_snapshot_sha256,plan_version,requested_cap,remaining_limit,selected_work_hash,selected_count,state FROM provider_dispatch_rounds WHERE run_id=? AND provider=? AND round_ordinal=?",
+            (run_id, provider, int(round_ordinal)),
+        ).fetchone()
+        allocations = connection.execute(
+            "SELECT item_index,source_record_id,need_class,state FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=? ORDER BY item_index",
+            (run_id, provider, int(round_ordinal)),
+        ).fetchall()
+        if existing:
+            stored_selected = sorted(
+                [
+                    (str(row[1]), int(row[0]), str(row[2]), str(row[4] or ""),
+                     str(row[5] or ""), str(row[6] or ""), str(row[7] or ""),
+                     int(row[8] or 1))
+                    for row in connection.execute(
+                        "SELECT item_index,source_record_id,need_class, state, job_fingerprint, operation, request_fingerprint, query_fingerprint, 1 FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=? ORDER BY item_index",
+                        (run_id, provider, int(round_ordinal)),
+                    ).fetchall()
+                ],
+                key=lambda value: (priority[value[2]], value[1], value[0]),
+            )
+            selected_material = json.dumps(stored_selected, ensure_ascii=False, separators=(",", ":"))
+            stored_work_hash = hashlib.sha256(selected_material.encode("utf-8")).hexdigest()
+            legacy_selected_material = json.dumps(
+                [(value[0], value[1], value[2]) for value in stored_selected],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+            legacy_work_hash = hashlib.sha256(legacy_selected_material.encode("utf-8")).hexdigest()
+            if (
+                str(existing[0]) != need_snapshot_sha256
+                or int(existing[1]) != plan_version
+                or int(existing[2]) != requested_cap
+                or str(existing[4]) not in {stored_work_hash, legacy_work_hash}
+                or int(existing[5]) != len(allocations)
+            ):
+                connection.rollback()
+                raise ResumeInvariant("provider dispatch round drift")
+        else:
+            open_rows = connection.execute(
+                "SELECT round_ordinal,state FROM provider_dispatch_rounds WHERE run_id=? AND provider=? AND state IN ('RESERVED','IN_PROGRESS','BLOCKED_UNKNOWN')",
+                (str(run_id), str(provider)),
+            ).fetchall()
+            if open_rows:
+                connection.rollback()
+                raise ResumeInvariant("provider dispatch round must reach terminal state before a new round")
+            selected = normalized[:min(requested_cap, remaining_limit)]
+            selected_material = json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
+            selected_work_hash = hashlib.sha256(selected_material.encode("utf-8")).hexdigest()
+            timestamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            connection.execute(
+                "INSERT INTO provider_dispatch_rounds(run_id,provider,round_ordinal,need_snapshot_sha256,plan_version,requested_cap,remaining_limit,selected_work_hash,selected_count,state,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, provider, int(round_ordinal), need_snapshot_sha256, plan_version, requested_cap, remaining_limit, selected_work_hash, len(selected), "COMPLETE" if not selected else "RESERVED", timestamp, timestamp if not selected else ""),
+            )
+            connection.executemany(
+                "INSERT INTO provider_dispatch_allocations(run_id,provider,round_ordinal,item_index,source_record_id,need_class,state,allocated_at,job_fingerprint,operation,request_fingerprint,query_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (run_id, provider, int(round_ordinal), index, source, need,
+                     "RESERVED", timestamp, job_fingerprint, operation,
+                     request_fingerprint, query_fingerprint)
+                    for source, index, need, job_fingerprint, operation,
+                    request_fingerprint, query_fingerprint, _plan_version in selected
+                ],
+            )
+            allocations = [(index, source, need, "RESERVED") for source, index, need, *_rest in selected]
+        connection.commit()
+    state_by_source = {str(source): (int(index), str(need), str(state)) for index, source, need, state in allocations}
+    ordered_sources = [value[0] for value in normalized if value[0] in state_by_source]
+    return [
+        {
+            "item_index": state_by_source[source][0], "source_record_id": source,
+            "need_class": state_by_source[source][1], "state": state_by_source[source][2],
+            "provider": str(provider), "round_ordinal": int(round_ordinal),
+        }
+        for source in ordered_sources
+    ]
+
+
+def provider_dispatch_round_exists(
+    *, run_id: str, provider: str, round_ordinal: int | None = None,
+) -> bool:
+    query = "SELECT 1 FROM provider_dispatch_rounds WHERE run_id=? AND provider=?"
+    params: list[Any] = [str(run_id), str(provider)]
+    if round_ordinal is not None:
+        query += " AND round_ordinal=?"
+        params.append(int(round_ordinal))
+    query += " LIMIT 1"
+    with closing(_connect()) as connection:
+        return connection.execute(query, tuple(params)).fetchone() is not None
+
+
+def provider_dispatch_allocation_available(
+    *, run_id: str, provider: str, round_ordinal: int, item_index: int,
+    source_record_id: str = "", job_fingerprint: str = "",
+) -> bool:
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT a.source_record_id,a.state,a.job_fingerprint,c.state FROM provider_dispatch_allocations a "
+            "LEFT JOIN provider_calls c ON c.call_id=a.consumed_call_id "
+            "WHERE a.run_id=? AND a.provider=? AND a.round_ordinal=? AND a.item_index=?",
+            (str(run_id), str(provider), int(round_ordinal), int(item_index)),
+        ).fetchone()
+    return bool(
+        row and (str(row[1]) == "RESERVED" or (str(row[1]) == "CONSUMED" and str(row[3]) == "FAILED"))
+        and (not source_record_id or str(row[0]) == str(source_record_id))
+        and (not job_fingerprint or str(row[2]) == str(job_fingerprint))
+    )
+
+
+def rebind_dispatch_after_terminal_follower(
+    *, run_id: str, provider: str, round_ordinal: int, item_index: int,
+    source_record_id: str, job_fingerprint: str,
+    terminal_follower_receipts: tuple[dict[str, str], ...] = (),
+) -> bool:
+    """Retarget an unused slot only after its allocated query became an inherited terminal flight."""
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        allocation = connection.execute(
+            "SELECT source_record_id,state,job_fingerprint FROM provider_dispatch_allocations "
+            "WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=?",
+            (str(run_id), str(provider), int(round_ordinal), int(item_index)),
+        ).fetchone()
+        if (
+            not allocation
+            or str(allocation[0]) != str(source_record_id)
+            or str(allocation[1]) != "RESERVED"
+        ):
+            connection.rollback()
+            return False
+        current_job = str(allocation[2] or "")
+        target = connection.execute(
+            "SELECT source_record_id,provider,operation,request_fingerprint,query_fingerprint,need_class,state "
+            "FROM provider_work_items WHERE run_id=? AND item_index=? AND job_fingerprint=?",
+            (str(run_id), int(item_index), str(job_fingerprint)),
+        ).fetchone()
+        if (
+            not target
+            or str(target[0]) != str(source_record_id)
+            or str(target[1]) != str(provider)
+            or str(target[6]) not in {"READY", "ALLOCATED"}
+        ):
+            connection.rollback()
+            return False
+        if current_job == str(job_fingerprint):
+            connection.commit()
+            return True
+        if str(provider) != "brightdata" or str(target[2]) != "search" or not str(target[4] or ""):
+            connection.rollback()
+            return False
+        prior = connection.execute(
+            "SELECT item_index,source_record_id,state,query_fingerprint "
+            "FROM provider_work_items WHERE run_id=? AND job_fingerprint=?",
+            (str(run_id), current_job),
+        ).fetchone()
+        if (
+            not prior
+            or int(prior[0]) != int(item_index)
+            or str(prior[1]) != str(source_record_id)
+            or str(prior[2]) not in {"READY", "ALLOCATED", "DONE"}
+            or not str(prior[3] or "")
+        ):
+            connection.rollback()
+            return False
+        witnessed_call_ids = sorted({
+            str(receipt.get("provider_call_id", ""))
+            for receipt in terminal_follower_receipts
+            if str(receipt.get("query_fingerprint", "")) == str(prior[3])
+            and str(receipt.get("provider_call_id", ""))
+        })
+        if not witnessed_call_ids:
+            connection.rollback()
+            return False
+        flight = connection.execute(
+            "SELECT state,result_json,execution_generation FROM provider_query_flights "
+            "WHERE run_id=? AND provider=? AND query_fingerprint=?",
+            (str(run_id), str(provider), str(prior[3])),
+        ).fetchone()
+        placeholders = ",".join("?" for _ in witnessed_call_ids)
+        terminal = connection.execute(
+            "SELECT state,provider_call_id,result_sha256 FROM provider_query_flight_terminals "
+            "WHERE run_id=? AND provider=? AND query_fingerprint=? AND execution_generation=? "
+            f"AND provider_call_id IN ({placeholders}) LIMIT 1",
+            (str(run_id), str(provider), str(prior[3]), int(flight[2]) if flight else 0, *witnessed_call_ids),
+        ).fetchone()
+        inherited = (str(terminal[1]), int(flight[2])) if terminal and flight else None
+        if not inherited:
+            connection.rollback()
+            return False
+        result_receipt = connection.execute(
+            "SELECT provider_call_id,result_json,result_sha256 FROM provider_query_flight_results "
+            "WHERE run_id=? AND provider=? AND query_fingerprint=? AND execution_generation=?",
+            (str(run_id), str(provider), str(prior[3]), int(flight[2]) if flight else 0),
+        ).fetchone()
+        try:
+            flight_result = json.loads(str(flight[1] or "{}")) if flight else {}
+            receipt_result = json.loads(str(result_receipt[1] or "{}")) if result_receipt else {}
+        except (TypeError, json.JSONDecodeError) as exc:
+            connection.rollback()
+            raise EvidenceInvariant("terminal follower flight result is invalid JSON") from exc
+        owner = connection.execute(
+            "SELECT provider,item_index,state FROM provider_calls WHERE run_id=? AND call_id=?",
+            (str(run_id), str(inherited[0])),
+        ).fetchone()
+        if (
+            not flight
+            or str(flight[0]) != "DONE"
+            or int(flight[2]) != int(inherited[1])
+            or str(flight_result.get("result_reason", "")) == "dispatch_not_allocated"
+            or not terminal
+            or str(terminal[0]) != "DONE"
+            or str(terminal[1] or "") != str(inherited[0])
+            or not str(terminal[2] or "")
+            or not result_receipt
+            or str(result_receipt[0]) != str(terminal[1])
+            or str(result_receipt[2]) != str(terminal[2])
+            or hashlib.sha256(str(result_receipt[1]).encode()).hexdigest() != str(terminal[2])
+            or receipt_result != flight_result
+            or not owner
+            or str(owner[0]) != str(provider)
+            or int(owner[1]) == int(item_index)
+            or str(owner[2]) != "DONE"
+        ):
+            connection.rollback()
+            return False
+        updated = connection.execute(
+            "UPDATE provider_dispatch_allocations SET job_fingerprint=?,need_class=?,operation=?,request_fingerprint=?,query_fingerprint=? "
+            "WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=? AND state='RESERVED' AND job_fingerprint=?",
+            (str(job_fingerprint), str(target[5]), str(target[2]), str(target[3]), str(target[4]),
+             str(run_id), str(provider), int(round_ordinal), int(item_index), current_job),
+        )
+        if updated.rowcount != 1:
+            connection.rollback()
+            return False
+        connection.commit()
+        return True
+
+
+def provider_dispatch_remaining_capacity(run_id: str, provider: str) -> int:
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT effective_limit,reserved_total FROM provider_usage WHERE run_id=? AND provider=?",
+            (str(run_id), str(provider)),
+        ).fetchone()
+    if not row:
+        return 0
+    return max(0, int(row[0]) - int(row[1]))
+
+
+def open_provider_dispatch_rounds(run_id: str, providers: list[str] | tuple[str, ...] | None = None) -> dict[str, int]:
+    with closing(_connect()) as connection:
+        rows = connection.execute(
+            "SELECT provider,MIN(round_ordinal) FROM provider_dispatch_rounds WHERE run_id=? AND state IN ('RESERVED','IN_PROGRESS','BLOCKED_UNKNOWN') GROUP BY provider",
+            (str(run_id),),
+        ).fetchall()
+    allowed = {str(value) for value in providers} if providers is not None else None
+    return {str(provider): int(ordinal) for provider, ordinal in rows if allowed is None or str(provider) in allowed}
+
+
+def load_provider_dispatch_round(run_id: str, provider: str, round_ordinal: int) -> dict[str, Any]:
+    with closing(_connect()) as connection:
+        round_row = connection.execute(
+            "SELECT need_snapshot_sha256,plan_version,requested_cap,remaining_limit,selected_work_hash,selected_count,state,created_at,completed_at FROM provider_dispatch_rounds WHERE run_id=? AND provider=? AND round_ordinal=?",
+            (str(run_id), str(provider), int(round_ordinal)),
+        ).fetchone()
+        allocations = connection.execute(
+            "SELECT item_index,source_record_id,need_class,state,job_fingerprint,consumed_call_id,terminal_state,released_reason,consumed_at,terminal_at,operation,request_fingerprint,query_fingerprint FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=? ORDER BY item_index",
+            (str(run_id), str(provider), int(round_ordinal)),
+        ).fetchall()
+    if not round_row:
+        raise ResumeInvariant("provider dispatch round receipt is missing")
+    return {
+        "provider": str(provider), "round_ordinal": int(round_ordinal),
+        "need_snapshot_sha256": str(round_row[0]), "plan_version": int(round_row[1]),
+        "requested_cap": int(round_row[2]), "remaining_limit": int(round_row[3]),
+        "selected_work_hash": str(round_row[4]), "selected_count": int(round_row[5]),
+        "state": str(round_row[6]), "created_at": str(round_row[7]), "completed_at": str(round_row[8]),
+        "allocations": [
+            {"item_index": int(item[0]), "source_record_id": str(item[1]), "need_class": str(item[2]), "state": str(item[3]), "job_fingerprint": str(item[4]), "consumed_call_id": str(item[5]), "terminal_state": str(item[6]), "released_reason": str(item[7]), "consumed_at": str(item[8]), "terminal_at": str(item[9]), "operation": str(item[10] or ""), "request_fingerprint": str(item[11] or ""), "query_fingerprint": str(item[12] or "")}
+            for item in allocations
+        ],
+    }
+
+
+def next_provider_dispatch_round(run_id: str, provider: str | None = None) -> int:
+    with closing(_connect()) as connection:
+        where = "run_id=?"; params: list[Any] = [str(run_id)]
+        if provider is not None:
+            where += " AND provider=?"; params.append(str(provider))
+        open_row = connection.execute(
+            f"SELECT MIN(round_ordinal) FROM provider_dispatch_rounds WHERE {where} AND state IN ('RESERVED','IN_PROGRESS','BLOCKED_UNKNOWN')",
+            tuple(params),
+        ).fetchone()
+        if open_row and open_row[0] is not None:
+            return int(open_row[0])
+        row = connection.execute(
+            f"SELECT COALESCE(MAX(round_ordinal),-1)+1 FROM provider_dispatch_rounds WHERE {where}",
+            tuple(params),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def consume_provider_dispatch_allocation(
+    *, run_id: str, provider: str, round_ordinal: int, item_index: int,
+    source_record_id: str = "", job_fingerprint: str = "", call_id: str = "",
+) -> bool:
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT source_record_id,state,job_fingerprint,consumed_call_id FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=?",
+            (str(run_id), str(provider), int(round_ordinal), int(item_index)),
+        ).fetchone()
+        if not row:
+            connection.rollback()
+            return False
+        if source_record_id and str(row[0]) != str(source_record_id):
+            connection.rollback()
+            raise StateTransitionInvariant("provider dispatch allocation source mismatch")
+        if str(row[1]) in {"CONSUMED", "DONE", "FAILED", "UNKNOWN", "BLOCKED_BUDGET"}:
+            connection.rollback()
+            return False
+        if str(row[1]) != "RESERVED":
+            connection.rollback()
+            raise StateTransitionInvariant("provider dispatch allocation is not consumable")
+        if row[2] and job_fingerprint and str(row[2]) != str(job_fingerprint):
+            connection.rollback()
+            raise DispatchAllocationUnavailable("provider dispatch job fingerprint mismatch")
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        connection.execute(
+            "UPDATE provider_dispatch_allocations SET state='CONSUMED',job_fingerprint=?,consumed_call_id=?,consumed_at=? WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=? AND state='RESERVED'",
+            (str(job_fingerprint or row[2] or ""), str(call_id or row[3] or ""), now, str(run_id), str(provider), int(round_ordinal), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE provider_dispatch_rounds SET state='IN_PROGRESS' WHERE run_id=? AND provider=? AND round_ordinal=? AND state='RESERVED'",
+            (str(run_id), str(provider), int(round_ordinal)),
+        )
+        connection.commit()
+        return True
+
+
+def release_provider_dispatch_allocation(
+    *, run_id: str, provider: str, round_ordinal: int, item_index: int,
+    source_record_id: str = "", reason: str = "no_call_needed",
+) -> bool:
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT source_record_id,state,job_fingerprint FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=?",
+            (str(run_id), str(provider), int(round_ordinal), int(item_index)),
+        ).fetchone()
+        if not row:
+            connection.rollback(); return False
+        if source_record_id and str(row[0]) != str(source_record_id):
+            connection.rollback(); raise StateTransitionInvariant("provider dispatch release source mismatch")
+        if str(row[1]) != "RESERVED":
+            connection.rollback(); return False
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        connection.execute(
+            "UPDATE provider_dispatch_allocations SET state='RELEASED',terminal_state='RELEASED',released_reason=?,terminal_at=? WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=? AND state='RESERVED'",
+            (str(reason), now, str(run_id), str(provider), int(round_ordinal), int(item_index)),
+        )
+        if row[2]:
+            connection.execute(
+                "UPDATE provider_work_items SET state='READY',terminal_reason=?,updated_at=? "
+                "WHERE run_id=? AND job_fingerprint=? AND state IN ('READY','ALLOCATED')",
+                (str(reason), now, str(run_id), str(row[2])),
+            )
+        _refresh_provider_dispatch_round_state(connection, run_id=str(run_id), provider=str(provider), round_ordinal=int(round_ordinal), now=now)
+        connection.commit()
+        return True
+
+
+def terminalize_pending_paid_budget(*, run_id: str, item_index: int, reason: str) -> None:
+    """Close a pending dispatch job as typed exhaustion after all rounds are spent."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        item = connection.execute(
+            "SELECT source_record_id,paid_state,paid_attempts FROM run_items WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if not item or str(item[1]) != "PENDING":
+            connection.rollback()
+            raise StateTransitionInvariant("paid budget terminalization requires a pending item")
+        work_rows = connection.execute(
+            "SELECT job_fingerprint,provider FROM provider_work_items "
+            "WHERE run_id=? AND item_index=? AND state='READY' ORDER BY provider,job_fingerprint",
+            (str(run_id), int(item_index)),
+        ).fetchall()
+        exhausted: dict[str, int] = {}
+        for job_fingerprint, provider in work_rows:
+            usage = connection.execute(
+                "SELECT effective_limit,reserved_total FROM provider_usage WHERE run_id=? AND provider=?",
+                (str(run_id), str(provider)),
+            ).fetchone()
+            if usage and int(usage[1]) >= int(usage[0]):
+                exhausted[str(provider)] = int(usage[0])
+                connection.execute(
+                    "UPDATE provider_work_items SET state='BLOCKED_BUDGET',terminal_reason=?,updated_at=? "
+                    "WHERE run_id=? AND job_fingerprint=? AND state='READY'",
+                    (f"provider_capacity_exhausted:{provider}", now, str(run_id), str(job_fingerprint)),
+                )
+        if not exhausted:
+            connection.commit()
+            return
+        payload_row = connection.execute(
+            "SELECT payload FROM results WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        payload = json.loads(str(payload_row[0])) if payload_row else {}
+        attempt_number = int(item[2]) + 1
+        paid_attempt_id = hashlib.sha256(f"{run_id}\0{int(item_index)}\0{attempt_number}\0PAID".encode("utf-8")).hexdigest()
+        connection.execute(
+            "INSERT INTO paid_attempts(run_id,item_index,attempt_number,phase,result,reason,created_at,paid_attempt_id) VALUES(?,?,?,?,?,?,?,?)",
+            (str(run_id), int(item_index), attempt_number, "PAID", "BLOCKED_BUDGET", f"{str(reason)}:{','.join(sorted(exhausted))}", now, paid_attempt_id),
+        )
+        providers = sorted(exhausted.items())
+        for ordinal, (provider, effective_limit) in enumerate(providers, 1):
+            authorized = True
+            connection.execute(
+                "INSERT INTO paid_attempt_provider_plan(run_id,item_index,paid_attempt_id,provider,plan_ordinal,authorized,effective_limit) VALUES(?,?,?,?,?,?,?)",
+                (str(run_id), int(item_index), paid_attempt_id, str(provider), ordinal, int(authorized), int(effective_limit)),
+            )
+            if authorized:
+                block_id = hashlib.sha256(
+                    f"{run_id}\0{int(item_index)}\0{provider}\0dispatch_exhausted".encode("utf-8")
+                ).hexdigest()
+                connection.execute(
+                    "INSERT OR IGNORE INTO provider_budget_blocks(run_id,item_index,provider,bucket,block_kind,created_at,block_id,backend) VALUES(?,?,?,?,?,?,?,?)",
+                    (str(run_id), int(item_index), str(provider), "", "dispatch_exhausted", now, block_id, str(provider)),
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO paid_attempt_block_links(run_id,item_index,provider,paid_attempt_id,block_id) VALUES(?,?,?,?,?)",
+                    (str(run_id), int(item_index), str(provider), paid_attempt_id, block_id),
+                )
+        pending = connection.execute(
+            "SELECT 1 FROM provider_work_items WHERE run_id=? AND item_index=? "
+            "AND state IN ('READY','ALLOCATED','WAITING_DEPENDENCY','UNKNOWN') LIMIT 1",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        exhausted_names = sorted(exhausted)
+        combined_reason = f"{str(reason)}:{','.join(exhausted_names)}"
+        payload.update({
+            "paid_attempts": attempt_number,
+            "dispatch_budget_exhausted_providers": sorted(set(payload.get("dispatch_budget_exhausted_providers", [])) | set(exhausted_names)),
+            "reason": "; ".join(filter(None, [str(payload.get("reason", "")), combined_reason])),
+        })
+        if not pending:
+            payload.update({
+                "paid_attempt_result": "BLOCKED_BUDGET",
+                "paid_attempt_reason": combined_reason,
+                "dispatch_exhausted": True,
+            })
+        safe_payload = json.dumps(_json_safe(payload), ensure_ascii=False, separators=(",", ":"))
+        connection.execute(
+            "UPDATE run_items SET paid_state=CASE WHEN ? THEN 'BLOCKED_BUDGET' ELSE paid_state END,paid_attempts=?,last_error=?,payload_sha256=? WHERE run_id=? AND item_index=? AND paid_state='PENDING'",
+            (int(not pending), attempt_number, combined_reason, hashlib.sha256(safe_payload.encode("utf-8")).hexdigest(), str(run_id), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE results SET payload=? WHERE run_id=? AND item_index=?",
+            (safe_payload, str(run_id), int(item_index)),
+        )
+        connection.commit()
+
+
+def _terminalize_provider_dispatch_for_call(connection: sqlite3.Connection, *, call_id: str, state: str, now: str) -> None:
+    row = connection.execute(
+        "SELECT a.run_id,a.provider,a.round_ordinal,a.item_index,a.state,a.job_fingerprint,c.flight_fingerprint "
+        "FROM provider_dispatch_allocations a LEFT JOIN provider_calls c ON c.call_id=a.consumed_call_id "
+        "WHERE a.consumed_call_id=?",
+        (str(call_id),),
+    ).fetchone()
+    if not row:
+        return
+    if str(row[4]) not in {"CONSUMED", "RESERVED"}:
+        raise StateTransitionInvariant("provider dispatch allocation completed more than once")
+    # A failed attempt inside a live query flight is retryable.  Keep the
+    # logical allocation/job live until the flight terminal receipt closes it.
+    if str(state) == "FAILED" and str(row[6] or ""):
+        return
+    connection.execute(
+        "UPDATE provider_dispatch_allocations SET state=?,terminal_state=?,terminal_at=? WHERE consumed_call_id=? AND state IN ('CONSUMED','RESERVED')",
+        (str(state), str(state), str(now), str(call_id)),
+    )
+    if row[5]:
+        connection.execute(
+            "UPDATE provider_work_items SET state=?,terminal_reason=?,call_id=?,updated_at=? WHERE run_id=? AND job_fingerprint=? AND state IN ('ALLOCATED','READY')",
+            (str(state), str(state).casefold(), str(call_id), str(now), str(row[0]), str(row[5])),
+        )
+    _refresh_provider_dispatch_round_state(connection, run_id=str(row[0]), provider=str(row[1]), round_ordinal=int(row[2]), now=now)
+
+
+def _record_provider_failure_event(connection: sqlite3.Connection, *, call_id: str, state: str, result_ref: str, now: str) -> None:
+    if str(state).upper() not in {"FAILED", "UNKNOWN"}:
+        return
+    call = connection.execute(
+        "SELECT run_id,provider,item_index,request_fingerprint FROM provider_calls WHERE call_id=?",
+        (str(call_id),),
+    ).fetchone()
+    if not call:
+        return
+    text = str(result_ref or "")
+    lowered = text.casefold()
+    failure_class = (
+        "captcha" if any(token in lowered for token in ("captcha", "challenge", "recaptcha"))
+        else "provider_header" if "header" in lowered or "proxy" in lowered
+        else "transport_unknown" if str(state).upper() == "UNKNOWN"
+        else "http_failure" if "http_" in lowered
+        else "provider_failure"
+    )
+    group_key = hashlib.sha256(
+        f"{call[0]}\0{call[1]}\0{call[3]}\0{failure_class}".encode("utf-8")
+    ).hexdigest()
+    connection.execute(
+        "INSERT OR IGNORE INTO provider_failure_events(run_id,call_id,provider,item_index,failure_class,failure_group_key,result_ref,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (str(call[0]), str(call_id), str(call[1]), int(call[2]), failure_class, group_key, text[:300], str(now)),
+    )
+
+
+def provider_failure_summary(run_id: str) -> list[dict[str, Any]]:
+    with closing(_connect()) as connection:
+        rows = connection.execute(
+            "SELECT provider,failure_class,failure_group_key,COUNT(*),MIN(created_at) "
+            "FROM provider_failure_events WHERE run_id=? GROUP BY provider,failure_class,failure_group_key "
+            "ORDER BY provider,failure_class,failure_group_key",
+            (str(run_id),),
+        ).fetchall()
+    return [
+        {"provider": str(row[0]), "failure_class": str(row[1]), "failure_group_key": str(row[2]), "count": int(row[3]), "first_seen": str(row[4])}
+        for row in rows
+    ]
 
 
 def freeze_paid_query_plan(*, run_id: str, item_index: int, queries: list[str] | tuple[str, ...], query_kind: str = "primary", round_ordinal: int = 0, plan_version: int = 1) -> list[str]:
@@ -1816,11 +4120,55 @@ def load_paid_query_plan(run_id: str, item_index: int, *, query_kind: str = "pri
     return [str(query) for query, _digest in rows]
 
 
+def load_paid_query_plan_entries(run_id: str, item_index: int, *, query_kind: str, plan_version: int = 1) -> list[dict[str, Any]]:
+    with closing(_connect()) as connection:
+        rows = connection.execute(
+            "SELECT round_ordinal,query_ordinal,normalized_query,query_sha256 FROM paid_query_plan_entries "
+            "WHERE run_id=? AND item_index=? AND plan_version=? AND query_kind=? "
+            "ORDER BY round_ordinal,query_ordinal",
+            (str(run_id), int(item_index), int(plan_version), str(query_kind)),
+        ).fetchall()
+    entries = []
+    for round_ordinal, query_ordinal, query, digest in rows:
+        if hashlib.sha256(str(query).encode("utf-8")).hexdigest() != str(digest):
+            raise ResumeInvariant("durable paid query plan hash mismatch")
+        entries.append({
+            "round_ordinal": int(round_ordinal), "query_ordinal": int(query_ordinal),
+            "query": str(query),
+        })
+    return entries
+
+
 def paid_query_plan_receipt(run_id: str) -> dict[str, Any]:
     with closing(_connect()) as connection:
         rows = connection.execute("SELECT item_index,plan_version,query_kind,round_ordinal,query_ordinal,normalized_query,query_sha256 FROM paid_query_plan_entries WHERE run_id=? ORDER BY item_index,plan_version,query_kind,round_ordinal,query_ordinal", (run_id,)).fetchall()
     material = json.dumps([list(row) for row in rows], ensure_ascii=False, separators=(",", ":"))
     return {"plan_version": 1, "paid_query_plan_count": len(rows), "paid_query_plan_sha256": hashlib.sha256(material.encode()).hexdigest()}
+
+
+def load_provider_query_flight(*, run_id: str, provider: str, query_fingerprint: str) -> dict[str, Any] | None:
+    """Load the immutable terminal/query receipt without changing scheduler state."""
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT state,result_json,call_ids_json,execution_generation FROM provider_query_flights WHERE run_id=? AND provider=? AND query_fingerprint=?",
+            (run_id, provider, query_fingerprint),
+        ).fetchone()
+        if not row:
+            return None
+        terminal = connection.execute(
+            "SELECT state,call_ids_json,provider_call_id,result_sha256 FROM provider_query_flight_terminals WHERE run_id=? AND provider=? AND query_fingerprint=? AND execution_generation=?",
+            (run_id, provider, query_fingerprint, int(row[3])),
+        ).fetchone()
+    return {
+        "state": str(row[0]),
+        "result": json.loads(row[1] or "{}"),
+        "call_ids": json.loads(row[2] or "[]"),
+        "execution_generation": int(row[3]),
+        "terminal_state": str(terminal[0]) if terminal else "",
+        "terminal_call_ids": json.loads(terminal[1] or "[]") if terminal else [],
+        "provider_call_id": str(terminal[2] or "") if terminal else "",
+        "result_sha256": str(terminal[3] or "") if terminal else "",
+    }
 
 
 def claim_provider_query_flight(*, run_id: str, provider: str, query_fingerprint: str, owner_token: str, lease_seconds: float = 30) -> dict[str, Any]:
@@ -1948,6 +4296,8 @@ def resolve_expired_provider_query_flight(*, run_id: str, provider: str, query_f
                     f"UPDATE provider_calls SET state='UNKNOWN',updated_at=? WHERE run_id=? AND provider=? AND call_id IN ({placeholders}) AND state IN ('RESERVED','RUNNING')",
                     (timestamp, run_id, provider, *call_ids),
                 )
+                for call_id in call_ids:
+                    _terminalize_provider_dispatch_for_call(connection, call_id=str(call_id), state="UNKNOWN", now=timestamp)
                 usage_cursor = connection.execute(
                     "UPDATE provider_usage SET reserved=reserved-?,unknown=unknown+? WHERE run_id=? AND provider=? AND reserved>=?",
                     (unsettled, unsettled, run_id, provider, unsettled),
@@ -2062,6 +4412,41 @@ def finish_provider_query_flight(*, run_id: str, provider: str, query_fingerprin
             connection.rollback()
             raise StateTransitionInvariant("provider query flight owner lost")
         connection.execute("INSERT INTO provider_query_flight_terminals(run_id,provider,query_fingerprint,execution_generation,state,provider_call_id,result_sha256,call_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id, provider, query_fingerprint, int(row[1]), state, "", hashlib.sha256(result_json.encode()).hexdigest(), json.dumps(merged_ids), datetime.now(timezone.utc).isoformat(timespec="microseconds")))
+        terminal_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        # A round-local dispatch rejection is a flight observation, not a
+        # terminal outcome for the logical provider job or its allocation.
+        # Keep the READY job eligible for a later explicitly allocated round.
+        if str(result.get("result_reason", "")) != "dispatch_not_allocated":
+            work_rows = connection.execute(
+                "SELECT job_fingerprint FROM provider_work_items WHERE run_id=? AND provider=? "
+                "AND query_fingerprint=? AND state IN ('ALLOCATED','READY')",
+                (run_id, provider, query_fingerprint),
+            ).fetchall()
+            completed_rounds: set[int] = set()
+            for (job_fingerprint,) in work_rows:
+                completed_rounds.update(
+                    int(round_row[0]) for round_row in connection.execute(
+                        "SELECT round_ordinal FROM provider_dispatch_allocations "
+                        "WHERE run_id=? AND provider=? AND job_fingerprint=? "
+                        "AND state IN ('CONSUMED','RESERVED')",
+                        (run_id, provider, str(job_fingerprint)),
+                    ).fetchall()
+                )
+                connection.execute(
+                    "UPDATE provider_work_items SET state=?,terminal_reason=?,updated_at=? "
+                    "WHERE run_id=? AND job_fingerprint=? AND state IN ('ALLOCATED','READY')",
+                    (state, f"flight_terminal:{state.casefold()}", terminal_at, run_id, str(job_fingerprint)),
+                )
+                connection.execute(
+                    "UPDATE provider_dispatch_allocations SET state=?,terminal_state=?,terminal_at=? "
+                    "WHERE run_id=? AND job_fingerprint=? AND state IN ('CONSUMED','RESERVED')",
+                    (state, state, terminal_at, run_id, str(job_fingerprint)),
+                )
+            for round_ordinal in sorted(completed_rounds):
+                _refresh_provider_dispatch_round_state(
+                    connection, run_id=str(run_id), provider=str(provider),
+                    round_ordinal=round_ordinal, now=terminal_at,
+                )
         connection.commit()
 
 
@@ -2104,6 +4489,7 @@ def complete_provider_call_and_flight_success(*, run_id: str, provider: str, que
             raise LedgerInvariant("provider aggregate reserved counter is invalid at atomic success")
         now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         connection.execute("UPDATE provider_calls SET state='DONE',result_ref=?,updated_at=? WHERE run_id=? AND provider=? AND call_id=?", (hashlib.sha256(result_json.encode()).hexdigest(), now, run_id, provider, provider_call_id))
+        _terminalize_provider_dispatch_for_call(connection, call_id=str(provider_call_id), state="DONE", now=now)
         connection.execute("UPDATE provider_usage SET reserved=reserved-1,completed=completed+1 WHERE run_id=? AND provider=?", (run_id, provider))
         connection.execute("INSERT INTO provider_query_flight_results(run_id,provider,query_fingerprint,execution_generation,provider_call_id,result_json,result_sha256,created_at) VALUES(?,?,?,?,?,?,?,?)", (run_id, provider, query_fingerprint, int(flight[1]), provider_call_id, result_json, hashlib.sha256(result_json.encode()).hexdigest(), now))
         cursor = connection.execute("UPDATE provider_query_flights SET state='DONE',provider_call_id=?,result_json=?,call_ids_json=?,updated_at=? WHERE run_id=? AND provider=? AND query_fingerprint=? AND owner_token=? AND state='RUNNING'", (provider_call_id, result_json, json.dumps(merged_ids), now, run_id, provider, query_fingerprint, owner_token))
@@ -2200,8 +4586,36 @@ def validate_paid_evidence(run_id: str) -> dict[str, int]:
                 no_call = bool(links) and all(str(row[1]) == "INHERITED" and str(row[0]) == "DONE" for row in links)
             if paid_state == "DONE" and "DONE" not in states and not no_call:
                 raise EvidenceInvariant(f"current paid attempt lacks DONE relational evidence for item {item_index}")
-            if paid_state == "FAILED" and "FAILED" not in states:
-                raise EvidenceInvariant(f"FAILED requires durable FAILED call linked to current paid attempt for item {item_index}")
+            if paid_state == "FAILED":
+                if links and "FAILED" not in states:
+                    raise EvidenceInvariant(f"FAILED requires durable FAILED call linked to current paid attempt for item {item_index}")
+                if not links:
+                    local = connection.execute(
+                        "SELECT source_record_id,input_snapshot_sha256,stage,typed_reason,dispatch_started FROM paid_local_failure_receipts WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+                        (run_id, int(item_index), paid_attempt_id),
+                    ).fetchone()
+                    immutable = connection.execute(
+                        "SELECT snapshot_sha256 FROM immutable_input_snapshots WHERE run_id=? AND item_index=?",
+                        (run_id, int(item_index)),
+                    ).fetchone()
+                    item_source = connection.execute(
+                        "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
+                        (run_id, int(item_index)),
+                    ).fetchone()
+                    provider_rows = connection.execute(
+                        "SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+                        (run_id, int(item_index), paid_attempt_id),
+                    ).fetchone()[0]
+                    if (
+                        not local or not immutable or not item_source
+                        or str(local[0]) != str(item_source[0])
+                        or str(local[1]) != str(immutable[0])
+                        or not str(local[2]).strip()
+                        or not str(local[3]).strip()
+                        or int(local[4]) != 0
+                        or int(provider_rows) != 0
+                    ):
+                        raise EvidenceInvariant(f"FAILED requires immutable local-failure receipt for pre-dispatch item {item_index}")
             if paid_state == "UNKNOWN" and not has_unknown_or_nonterminal:
                 raise OutcomeInvariant(f"zero-call UNKNOWN lacks related provider evidence for item {item_index}")
             if paid_state == "BLOCKED_BUDGET":
@@ -2229,12 +4643,17 @@ def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, in
         pending = connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=? AND paid_required=1 AND paid_state NOT IN ('DONE','FAILED','NOT_REQUIRED')", (run_id,)).fetchone()[0]
         unresolved = connection.execute("SELECT COUNT(*) FROM provider_calls WHERE run_id=? AND state IN ('RESERVED','RUNNING')", (run_id,)).fetchone()[0]
         quarantined = connection.execute("SELECT COUNT(*) FROM run_items WHERE run_id=? AND quarantine_state='HANDOFF_PENDING'", (run_id,)).fetchone()[0]
-        rows = connection.execute("SELECT item_index,payload FROM results WHERE run_id=? ORDER BY item_index", (run_id,)).fetchall()
+        rows = connection.execute(
+            "SELECT r.item_index,r.payload,i.free_state,i.paid_required,i.paid_state "
+            "FROM results r JOIN run_items i ON i.run_id=r.run_id AND i.item_index=r.item_index "
+            "WHERE r.run_id=? ORDER BY r.item_index",
+            (run_id,),
+        ).fetchall()
         if not phase or str(phase[0]) != "PAID" or int(pending) or int(unresolved) or int(quarantined) != int(expected_count) or len(rows) != int(expected_count):
             connection.rollback()
             raise StateTransitionInvariant("handoff release requires terminal paid snapshot")
         released = 0
-        for item_index, payload_text in rows:
+        for item_index, payload_text, free_state, paid_required, paid_state in rows:
             payload = json.loads(str(payload_text))
             prior_blockers = str(payload.get("publication_blockers", ""))
             if (
@@ -2257,6 +4676,14 @@ def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, in
             evaluation.setdefault("email", payload.get("email", ""))
             evaluation.setdefault("email_failed", "email_gate_failed" in str(payload.get("reason", "")))
             decision_input = dict(payload)
+            # Scheduler receipt is durable in run_items, not necessarily in
+            # the quarantined payload snapshot.  Rebuild the final decision
+            # input from that authoritative ledger before releasing it.
+            decision_input.update({
+                "free_state": str(free_state),
+                "paid_required": bool(paid_required),
+                "paid_state": str(paid_state),
+            })
             # HANDOFF_PENDING temporarily overwrote the final boolean; the
             # release decision must recompute it from the preserved evidence.
             if "HANDOFF_PENDING" in prior_blockers:
@@ -2384,8 +4811,13 @@ def record_paid_attempt(*, run_id: str, item_index: int, attempt_number: int, re
         if cursor.rowcount != 1:
             connection.rollback()
             raise StateTransitionInvariant("paid attempt terminal CAS failed")
+        attempt_created = connection.execute(
+            "SELECT created_at FROM paid_attempts WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+            (run_id, int(item_index), paid_attempt_id),
+        ).fetchone()
+        attempt_created_at = str(attempt_created[0] or "") if attempt_created else ""
         for linked_call_id in sorted(set(call_ids or ([call_id] if call_id else []))):
-            valid = connection.execute("SELECT provider,item_index,flight_fingerprint,state FROM provider_calls WHERE run_id=? AND phase='PAID' AND call_id=?", (run_id, linked_call_id)).fetchone()
+            valid = connection.execute("SELECT provider,item_index,flight_fingerprint,state,created_at FROM provider_calls WHERE run_id=? AND phase='PAID' AND call_id=?", (run_id, linked_call_id)).fetchone()
             if not valid:
                 connection.rollback()
                 raise EvidenceInvariant(f"paid attempt references unknown provider call: {linked_call_id}")
@@ -2393,26 +4825,81 @@ def record_paid_attempt(*, run_id: str, item_index: int, attempt_number: int, re
             if relation not in {"OWNER", "INHERITED"}:
                 connection.rollback()
                 raise EvidenceInvariant(f"invalid paid call relation: {relation}")
-            provider, owner_item, fingerprint, call_state = str(valid[0]), int(valid[1]), str(valid[2]), str(valid[3])
+            provider, owner_item, fingerprint, call_state, call_created_at = str(valid[0]), int(valid[1]), str(valid[2]), str(valid[3]), str(valid[4] or "")
+            # A call created during this paid attempt is owned by this
+            # attempt when the item matches, even if a later single-flight
+            # observation labelled the same call INHERITED.  A call from an
+            # earlier attempt remains INHERITED and cannot be promoted.
+            if (
+                relation == "INHERITED"
+                and owner_item == int(item_index)
+                and attempt_created_at
+                and call_created_at >= attempt_created_at
+            ):
+                relation = "OWNER"
             if relation == "OWNER" and owner_item != int(item_index):
                 connection.rollback()
                 raise EvidenceInvariant("OWNER relation requires provider call item match")
-            if relation == "OWNER" and fingerprint:
-                owner_flight = connection.execute("SELECT state,call_ids_json,execution_generation FROM provider_query_flights WHERE run_id=? AND provider=? AND query_fingerprint=?", (run_id, provider, fingerprint)).fetchone()
-                if owner_flight and str(owner_flight[0]) in {"DONE", "FAILED", "UNKNOWN"} and linked_call_id in json.loads(owner_flight[1] or "[]"):
-                    connection.execute("INSERT OR IGNORE INTO provider_query_flight_consumers(run_id,provider,query_fingerprint,execution_generation,paid_attempt_id,item_index,provider_call_id,relation,linked_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id, provider, fingerprint, int(owner_flight[2]), paid_attempt_id, int(item_index), linked_call_id, relation, datetime.now(timezone.utc).isoformat(timespec="microseconds")))
-            if relation == "INHERITED":
-                flight = connection.execute("SELECT state,call_ids_json,execution_generation FROM provider_query_flights WHERE run_id=? AND provider=? AND query_fingerprint=?", (run_id, provider, fingerprint)).fetchone()
-                if not flight or str(flight[0]) not in {"DONE", "FAILED", "UNKNOWN"} or linked_call_id not in json.loads(flight[1] or "[]"):
+            if not fingerprint:
+                # Non-query paid adapters and legacy low-level reservations do
+                # not have a provider-query flight.  They still get the same
+                # monotone OWNER relation, but an INHERITED relation is never
+                # accepted without a durable flight receipt.
+                if relation == "INHERITED":
                     connection.rollback()
-                    raise EvidenceInvariant("INHERITED relation requires matching terminal flight fingerprint")
-                compatible_flight = {"COMPLETED": "DONE", "NO_CALL_NEEDED": "DONE", "FAILED": "FAILED", "UNKNOWN": "UNKNOWN"}.get(result)
-                if compatible_flight and str(flight[0]) != compatible_flight:
+                    raise EvidenceInvariant("INHERITED relation requires a provider query flight fingerprint")
+                existing_attempt_call = connection.execute(
+                    "SELECT relation,query_fingerprint,execution_generation FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND attempt_number=? AND phase='PAID' AND call_id=?",
+                    (run_id, int(item_index), int(attempt_number), linked_call_id),
+                ).fetchone()
+                if existing_attempt_call and tuple(existing_attempt_call) != (relation, "", 1):
                     connection.rollback()
-                    raise EvidenceInvariant("inherited terminal flight state does not match paid attempt")
-                connection.execute("INSERT OR IGNORE INTO provider_query_flight_consumers(run_id,provider,query_fingerprint,execution_generation,paid_attempt_id,item_index,provider_call_id,relation,linked_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id, provider, fingerprint, int(flight[2]), paid_attempt_id, int(item_index), linked_call_id, relation, datetime.now(timezone.utc).isoformat(timespec="microseconds")))
-            generation_row = connection.execute("SELECT execution_generation FROM provider_query_flights WHERE run_id=? AND provider=? AND query_fingerprint=?", (run_id, provider, fingerprint)).fetchone() if fingerprint else None
-            connection.execute("INSERT OR IGNORE INTO paid_attempt_calls(run_id,item_index,attempt_number,phase,call_id,paid_attempt_id,provider_call_id,provider,query_fingerprint,execution_generation,relation) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (run_id, int(item_index), int(attempt_number), "PAID", linked_call_id, paid_attempt_id, linked_call_id, provider, fingerprint, int(generation_row[0]) if generation_row else 1, relation))
+                    raise EvidenceInvariant("paid attempt call relation or generation conflict")
+                if not existing_attempt_call:
+                    connection.execute("INSERT INTO paid_attempt_calls(run_id,item_index,attempt_number,phase,call_id,paid_attempt_id,provider_call_id,provider,query_fingerprint,execution_generation,relation) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (run_id, int(item_index), int(attempt_number), "PAID", linked_call_id, paid_attempt_id, linked_call_id, provider, "", 1, relation))
+                continue
+            flight = connection.execute("SELECT state,execution_generation FROM provider_query_flights WHERE run_id=? AND provider=? AND query_fingerprint=?", (run_id, provider, fingerprint)).fetchone()
+            terminal = connection.execute(
+                "SELECT execution_generation,state,call_ids_json FROM provider_query_flight_terminals WHERE run_id=? AND provider=? AND query_fingerprint=? AND EXISTS (SELECT 1 FROM json_each(provider_query_flight_terminals.call_ids_json) WHERE json_each.value=?) ORDER BY execution_generation DESC LIMIT 1",
+                (run_id, provider, fingerprint, linked_call_id),
+            ).fetchone()
+            if (
+                not flight
+                or not terminal
+                or str(terminal[1]) not in {"DONE", "FAILED", "UNKNOWN"}
+                or linked_call_id not in json.loads(terminal[2] or "[]")
+            ):
+                connection.rollback()
+                raise EvidenceInvariant("paid call relation requires matching terminal flight fingerprint")
+            compatible_flights = {
+                "COMPLETED": {"DONE", "FAILED"},
+                "NO_CALL_NEEDED": {"DONE", "FAILED"},
+                "FAILED": {"FAILED"},
+                "UNKNOWN": {"DONE", "FAILED", "UNKNOWN"},
+            }.get(result)
+            if compatible_flights and str(terminal[1]) not in compatible_flights:
+                connection.rollback()
+                raise EvidenceInvariant("paid call flight state does not match paid attempt")
+            generation = int(terminal[0])
+            linked_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            existing_consumer = connection.execute(
+                "SELECT relation FROM provider_query_flight_consumers WHERE run_id=? AND provider=? AND query_fingerprint=? AND paid_attempt_id=? AND provider_call_id=?",
+                (run_id, provider, fingerprint, paid_attempt_id, linked_call_id),
+            ).fetchone()
+            if existing_consumer and str(existing_consumer[0]) != relation:
+                connection.rollback()
+                raise EvidenceInvariant("provider flight consumer relation conflict")
+            if not existing_consumer:
+                connection.execute("INSERT INTO provider_query_flight_consumers(run_id,provider,query_fingerprint,execution_generation,paid_attempt_id,item_index,provider_call_id,relation,linked_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id, provider, fingerprint, generation, paid_attempt_id, int(item_index), linked_call_id, relation, linked_at))
+            existing_attempt_call = connection.execute(
+                "SELECT relation,query_fingerprint,execution_generation FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND attempt_number=? AND phase='PAID' AND call_id=?",
+                (run_id, int(item_index), int(attempt_number), linked_call_id),
+            ).fetchone()
+            if existing_attempt_call and tuple(existing_attempt_call) != (relation, fingerprint, generation):
+                connection.rollback()
+                raise EvidenceInvariant("paid attempt call relation or generation conflict")
+            if not existing_attempt_call:
+                connection.execute("INSERT INTO paid_attempt_calls(run_id,item_index,attempt_number,phase,call_id,paid_attempt_id,provider_call_id,provider,query_fingerprint,execution_generation,relation) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (run_id, int(item_index), int(attempt_number), "PAID", linked_call_id, paid_attempt_id, linked_call_id, provider, fingerprint, generation, relation))
         connection.commit()
 
 
@@ -2482,6 +4969,169 @@ def record_paid_no_call_evidence(*, run_id: str, item_index: int, attempt_number
         connection.commit()
 
 
+def finalize_paid_no_call_work(*, run_id: str, item_index: int, attempt_number: int) -> bool:
+    """Close remaining provider jobs only after the supplied-site receipt is durable."""
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        attempt = connection.execute(
+            "SELECT paid_attempt_id,result,evidence_kind,input_snapshot_sha256 FROM paid_attempts "
+            "WHERE run_id=? AND item_index=? AND attempt_number=? AND phase='PAID'",
+            (str(run_id), int(item_index), int(attempt_number)),
+        ).fetchone()
+        snapshot = connection.execute(
+            "SELECT snapshot_sha256 FROM immutable_input_snapshots WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        receipt = connection.execute(
+            "SELECT input_snapshot_sha256 FROM paid_no_call_evidence "
+            "WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+            (str(run_id), int(item_index), str(attempt[0]) if attempt else ""),
+        ).fetchone()
+        item = connection.execute(
+            "SELECT paid_required,paid_state FROM run_items WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if (
+            not attempt or str(attempt[1]) != "NO_CALL_NEEDED"
+            or str(attempt[2]) != "supplied_website_publishable_at_paid_entry"
+            or not snapshot or not receipt
+            or str(attempt[3]) != str(snapshot[0])
+            or str(receipt[0]) != str(snapshot[0])
+            or not item or int(item[0]) != 1
+            or str(item[1]) not in {"PENDING", "DONE"}
+        ):
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call work closure lacks the current semantic receipt")
+        if connection.execute(
+            "SELECT 1 FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=? LIMIT 1",
+            (str(run_id), int(item_index), str(attempt[0])),
+        ).fetchone():
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call work closure conflicts with linked provider calls")
+        if connection.execute(
+            "SELECT 1 FROM provider_work_items WHERE run_id=? AND item_index=? "
+            "AND state IN ('UNKNOWN','ALLOCATED') LIMIT 1",
+            (str(run_id), int(item_index)),
+        ).fetchone():
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call evidence cannot supersede unknown or allocated work")
+        if connection.execute(
+            "SELECT 1 FROM provider_dispatch_allocations WHERE run_id=? AND item_index=? AND state='RESERVED' LIMIT 1",
+            (str(run_id), int(item_index)),
+        ).fetchone():
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call work closure has a live dispatch allocation")
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        connection.execute(
+            "UPDATE provider_work_items SET state='NOT_REQUIRED',"
+            "terminal_reason='supplied_website_publishable_at_paid_entry',updated_at=? "
+            "WHERE run_id=? AND item_index=? AND state IN ('READY','WAITING_DEPENDENCY')",
+            (now, str(run_id), int(item_index)),
+        )
+        pending = connection.execute(
+            "SELECT 1 FROM provider_work_items WHERE run_id=? AND item_index=? "
+            "AND state IN ('READY','ALLOCATED','WAITING_DEPENDENCY') LIMIT 1",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if pending:
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call evidence left unresolved provider work")
+        result_row = connection.execute(
+            "SELECT payload FROM results WHERE run_id=? AND item_index=?",
+            (str(run_id), int(item_index)),
+        ).fetchone()
+        if not result_row:
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call result payload is missing")
+        try:
+            payload = json.loads(str(result_row[0]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call result payload is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            connection.rollback()
+            raise EvidenceInvariant("paid no-call result payload is not an object")
+        payload["paid_state"] = "DONE"
+        payload["dispatch_pending_providers"] = []
+        payload["__paid_escalation_complete"] = True
+        safe_payload = json.dumps(_json_safe(redaction.sanitize(payload)), ensure_ascii=False, separators=(",", ":"))
+        payload_hash = hashlib.sha256(safe_payload.encode("utf-8")).hexdigest()
+        receipt_payload = json.dumps(_json_safe(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        receipt_hash = hashlib.sha256(receipt_payload.encode("utf-8")).hexdigest()
+        connection.execute(
+            "UPDATE results SET payload=? WHERE run_id=? AND item_index=?",
+            (safe_payload, str(run_id), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE run_items SET paid_state='DONE',last_error='',payload_sha256=? "
+            "WHERE run_id=? AND item_index=? AND paid_required=1",
+            (payload_hash, str(run_id), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE paid_no_call_evidence SET result_payload_sha256=? "
+            "WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+            (receipt_hash, str(run_id), int(item_index), str(attempt[0])),
+        )
+        connection.execute("UPDATE runs SET updated_at=? WHERE run_id=?", (now, str(run_id)))
+        connection.commit()
+    return True
+
+
+def record_paid_local_failure_receipt(
+    *, run_id: str, item_index: int, attempt_number: int,
+    stage: str, typed_reason: str, dispatch_started: bool = False,
+) -> None:
+    """Record a failed paid attempt that stopped before provider dispatch."""
+    if dispatch_started:
+        raise EvidenceInvariant("local-failure receipt cannot cover dispatched work")
+    with closing(_connect()) as connection:
+        attempt = connection.execute(
+            "SELECT paid_attempt_id,result,request_fingerprint FROM paid_attempts WHERE run_id=? AND item_index=? AND attempt_number=? AND phase='PAID'",
+            (run_id, int(item_index), int(attempt_number)),
+        ).fetchone()
+        snapshot = connection.execute(
+            "SELECT snapshot_sha256 FROM immutable_input_snapshots WHERE run_id=? AND item_index=?",
+            (run_id, int(item_index)),
+        ).fetchone()
+        item = connection.execute(
+            "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
+            (run_id, int(item_index)),
+        ).fetchone()
+        calls = connection.execute(
+            "SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+            (run_id, int(item_index), str(attempt[0]) if attempt else ""),
+        ).fetchone()[0]
+        request_fingerprint = str(attempt[2] or "") if attempt else ""
+        dispatch_rows = connection.execute(
+            "SELECT state,http_started_at FROM provider_calls WHERE run_id=? AND item_index=? AND phase='PAID' AND (?='' OR request_fingerprint=?)",
+            (run_id, int(item_index), request_fingerprint, request_fingerprint),
+        ).fetchall()
+        orphan_nonterminal = any(str(row[0]).upper() in {"RESERVED", "RUNNING", "UNKNOWN"} for row in dispatch_rows)
+        orphan_dispatch = any(str(row[1] or "") or str(row[0]).upper() in {"DONE", "FAILED"} for row in dispatch_rows)
+        source_record_id = str(item[0]) if item else ""
+        if (
+            not attempt or str(attempt[1]) != "FAILED" or not snapshot
+            or int(calls) != 0 or orphan_nonterminal or orphan_dispatch or not str(stage or "").strip()
+            or not str(typed_reason or "").strip() or not source_record_id
+        ):
+            raise EvidenceInvariant("invalid pre-dispatch local-failure receipt")
+        existing = connection.execute(
+            "SELECT source_record_id,input_snapshot_sha256,stage,typed_reason,dispatch_started FROM paid_local_failure_receipts WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+            (run_id, int(item_index), str(attempt[0])),
+        ).fetchone()
+        expected = (source_record_id, str(snapshot[0]), str(stage), str(typed_reason), 0)
+        if existing:
+            if tuple(existing) != expected:
+                raise EvidenceInvariant("paid local-failure receipt reused with different payload")
+            connection.commit()
+            return
+        connection.execute(
+            "INSERT INTO paid_local_failure_receipts(run_id,item_index,source_record_id,paid_attempt_id,input_snapshot_sha256,stage,typed_reason,dispatch_started,created_at) VALUES(?,?,?,?,?,?,?,0,?)",
+            (run_id, int(item_index), source_record_id, str(attempt[0]), str(snapshot[0]), str(stage), str(typed_reason), datetime.now(timezone.utc).isoformat(timespec="microseconds")),
+        )
+        connection.commit()
+
+
 def record_provider_budget_block(*, run_id: str, item_index: int, provider: str, block_kind: str, bucket: str = "", backend: str = "") -> bool:
     canonical_provider = "ddgs" if str(provider) == "ddgs" or str(block_kind) in {"logical", "physical"} else str(provider)
     block_id = hashlib.sha256(f"{run_id}\0{int(item_index)}\0{canonical_provider}\0{bucket}\0{block_kind}".encode()).hexdigest()
@@ -2509,8 +5159,25 @@ def latest_provider_call(run_id: str, item_index: int, *, phase: str = "PAID") -
 
 def provider_calls_for_item(run_id: str, item_index: int, *, phase: str = "PAID") -> list[dict[str, str]]:
     with closing(_connect()) as connection:
-        rows = connection.execute("SELECT call_id,request_fingerprint,provider,state FROM provider_calls WHERE run_id=? AND item_index=? AND phase=? ORDER BY created_at,call_id", (run_id, int(item_index), phase)).fetchall()
-    return [{"call_id": str(call_id), "request_fingerprint": str(fingerprint), "provider": str(provider), "state": str(state)} for call_id, fingerprint, provider, state in rows]
+        rows = connection.execute("SELECT call_id,request_fingerprint,provider,state,flight_fingerprint FROM provider_calls WHERE run_id=? AND item_index=? AND phase=? ORDER BY created_at,call_id", (run_id, int(item_index), phase)).fetchall()
+    return [{"call_id": str(call_id), "request_fingerprint": str(fingerprint), "provider": str(provider), "state": str(state), "flight_fingerprint": str(flight_fingerprint)} for call_id, fingerprint, provider, state, flight_fingerprint in rows]
+
+
+def provider_call_reference(run_id: str, call_id: str) -> dict[str, Any] | None:
+    """Return a call's durable run-scoped identity for inherited-flight linking."""
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT provider,item_index,state,http_started_at,flight_fingerprint "
+            "FROM provider_calls WHERE run_id=? AND call_id=?",
+            (str(run_id), str(call_id)),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "provider": str(row[0]), "item_index": int(row[1]),
+        "state": str(row[2]), "http_started_at": str(row[3] or ""),
+        "flight_fingerprint": str(row[4] or ""),
+    }
 
 
 def provider_call_transport_context(call_id: str) -> dict[str, Any]:
@@ -2525,6 +5192,16 @@ def provider_call_transport_context(call_id: str) -> dict[str, Any]:
         "request_fingerprint": str(row[0]), "flight_fingerprint": str(row[1]),
         "paid_attempt_id": str(row[2] or ""), "execution_generation": int(row[3] or 1),
     }
+
+
+def provider_call_dispatch_round(call_id: str) -> int | None:
+    """Return the round that physically consumed a provider call, if any."""
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT round_ordinal FROM provider_dispatch_allocations WHERE consumed_call_id=? LIMIT 1",
+            (str(call_id),),
+        ).fetchone()
+    return int(row[0]) if row else None
 
 
 def provider_call_exists(*, run_id: str, provider: str, item_index: int, phase: str,
@@ -2546,18 +5223,102 @@ def provider_call_for_fingerprint(*, run_id: str, provider: str, item_index: int
                 "SELECT c.call_id,c.state,c.result_ref FROM provider_calls c "
                 "JOIN paid_attempt_calls l ON l.run_id=c.run_id AND l.provider=c.provider AND l.provider_call_id=c.call_id "
                 "WHERE c.run_id=? AND c.provider=? AND c.item_index=? AND c.phase=? AND c.request_fingerprint=? "
-                "AND l.query_fingerprint=? AND l.execution_generation=? LIMIT 1",
+                "AND l.query_fingerprint=? AND l.execution_generation=? "
+                "ORDER BY CASE c.state WHEN 'DONE' THEN 0 WHEN 'UNKNOWN' THEN 1 "
+                "WHEN 'RUNNING' THEN 2 WHEN 'RESERVED' THEN 3 ELSE 4 END, c.created_at DESC LIMIT 1",
                 (run_id, provider, int(item_index), phase, request_fingerprint,
                  str(query_fingerprint), int(execution_generation)),
             ).fetchone()
         else:
             row = connection.execute(
-                "SELECT call_id,state,result_ref FROM provider_calls WHERE run_id=? AND provider=? AND item_index=? AND phase=? AND request_fingerprint=? LIMIT 1",
+                "SELECT call_id,state,result_ref FROM provider_calls WHERE run_id=? AND provider=? AND item_index=? AND phase=? AND request_fingerprint=? "
+                "ORDER BY CASE state WHEN 'DONE' THEN 0 WHEN 'UNKNOWN' THEN 1 "
+                "WHEN 'RUNNING' THEN 2 WHEN 'RESERVED' THEN 3 ELSE 4 END, created_at DESC LIMIT 1",
                 (run_id, provider, int(item_index), phase, request_fingerprint),
             ).fetchone()
     if not row:
         return None
     return {"call_id": str(row[0]), "state": str(row[1]), "result_ref": str(row[2] or "")}
+
+
+def provider_call_matches_terminal_query_flight(
+    *, run_id: str, provider: str, call_id: str, item_index: int, phase: str,
+    operation: str, request_fingerprint: str, query_fingerprint: str,
+    execution_generation: int, expected_state: str,
+) -> bool:
+    """Prove a duplicate call belongs to this exact request and terminal flight."""
+    expected_state = str(expected_state).upper()
+    if expected_state not in {"DONE", "FAILED", "UNKNOWN"}:
+        return False
+    with closing(_connect()) as connection:
+        row = connection.execute(
+            "SELECT c.state,c.operation,c.request_fingerprint,c.flight_fingerprint,"
+            "l.query_fingerprint,l.execution_generation,l.relation,t.state,t.call_ids_json,"
+            "r.result_json,r.result_sha256 "
+            "FROM provider_calls c "
+            "JOIN paid_attempt_calls l ON l.run_id=c.run_id AND l.provider=c.provider "
+            "AND l.provider_call_id=c.call_id "
+            "JOIN provider_query_flight_terminals t ON t.run_id=l.run_id AND t.provider=l.provider "
+            "AND t.query_fingerprint=l.query_fingerprint AND t.execution_generation=l.execution_generation "
+            "LEFT JOIN provider_query_flight_results r ON r.run_id=c.run_id AND r.provider=c.provider "
+            "AND r.query_fingerprint=l.query_fingerprint AND r.execution_generation=l.execution_generation "
+            "AND r.provider_call_id=c.call_id "
+            "WHERE c.run_id=? AND c.provider=? AND c.call_id=? AND c.item_index=? AND c.phase=? "
+            "AND c.operation=? AND c.request_fingerprint=? AND c.flight_fingerprint=? "
+            "AND l.query_fingerprint=? AND l.execution_generation=? AND l.relation='OWNER'",
+            (str(run_id), str(provider), str(call_id), int(item_index), str(phase),
+             str(operation), str(request_fingerprint), str(query_fingerprint),
+             str(query_fingerprint), int(execution_generation)),
+        ).fetchone()
+    if not row or str(row[0]) != expected_state or str(row[7]) not in {"DONE", "FAILED", "UNKNOWN"}:
+        return False
+    try:
+        terminal_call_ids = json.loads(str(row[8] or "[]"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(terminal_call_ids, list) or str(call_id) not in {str(value) for value in terminal_call_ids}:
+        return False
+    if expected_state == "DONE":
+        result_json = str(row[9] or "")
+        if not result_json or hashlib.sha256(result_json.encode("utf-8")).hexdigest() != str(row[10] or ""):
+            return False
+        try:
+            result = json.loads(result_json)
+        except json.JSONDecodeError:
+            return False
+        if str(result.get("flight_fingerprint", "")) != str(query_fingerprint):
+            return False
+        if str(call_id) not in {str(value) for value in result.get("call_ids", ())}:
+            return False
+    return True
+
+
+def provider_call_retry_allowed(*, run_id: str, provider: str, item_index: int,
+                                phase: str, request_fingerprint: str,
+                                query_fingerprint: str = "",
+                                execution_generation: int = 0) -> bool:
+    """Allow a bounded retry while its logical flight/paid attempt is still live."""
+    with closing(_connect()) as connection:
+        call = connection.execute(
+            "SELECT state FROM provider_calls WHERE run_id=? AND provider=? AND item_index=? "
+            "AND phase=? AND request_fingerprint=? ORDER BY created_at DESC LIMIT 1",
+            (str(run_id), str(provider), int(item_index), str(phase), str(request_fingerprint)),
+        ).fetchone()
+        if not call or str(call[0]) != "FAILED":
+            return False
+        if query_fingerprint and int(execution_generation) > 0:
+            flight = connection.execute(
+                "SELECT state,execution_generation FROM provider_query_flights "
+                "WHERE run_id=? AND provider=? AND query_fingerprint=?",
+                (str(run_id), str(provider), str(query_fingerprint)),
+            ).fetchone()
+            return bool(flight and str(flight[0]) == "RUNNING" and int(flight[1]) == int(execution_generation))
+        attempt = connection.execute(
+            "SELECT 1 FROM paid_attempts WHERE run_id=? AND item_index=? AND phase=? "
+            "AND result='RUNNING' LIMIT 1",
+            (str(run_id), int(item_index), str(phase)),
+        ).fetchone()
+        return bool(attempt)
 
 
 def begin_finalization_intent(*, run_id: str, generation: str, input_snapshot_sha256: str,
@@ -2795,7 +5556,8 @@ def validate_ledger_equations(run_id: str, *, require_terminal: bool = False) ->
     item_cap = max(1, int(telemetry["total_items"]))
     if free["logical_used"] > 10 * item_cap or free["discovery_logical_accepted"] > 6 * item_cap or free["targeted_logical_accepted"] > 4 * item_cap:
         raise LedgerInvariant("free logical hard cap exceeded")
-    if free["physical_attempted"] > 10 * item_cap or free["discovery_physical_attempted"] > 6 * item_cap or free["targeted_physical_attempted"] > 4 * item_cap:
+    physical_multiplier = int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
+    if free["physical_attempted"] > 10 * physical_multiplier * item_cap or free["discovery_physical_attempted"] > 6 * physical_multiplier * item_cap or free["targeted_physical_attempted"] > 4 * physical_multiplier * item_cap:
         raise LedgerInvariant("free provider hard cap exceeded")
     if require_terminal and free["physical_reserved"]:
         raise LedgerInvariant("free provider ledger has RESERVED attempts")
@@ -3212,7 +5974,9 @@ def complete_memory_receipt(run_id: str, receipt_key: str) -> None:
 def reserve_provider_call(*, run_id: str, provider: str, item_index: int, phase: str,
                           request_fingerprint: str, configured_limit: int, effective_limit: int,
                           operation: str = "", query_fingerprint: str = "",
-                          execution_generation: int = 0) -> str | None:
+                          execution_generation: int = 0,
+                          dispatch_round_ordinal: int | None = None,
+                          dispatch_source_record_id: str = "") -> str | None:
     if provider not in CANONICAL_PROVIDERS:
         raise LedgerInvariant(f"unknown provider: {provider}")
     call_id = uuid.uuid4().hex
@@ -3239,7 +6003,7 @@ def reserve_provider_call(*, run_id: str, provider: str, item_index: int, phase:
                 connection.rollback()
                 raise StateTransitionInvariant("provider reservation requires the active query generation")
             duplicate = connection.execute(
-                "SELECT 1 FROM provider_calls c JOIN paid_attempt_calls l "
+                "SELECT c.state FROM provider_calls c JOIN paid_attempt_calls l "
                 "ON l.run_id=c.run_id AND l.provider=c.provider AND l.provider_call_id=c.call_id "
                 "WHERE c.run_id=? AND c.provider=? AND c.item_index=? AND c.phase=? AND c.request_fingerprint=? "
                 "AND l.query_fingerprint=? AND l.execution_generation=? LIMIT 1",
@@ -3248,12 +6012,59 @@ def reserve_provider_call(*, run_id: str, provider: str, item_index: int, phase:
             ).fetchone()
         else:
             duplicate = connection.execute(
-                "SELECT 1 FROM provider_calls WHERE run_id=? AND provider=? AND item_index=? AND phase=? AND request_fingerprint=? LIMIT 1",
+                "SELECT state FROM provider_calls WHERE run_id=? AND provider=? AND item_index=? AND phase=? AND request_fingerprint=? LIMIT 1",
                 (run_id, provider, int(item_index), phase, request_fingerprint),
             ).fetchone()
         if duplicate:
-            connection.rollback()
-            return None
+            duplicate_state = str(duplicate[0])
+            retryable = duplicate_state == "FAILED" and (
+                scoped_flight
+                or bool(connection.execute(
+                    "SELECT 1 FROM paid_attempts WHERE run_id=? AND item_index=? AND phase=? "
+                    "AND result='RUNNING' LIMIT 1",
+                    (run_id, int(item_index), str(phase)),
+                ).fetchone())
+            )
+            if not retryable:
+                connection.rollback()
+                return None
+        dispatch_allocation = None
+        if dispatch_round_ordinal is not None:
+            dispatch_allocation = connection.execute(
+                "SELECT source_record_id,state,job_fingerprint,consumed_call_id,operation,request_fingerprint,query_fingerprint FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=?",
+                (run_id, provider, int(dispatch_round_ordinal), int(item_index)),
+            ).fetchone()
+            if not dispatch_allocation:
+                connection.rollback()
+                raise DispatchAllocationUnavailable("provider dispatch allocation is missing")
+            if dispatch_source_record_id and str(dispatch_allocation[0]) != str(dispatch_source_record_id):
+                connection.rollback()
+                raise DispatchAllocationUnavailable("provider dispatch allocation source mismatch")
+            allocation_state = str(dispatch_allocation[1])
+            retry_allocation = allocation_state == "CONSUMED" and duplicate is not None
+            if allocation_state not in {"RESERVED", "CONSUMED"} or (allocation_state == "CONSUMED" and not retry_allocation):
+                connection.rollback()
+                raise DispatchAllocationUnavailable("provider dispatch allocation is already consumed or terminal")
+            if dispatch_allocation[4] and str(dispatch_allocation[4]) != str(operation):
+                connection.rollback()
+                raise DispatchAllocationUnavailable("provider dispatch allocation operation mismatch")
+            if dispatch_allocation[5] and str(dispatch_allocation[5]) != str(request_fingerprint):
+                connection.rollback()
+                raise DispatchAllocationUnavailable("provider dispatch allocation request mismatch")
+            work_item = connection.execute(
+                "SELECT state,source_record_id,operation,request_fingerprint,query_fingerprint FROM provider_work_items WHERE run_id=? AND job_fingerprint=?",
+                (run_id, str(dispatch_allocation[2] or "")),
+            ).fetchone() if dispatch_allocation[2] else None
+            if work_item:
+                if str(work_item[0]) not in {"READY", "ALLOCATED"}:
+                    connection.rollback()
+                    raise DispatchAllocationUnavailable("provider work item is not READY")
+                if str(work_item[1]) != str(dispatch_source_record_id or work_item[1]) or str(work_item[2]) != str(operation) or str(work_item[3]) != str(request_fingerprint):
+                    connection.rollback()
+                    raise DispatchAllocationUnavailable("provider work item identity mismatch")
+                if str(dispatch_allocation[6] or "") != str(work_item[4] or ""):
+                    connection.rollback()
+                    raise DispatchAllocationUnavailable("provider work item query identity mismatch")
         usage = connection.execute("SELECT reserved,completed,failed,effective_limit,reserved_total,unknown FROM provider_usage WHERE run_id=? AND provider=?", (run_id, provider)).fetchone()
         if not usage:
             connection.rollback()
@@ -3277,6 +6088,24 @@ def reserve_provider_call(*, run_id: str, provider: str, item_index: int, phase:
             "INSERT INTO provider_calls(run_id,call_id,provider,item_index,phase,operation,request_fingerprint,state,result_ref,created_at,updated_at,flight_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, call_id, provider, item_index, phase, operation, request_fingerprint, "RESERVED", "", now, now, str(query_fingerprint)),
         )
+        if dispatch_allocation is not None:
+            updated = connection.execute(
+                "UPDATE provider_dispatch_allocations SET state='CONSUMED',consumed_call_id=?,consumed_at=?,terminal_state='',terminal_at='' "
+                "WHERE run_id=? AND provider=? AND round_ordinal=? AND item_index=? AND state IN ('RESERVED','CONSUMED')",
+                (str(call_id), now, run_id, provider, int(dispatch_round_ordinal), int(item_index)),
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                raise DispatchAllocationUnavailable("provider dispatch allocation was consumed concurrently")
+            connection.execute(
+                "UPDATE provider_dispatch_rounds SET state='IN_PROGRESS' WHERE run_id=? AND provider=? AND round_ordinal=? AND state='RESERVED'",
+                (run_id, provider, int(dispatch_round_ordinal)),
+            )
+            if dispatch_allocation[2]:
+                connection.execute(
+                    "UPDATE provider_work_items SET state='ALLOCATED',call_id=?,updated_at=? WHERE run_id=? AND job_fingerprint=? AND state IN ('READY','ALLOCATED')",
+                    (str(call_id), now, run_id, str(dispatch_allocation[2])),
+                )
         if attempt:
             paid_attempt_id = hashlib.sha256(f"{run_id}\0{int(item_index)}\0{int(attempt[0])}\0PAID".encode("utf-8")).hexdigest()
             connection.execute("INSERT INTO paid_attempt_calls(run_id,item_index,attempt_number,phase,call_id,paid_attempt_id,provider_call_id,provider,query_fingerprint,execution_generation,relation) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (run_id, int(item_index), int(attempt[0]), "PAID", call_id, paid_attempt_id, call_id, provider, str(query_fingerprint), int(execution_generation) if scoped_flight else 1, "OWNER"))
@@ -3345,6 +6174,11 @@ def complete_provider_call(*, call_id: str, state: str, result_ref: str = "") ->
             connection.rollback()
             raise LedgerInvariant("provider call completed more than once")
         connection.execute("UPDATE provider_calls SET state=?,result_ref=?,updated_at=? WHERE call_id=?", (state, result_ref, now, call_id))
+        _record_provider_failure_event(
+            connection, call_id=str(call_id), state=state,
+            result_ref=str(result_ref or ""), now=now,
+        )
+        _terminalize_provider_dispatch_for_call(connection, call_id=str(call_id), state=state, now=now)
         usage = connection.execute("SELECT reserved FROM provider_usage WHERE run_id=? AND provider=?", (call[0], call[1])).fetchone()
         if not usage or int(usage[0]) <= 0:
             connection.rollback()
@@ -3364,13 +6198,93 @@ def complete_provider_call_for_context(*, run_id: str, provider: str, item_index
         complete_provider_call(call_id=str(row[0]), state=state, result_ref=result_ref)
 
 
+def _recover_provider_call_before_http(connection: sqlite3.Connection, *, run_id: str, call_id: str, now: str) -> bool:
+    call = connection.execute(
+        "SELECT provider,item_index,phase,operation,request_fingerprint,state,http_started_at,attempt_ordinal,flight_fingerprint FROM provider_calls WHERE run_id=? AND call_id=?",
+        (str(run_id), str(call_id)),
+    ).fetchone()
+    if not call or str(call[5]) not in {"RESERVED", "RUNNING"} or str(call[6] or ""):
+        return False
+    provider, item_index, phase, operation, request_fingerprint, state, _http_started_at, attempt_ordinal, flight_fingerprint = call
+    durable_result = connection.execute(
+        "SELECT 1 FROM provider_query_flight_results WHERE run_id=? AND provider=? AND provider_call_id=? LIMIT 1",
+        (str(run_id), str(provider), str(call_id)),
+    ).fetchone()
+    if durable_result:
+        raise EvidenceInvariant("pre-HTTP provider call unexpectedly has a committed flight result")
+    work_rows = connection.execute(
+        "SELECT job_fingerprint,state FROM provider_work_items WHERE run_id=? AND call_id=?",
+        (str(run_id), str(call_id)),
+    ).fetchall()
+    if any(str(work_state) not in {"ALLOCATED", "READY"} for _job, work_state in work_rows):
+        raise EvidenceInvariant("pre-HTTP provider call conflicts with terminal provider work")
+
+    connection.execute(
+        "INSERT INTO provider_call_recovery_receipts(run_id,call_id,provider,item_index,phase,operation,request_fingerprint,flight_fingerprint,reason,http_started_at,attempt_ordinal,recovered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (str(run_id), str(call_id), str(provider), int(item_index), str(phase), str(operation),
+         str(request_fingerprint), str(flight_fingerprint or ""), "recovered_before_durable_http_start", "",
+         int(attempt_ordinal or 1), str(now)),
+    )
+
+    connection.execute("DELETE FROM provider_query_flight_consumers WHERE run_id=? AND provider=? AND provider_call_id=?", (str(run_id), str(provider), str(call_id)))
+    connection.execute("DELETE FROM paid_attempt_calls WHERE run_id=? AND provider=? AND provider_call_id=?", (str(run_id), str(provider), str(call_id)))
+    connection.execute(
+        "UPDATE provider_dispatch_allocations SET state='RESERVED',consumed_call_id='',consumed_at='',terminal_state='',terminal_at='' WHERE run_id=? AND provider=? AND consumed_call_id=? AND state='CONSUMED'",
+        (str(run_id), str(provider), str(call_id)),
+    )
+    rounds = [int(row[0]) for row in connection.execute(
+        "SELECT round_ordinal FROM provider_dispatch_allocations WHERE run_id=? AND provider=? AND state='RESERVED' AND item_index=?",
+        (str(run_id), str(provider), int(item_index)),
+    ).fetchall()]
+    connection.execute(
+        "UPDATE provider_work_items SET state='READY',terminal_reason='',call_id='',updated_at=? WHERE run_id=? AND call_id=? AND state='ALLOCATED'",
+        (str(now), str(run_id), str(call_id)),
+    )
+    for round_ordinal in rounds:
+        _refresh_provider_dispatch_round_state(connection, run_id=str(run_id), provider=str(provider), round_ordinal=round_ordinal, now=str(now))
+
+    if str(flight_fingerprint or ""):
+        flight = connection.execute(
+            "SELECT call_ids_json FROM provider_query_flights WHERE run_id=? AND provider=? AND query_fingerprint=? AND state='RUNNING'",
+            (str(run_id), str(provider), str(flight_fingerprint)),
+        ).fetchone()
+        if flight:
+            call_ids = [str(value) for value in json.loads(str(flight[0] or "[]")) if str(value) != str(call_id)]
+            prior_call_id = next((value for value in reversed(call_ids) if connection.execute(
+                "SELECT 1 FROM provider_calls WHERE run_id=? AND provider=? AND call_id=?",
+                (str(run_id), str(provider), value),
+            ).fetchone()), "")
+            connection.execute(
+                "UPDATE provider_query_flights SET provider_call_id=?,call_ids_json=?,lease_expires_at=?,updated_at=? WHERE run_id=? AND provider=? AND query_fingerprint=? AND state='RUNNING'",
+                (prior_call_id, json.dumps(call_ids), str(now), str(now), str(run_id), str(provider), str(flight_fingerprint)),
+            )
+
+    usage = connection.execute(
+        "UPDATE provider_usage SET reserved=reserved-1,reserved_total=reserved_total-1 WHERE run_id=? AND provider=? AND reserved>0 AND reserved_total>0",
+        (str(run_id), str(provider)),
+    )
+    if usage.rowcount != 1:
+        raise LedgerInvariant("pre-HTTP provider call recovery found inconsistent budget counters")
+    connection.execute("DELETE FROM provider_calls WHERE run_id=? AND call_id=? AND state=? AND http_started_at=''", (str(run_id), str(call_id), str(state)))
+    return True
+
+
 def reconcile_unknown_provider_calls(run_id: str) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        calls = connection.execute("SELECT call_id,provider,item_index FROM provider_calls WHERE run_id=? AND state IN ('RESERVED','RUNNING')", (run_id,)).fetchall()
-        for call_id, provider, item_index in calls:
+        calls = connection.execute("SELECT call_id,provider,item_index,http_started_at FROM provider_calls WHERE run_id=? AND state IN ('RESERVED','RUNNING')", (run_id,)).fetchall()
+        unknown_count = 0
+        for call_id, provider, item_index, http_started_at in calls:
+            if not str(http_started_at or ""):
+                _recover_provider_call_before_http(connection, run_id=str(run_id), call_id=str(call_id), now=now)
+                continue
             connection.execute("UPDATE provider_calls SET state='UNKNOWN',updated_at=? WHERE call_id=?", (now, call_id))
+            _record_provider_failure_event(
+                connection, call_id=str(call_id), state="UNKNOWN",
+                result_ref="reconciled_unknown", now=now,
+            )
+            _terminalize_provider_dispatch_for_call(connection, call_id=str(call_id), state="UNKNOWN", now=now)
             usage = connection.execute("SELECT reserved FROM provider_usage WHERE run_id=? AND provider=?", (run_id, provider)).fetchone()
             if not usage or int(usage[0]) <= 0:
                 connection.rollback()
@@ -3378,8 +6292,9 @@ def reconcile_unknown_provider_calls(run_id: str) -> int:
             connection.execute("UPDATE provider_usage SET reserved=reserved-1,unknown=unknown+1 WHERE run_id=? AND provider=?", (run_id, provider))
             connection.execute("UPDATE paid_attempts SET result='UNKNOWN',reason='provider_call_reconciled_unknown' WHERE run_id=? AND item_index=? AND phase='PAID' AND attempt_number IN (SELECT attempt_number FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND phase='PAID' AND call_id=?)", (run_id, int(item_index), run_id, int(item_index), call_id))
             connection.execute("UPDATE run_items SET paid_state='UNKNOWN',last_error='provider_call_reconciled_unknown' WHERE run_id=? AND item_index=? AND paid_required=1", (run_id, int(item_index)))
+            unknown_count += 1
         connection.commit()
-    return len(calls)
+    return unknown_count
 
 
 def set_phase(input_path: Path, run_signature: str, phase: str) -> None:
@@ -3406,10 +6321,10 @@ def load_run_state_by_id(run_id: str) -> dict[str, Any] | None:
     if not config.PROGRESS_DB_FILE.exists():
         return None
     with closing(_connect()) as connection:
-        row = connection.execute("SELECT input_hash,run_signature,phase,context_json,budgets_json,attempt_number,runtime_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        row = connection.execute("SELECT input_hash,run_signature,phase,context_json,budgets_json,attempt_number,runtime_json,termination_reason,stopped_at FROM runs WHERE run_id=?", (run_id,)).fetchone()
     if not row:
         return None
-    return {"run_id": run_id, "input_hash": row[0], "run_signature": row[1], "phase": row[2], "context": json.loads(row[3] or "{}"), "budgets": json.loads(row[4] or "{}"), "attempt_number": int(row[5] or 1), "runtime_snapshot": json.loads(row[6] or "{}")}
+    return {"run_id": run_id, "input_hash": row[0], "run_signature": row[1], "phase": row[2], "context": json.loads(row[3] or "{}"), "budgets": json.loads(row[4] or "{}"), "attempt_number": int(row[5] or 1), "runtime_snapshot": json.loads(row[6] or "{}"), "termination_reason": str(row[7] or ""), "stopped_at": str(row[8] or "")}
 
 
 def set_phase_by_id(run_id: str, phase: str) -> None:

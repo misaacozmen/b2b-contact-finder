@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import requests
 
@@ -72,6 +73,34 @@ def _evaluation(url="https://alfabalik.com"):
 class LlmArbiterPackageTests(unittest.TestCase):
     def setUp(self):
         runtime.reset()
+
+    def test_paid_known_website_can_defer_llm_until_linkedin_gate(self):
+        evaluation = _evaluation()
+        evaluation["context_failed"] = False
+        evaluation["reasons"] = [
+            "page_identity_medium:1/1", "country_identity_tr_text",
+        ]
+        evaluation["identity_assessment"] = {
+            "support_keys": ["first_party_identity"],
+            "publishable": False,
+            "provisionally_publishable": False,
+            "support_count": 1,
+            "conflicts": [],
+        }
+        resolution = SimpleNamespace(
+            status="resolved", selected=evaluation, reason="test_resolution",
+        )
+        with patch.object(main, "_evaluate_candidate", return_value=evaluation), patch.object(
+            entity_resolution, "resolve_candidates", return_value=resolution,
+        ), patch.object(main, "_try_llm_arbitration") as arbitrate, patch.object(
+            main, "_finalize_selected_evaluation", return_value={"status": "REVIEW_NEEDED"},
+        ), patch.object(main, "_attach_candidates", return_value={"status": "REVIEW_NEEDED"}):
+            result = main._process_known_website(
+                0, "ALFA", "https://alfabalik.com", Mock(),
+                defer_llm_arbitration=True,
+            )
+        arbitrate.assert_not_called()
+        self.assertEqual(result[0], 0)
 
     def test_mock_client_returns_structured_verdict_and_records_cost(self):
         client = FakeClient()

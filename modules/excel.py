@@ -127,6 +127,7 @@ def read_company_records(path: Path) -> list[dict]:
                 "source": value_for(row, ("source", "kaynak"), None),
                 "source_record_id": value_for(row, ("source_record_id", "source id", "record_id"), None),
                 "country": value_for(row, ("country", "ulke", "ülke"), None),
+                "city": value_for(row, ("city", "sehir", "şehir"), None),
                 "profile_url": value_for(row, ("profile_url", "profil", "profile"), None),
                 "listing_url": value_for(row, ("listing_url", "liste_url", "liste url"), None),
                 "listed_phone": value_for(row, ("listed_phone", "fair_phone", "fuar telefonu"), None),

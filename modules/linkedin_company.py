@@ -14,6 +14,7 @@ from modules import cache_store, checkpoint, network_guard, runtime, scorer
 
 _CACHE: dict[tuple[str, str], dict | None] = {}
 _PROFILE_CACHE: dict[str, dict | None] = {}
+_PROFILE_URL_CACHE: dict[str, str] = {}
 
 
 class ProviderText(str):
@@ -49,6 +50,7 @@ def reset() -> None:
     with _LOCK:
         _CACHE.clear()
         _PROFILE_CACHE.clear()
+        _PROFILE_URL_CACHE.clear()
 
 
 def _company_url(value: str) -> str:
@@ -217,6 +219,14 @@ def _scrape(linkedin_url: str):
     return ProviderRecord(rows[0], state="COMPLETED", reason="record", call_ids=(getattr(reservation, "call_id", ""),), provider="linkedin") if rows else ProviderRecord(state="EMPTY", reason="empty_response", call_ids=(getattr(reservation, "call_id", ""),), provider="linkedin")
 
 
+def _dispatch_deferred(result: object) -> bool:
+    """A later durable allocation may retry this call without repeating HTTP."""
+    return (
+        str(getattr(result, "result_state", "")).upper() == "BLOCKED_BUDGET"
+        and str(getattr(result, "result_reason", "")) == "dispatch_not_allocated"
+    )
+
+
 def _resolved_website(website: str) -> str:
     """Resolve LinkedIn campaign short-links before comparing domains."""
     if not scorer.is_valid_hostname(website):
@@ -286,17 +296,27 @@ def corroborate(company: str, evaluation: dict) -> dict | None:
             return _CACHE[key]
         profile_cached = company_key in _PROFILE_CACHE
         profile_evidence = _PROFILE_CACHE.get(company_key)
+        cached_profile_url = _PROFILE_URL_CACHE.get(company_key, "")
 
     declared_url = _declared_linkedin_url(evaluation)
     if not profile_cached:
         runtime.record("api.linkedin_company.lookup_attempts")
         try:
-            linkedin_url = declared_url or _find_company_url(company)
+            linkedin_url = declared_url or cached_profile_url
+            if not linkedin_url:
+                search_result = _find_company_url(company)
+                if _dispatch_deferred(search_result):
+                    return None
+                linkedin_url = str(search_result or "")
             if not linkedin_url:
                 runtime.record("api.linkedin_company.not_found")
                 profile_evidence = None
             else:
+                with _LOCK:
+                    _PROFILE_URL_CACHE[company_key] = linkedin_url
                 record = _scrape(linkedin_url)
+                if _dispatch_deferred(record):
+                    return None
                 website = str((record or {}).get("website", "") or "")
                 resolved_website = website
                 profile_evidence = {

@@ -7,6 +7,7 @@ from openpyxl import Workbook, load_workbook
 
 from prepare_remediation_run import prepare_remediation_run
 from reconcile_runs import reconcile_runs
+from strict_fixtures import publishable_content_decision
 
 
 def _input(path: Path) -> None:
@@ -50,7 +51,7 @@ def test_reconcile_retains_failed_child_and_blocks_new_conflict(tmp_path: Path):
     child = tmp_path / "child.json"
     _input(input_path)
     baseline.write_text(json.dumps([
-        {"source_record_id": "src:a", "company": "Alpha", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://alpha.example"},
+            {"source_record_id": "src:a", "company": "Alpha", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://alpha.example", "content_decision": publishable_content_decision(source_record_id="src:a", website="https://alpha.example", email="", phone=""), "free_state": "DONE", "paid_required": False, "paid_state": "NOT_REQUIRED"},
         {"source_record_id": "src:b", "company": "Beta", "status": "REVIEW_NEEDED", "publication_eligible": False},
         {"source_record_id": "src:c", "company": "Gamma", "status": "REVIEW_NEEDED", "publication_eligible": False},
     ]), encoding="utf-8")

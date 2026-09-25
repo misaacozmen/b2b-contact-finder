@@ -55,9 +55,22 @@ class CompanyResolverPackageTests(unittest.TestCase):
         }]), patch.object(company_resolvers, "hunter_domains", return_value=[{
             "provider": "hunter_domain_finder", "domain": "example.com", "resolved_name": "Example",
             "rank": 1, "claimed": False,
-        }]):
+        }]) as hunter:
             results = company_resolvers.resolve_company_domains("Example")
+            hunter.assert_called_once_with("Example")
         self.assertEqual(results[0]["providers"], ["brandfetch", "hunter_domain_finder"])
+
+    def test_resolver_calls_hunter_only_when_brandfetch_is_insufficient(self):
+        with patch.object(company_resolvers, "brandfetch_domains", return_value=[{
+            "provider": "brandfetch", "domain": "unrelated.example", "resolved_name": "Unrelated",
+            "rank": 1, "claimed": False,
+        }]), patch.object(company_resolvers, "hunter_domains", return_value=[{
+            "provider": "hunter_domain_finder", "domain": "example.com", "resolved_name": "Example",
+            "rank": 1, "claimed": False,
+        }]) as hunter:
+            results = company_resolvers.resolve_company_domains("Example")
+        hunter.assert_called_once_with("Example")
+        self.assertEqual(results[0]["providers"], ["hunter_domain_finder"])
 
     def test_resolver_rejects_unrelated_resolved_company_name(self):
         with patch.object(company_resolvers, "brandfetch_domains", return_value=[]), patch.object(
@@ -152,7 +165,7 @@ class CompanyResolverPackageTests(unittest.TestCase):
             "website": "https://chosen.com", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "confidence": "high",
         }, candidates)
         stages = row["__candidate_evaluations"]
-        self.assertEqual(stages[0]["stages"][-1]["stage"], "published")
+        self.assertEqual(stages[0]["stages"][-1]["stage"], "selected_for_review")
         self.assertEqual(stages[1]["stages"][-1]["stage"], "not_evaluated")
 
     def test_close_publishable_aliases_trigger_ambiguity_gate(self):

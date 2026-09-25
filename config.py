@@ -51,6 +51,7 @@ RUNS_DIR = BASE_DIR / "runs"
 RUN_SCHEMA_VERSION = 3
 CONFIG_SCHEMA_VERSION = 3
 METADATA_SCHEMA_VERSION = 1
+INPUT_SNAPSHOT_SCHEMA_VERSION = 3
 EVIDENCE_SCHEMA_VERSION = 1
 CRAWL_CACHE_CAPABILITY_SCHEMA_VERSION = 1
 MAX_ZUCHEX_PAGES = max(1, int(os.getenv("MAX_ZUCHEX_PAGES", "1000")))
@@ -79,6 +80,9 @@ SEARCH_CACHE_TTL_DAYS = int(os.getenv("SEARCH_CACHE_TTL_DAYS", "30"))
 SEARCH_EMPTY_CACHE_TTL_DAYS = 1 / 24
 CRAWL_CACHE_TTL_DAYS = int(os.getenv("CRAWL_CACHE_TTL_DAYS", "7"))
 CACHE_SCHEMA_VERSION = 2
+SERP_NORMALIZATION_VERSION = 1
+QUERY_PLAN_VERSION = 2
+SOURCE_RECORD_ID_VERSION = 2
 # Crawl discovery changed independently from SERP/MX caches.  Keeping a
 # separate version refreshes official sites without invalidating paid search
 # results that are still reusable.
@@ -96,6 +100,7 @@ SEARCH_HTTP_REQUEST_BUDGET = int(os.getenv("SEARCH_HTTP_REQUEST_BUDGET", "0"))
 DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY = max(
     1, int(os.getenv("DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY", "10"))
 )
+FREE_SEARCH_PHYSICAL_MULTIPLIER = 2
 def _optional_request_cap(name: str, default: int | None = None) -> int | None:
     raw = os.getenv(name)
     return default if raw is None else max(0, int(raw))
@@ -607,6 +612,15 @@ CONTEXT_VALIDATION_WORDS = [
 ]
 
 METADATA_CONTEXTS = {
+    "footwear": {
+        "query_term": "footwear",
+        "aliases": [
+            "ayakkabı", "ayakkabi", "footwear", "shoe", "shoes",
+            "erkek ayakkabı", "erkek ayakkabi", "men footwear", "men shoes",
+            "kadın ayakkabı", "kadin ayakkabi", "women footwear", "women shoes",
+            "çocuk ayakkabı", "cocuk ayakkabi", "children footwear", "kids shoes",
+        ],
+    },
     "kozmetik": {
         "query_term": "kozmetik",
         "aliases": [

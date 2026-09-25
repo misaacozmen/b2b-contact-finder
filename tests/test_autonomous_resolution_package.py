@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import config
 import main
+from strict_fixtures import publishable_content_decision
 from modules import (
     crawler,
     entity_memory,
@@ -269,6 +270,11 @@ class DiscoveryAndMemoryTests(unittest.TestCase):
                 "company": "ORNEK METAL",
                 "status": "OK_MEDIUM_CONFIDENCE",
                 "publication_eligible": True,
+                "content_decision": publishable_content_decision(source_record_id="fixture:memory", website="https://ornek.example", email="", phone=""),
+                "source_record_id": "fixture:memory",
+                "free_state": "DONE",
+                "paid_required": False,
+                "paid_state": "NOT_REQUIRED",
                 "website": "https://ornek.example",
                 "email_source_url": "https://ornek.example/contact",
                 "phone_source_url": "",
@@ -547,6 +553,11 @@ class AutonomousOrchestrationTests(unittest.TestCase):
             "company": "ORNEK",
             "status": "OK_MEDIUM_CONFIDENCE",
             "publication_eligible": True,
+            "content_decision": publishable_content_decision(source_record_id="fixture:quality", website="https://ornek.example", email="", phone=""),
+            "source_record_id": "fixture:quality",
+            "free_state": "DONE",
+            "paid_required": False,
+            "paid_state": "NOT_REQUIRED",
             "website": "https://ornek.example",
             "email_source_url": "https://directory.example/profile",
             "phone_source_url": "",
@@ -561,6 +572,11 @@ class AutonomousOrchestrationTests(unittest.TestCase):
             "company": "ORNEK",
             "status": "OK_MEDIUM_CONFIDENCE",
             "publication_eligible": True,
+            "content_decision": publishable_content_decision(source_record_id="fixture:quality-third-party", website="https://tradeatlas.com", email="", phone=""),
+            "source_record_id": "fixture:quality-third-party",
+            "free_state": "DONE",
+            "paid_required": False,
+            "paid_state": "NOT_REQUIRED",
             "website": "https://tradeatlas.com",
             "email_source_url": "https://tradeatlas.com/company/ornek",
             "phone_source_url": "https://tradeatlas.com/company/ornek",

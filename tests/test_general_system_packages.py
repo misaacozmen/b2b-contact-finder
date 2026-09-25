@@ -6,6 +6,7 @@ from openpyxl import load_workbook
 import main
 import config
 from modules import crawler, extractor, identity, output_artifacts, query_planner, relationship_graph, site_mapper
+from strict_fixtures import publishable_content_decision
 
 
 class AdaptiveQueryPlannerTests(unittest.TestCase):
@@ -187,7 +188,7 @@ class SmartOfficialSiteMappingTests(unittest.TestCase):
 
     def test_primary_contacts_output_receives_only_publishable_rows(self):
         rows = [
-            {"company": "Verified", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://verified.example"},
+            {"company": "Verified", "source_record_id": "fixture:verified", "free_state": "DONE", "paid_required": False, "paid_state": "NOT_REQUIRED", "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True, "website": "https://verified.example", "email": "info@fixture.example", "phone": "+902120000000", "content_decision": publishable_content_decision(source_record_id="fixture:verified", website="https://verified.example", email="info@fixture.example", phone="+902120000000")},
             {"company": "Review", "status": "REVIEW_NEEDED", "website": "https://review.example"},
         ]
         published, review = output_artifacts.partition_output_rows(rows)

@@ -20,7 +20,12 @@ import config
 
 
 _LOCK = threading.RLock()
+_METRIC_FLUSH_LOCK = threading.Lock()
 _COUNTERS: Counter = Counter()
+_PENDING_DURABLE_METRICS: Counter = Counter()
+_PENDING_DURABLE_METRIC_EVENTS = 0
+_PENDING_DURABLE_METRIC_EVENTS_BY_RUN: Counter = Counter()
+_LAST_DURABLE_METRIC_FLUSH = time.monotonic()
 _STARTED_AT = time.monotonic()
 _NEXT_REQUEST_AT = 0.0
 _PHASE = "FREE"
@@ -35,6 +40,8 @@ _CURRENT_PROVIDER_OUTCOMES: ContextVar[tuple[dict, ...] | None] = ContextVar("cu
 _FREE_QUERY_COUNTS: dict[tuple[str, int, str], int] = {}
 _FREE_PROVIDER_ATTEMPTS: dict[str, dict] = {}
 _CURRENT_SEARCH_BUCKET: ContextVar[str] = ContextVar("current_search_bucket", default="")
+_CURRENT_PROVIDER_DISPATCH_ROUNDS: ContextVar[dict[str, int]] = ContextVar("current_provider_dispatch_rounds", default={})
+_CURRENT_PROVIDER_DISPATCH_PHYSICAL: ContextVar[dict[str, bool]] = ContextVar("current_provider_dispatch_physical", default={})
 _CURRENT_ITEM_STOP: ContextVar["PaidStopState"] = ContextVar("current_item_stop")
 _DURABLE_TELEMETRY: dict = {}
 _PAID_TRANSPORT: Callable[["TransportEnvelope"], Any] | None = None
@@ -74,6 +81,7 @@ def reset_item_stop_state(item_index: int) -> PaidStopState:
     set_item_context(item_index)
     state = PaidStopState()
     _CURRENT_ITEM_STOP.set(state)
+    _CURRENT_PROVIDER_DISPATCH_PHYSICAL.set({})
     return state
 
 
@@ -279,6 +287,25 @@ def end_provider_attempt(token) -> list[dict]:
     return outcomes
 
 
+def terminal_provider_query_follower_receipts(provider: str) -> tuple[dict, ...]:
+    """Return terminal inherited query receipts observed in this paid attempt."""
+    canonical = _PROVIDER_ALIASES.get(str(provider), str(provider))
+    receipts = []
+    for outcome in _CURRENT_PROVIDER_OUTCOMES.get() or ():
+        if (
+            str(outcome.get("provider", "")) != canonical
+            or str(outcome.get("origin", "")) != "SINGLEFLIGHT_FOLLOWER"
+            or str(outcome.get("result_state", "")).upper() not in {"COMPLETED", "EMPTY"}
+        ):
+            continue
+        fingerprint = str(outcome.get("flight_fingerprint", ""))
+        relations = outcome.get("call_relations") or {}
+        for call_id in outcome.get("call_ids", ()):
+            if fingerprint and str(relations.get(str(call_id), "")).upper() == "INHERITED":
+                receipts.append({"query_fingerprint": fingerprint, "provider_call_id": str(call_id)})
+    return tuple(receipts)
+
+
 def rejected_provider_result(reservation: Reservation) -> ProviderResult:
     reason = str(reservation.reason or "provider_rejected")
     if reason == "item_stop_guard":
@@ -298,7 +325,12 @@ def rejected_provider_result(reservation: Reservation) -> ProviderResult:
             "EMPTY": "EMPTY", "CACHE_HIT": "CACHE_HIT",
             "FAILED": "FAILED", "UNKNOWN": "UNKNOWN",
         }.get(inherited, "UNKNOWN" if inherited in {"RESERVED", "RUNNING"} else "DUPLICATE") if inherited else "DUPLICATE"
-        return provider_result([], state=state, reason=reason, call_ids=(reservation.call_id,), provider=reservation.provider)
+        return provider_result(
+            [], state=state, reason=reason, call_ids=(reservation.call_id,),
+            provider=reservation.provider,
+            call_relations={reservation.call_id: "INHERITED"} if reservation.call_id else {},
+            origin="SINGLEFLIGHT_FOLLOWER",
+        )
     return provider_result([], state="BLOCKED_BUDGET", reason=reason, provider=reservation.provider, origin="BUDGET_BLOCK")
 
 
@@ -336,6 +368,7 @@ def _counter_provider_name(provider: str) -> str:
 
 def reset() -> None:
     global _COUNTERS, _STARTED_AT, _NEXT_REQUEST_AT, _PHASE, _DURABLE_RUN_ID, _DURABLE_BUDGETS, _DURABLE_BUDGET_METADATA, _UNIQUE_TELEMETRY, _FREE_QUERY_COUNTS, _FREE_PROVIDER_ATTEMPTS, _DURABLE_TELEMETRY
+    flush_operational_metrics()
     with _LOCK:
         _COUNTERS = Counter({
             "api.brightdata.requests": max(
@@ -374,6 +407,7 @@ def reset() -> None:
     _CURRENT_OPERATION.set("")
     _CURRENT_SOURCE_RECORD_ID.set("")
     _CURRENT_SEARCH_BUCKET.set("")
+    _CURRENT_PROVIDER_DISPATCH_ROUNDS.set({})
     _CURRENT_PROVIDER_OUTCOMES.set(None)
     _CURRENT_ITEM_STOP.set(PaidStopState())
 
@@ -385,6 +419,7 @@ def configure_durable_run(
     budget_metadata: dict[str, dict] | None = None,
 ) -> None:
     global _DURABLE_RUN_ID, _DURABLE_BUDGETS, _DURABLE_BUDGET_METADATA
+    flush_operational_metrics()
     _DURABLE_RUN_ID = str(run_id)
     _DURABLE_BUDGETS = {str(key): int(value) for key, value in budgets.items()}
     _DURABLE_BUDGET_METADATA = {
@@ -436,6 +471,28 @@ def set_search_bucket(bucket: str = "") -> None:
 
 def search_bucket() -> str:
     return _CURRENT_SEARCH_BUCKET.get()
+
+
+def set_provider_dispatch_rounds(rounds: dict[str, int] | None = None) -> None:
+    _CURRENT_PROVIDER_DISPATCH_ROUNDS.set({
+        str(provider): int(round_ordinal)
+        for provider, round_ordinal in (rounds or {}).items()
+    })
+
+
+def provider_dispatch_round(provider: str) -> int | None:
+    value = _CURRENT_PROVIDER_DISPATCH_ROUNDS.get().get(str(provider))
+    return int(value) if value is not None else None
+
+
+def provider_dispatch_physical_consumed(provider: str) -> bool:
+    return bool(_CURRENT_PROVIDER_DISPATCH_PHYSICAL.get().get(str(provider), False))
+
+
+def _mark_provider_dispatch_physical(provider: str) -> None:
+    current = dict(_CURRENT_PROVIDER_DISPATCH_PHYSICAL.get())
+    current[str(provider)] = True
+    _CURRENT_PROVIDER_DISPATCH_PHYSICAL.set(current)
 
 
 def request_fingerprint(provider: str, operation: str, request: object) -> str:
@@ -501,6 +558,10 @@ def mark_api_http_started(reservation: Reservation, attempt_ordinal: int = 1, fl
             attempt_ordinal=int(attempt_ordinal),
             flight_fingerprint=str(flight_fingerprint),
         )
+    # A reservation is only an authorization.  The dispatch budget is
+    # physically consumed at the transport boundary, after the durable HTTP
+    # start receipt has been written.
+    _mark_provider_dispatch_physical(reservation.provider)
 
 
 def set_phase(phase: str) -> None:
@@ -539,8 +600,125 @@ def restore(snapshot: dict | None) -> None:
 
 
 def record(name: str, amount: int = 1) -> None:
+    global _PENDING_DURABLE_METRIC_EVENTS
+    durable_run_id = ""
+    should_flush = False
+    amount = int(amount)
     with _LOCK:
         _COUNTERS[name] += amount
+        durable_run_id = _DURABLE_RUN_ID
+    persist = str(name).startswith((
+        "recovery.", "api.", "search.serp.", "http.crawler.", "pipeline.",
+        "candidate.", "snapshot.", "cache.", "contact_policy.",
+        "source_profile.", "live.site.", "cache.site.",
+    ))
+    if durable_run_id and str(name) and persist and amount:
+        with _LOCK:
+            _PENDING_DURABLE_METRICS[(durable_run_id, str(name))] += amount
+            _PENDING_DURABLE_METRIC_EVENTS += 1
+            _PENDING_DURABLE_METRIC_EVENTS_BY_RUN[durable_run_id] += 1
+            should_flush = (
+                _PENDING_DURABLE_METRIC_EVENTS >= 64
+                or time.monotonic() - _LAST_DURABLE_METRIC_FLUSH >= 1.0
+            )
+        if should_flush:
+            flush_operational_metrics()
+
+
+def flush_operational_metrics() -> None:
+    """Durably batch non-authoritative metrics without opening SQLite per event."""
+    global _PENDING_DURABLE_METRIC_EVENTS, _LAST_DURABLE_METRIC_FLUSH
+    if not _METRIC_FLUSH_LOCK.acquire(blocking=False):
+        return
+    try:
+        with _LOCK:
+            pending = dict(_PENDING_DURABLE_METRICS)
+            event_counts = dict(_PENDING_DURABLE_METRIC_EVENTS_BY_RUN)
+            _PENDING_DURABLE_METRICS.clear()
+            _PENDING_DURABLE_METRIC_EVENTS_BY_RUN.clear()
+            _PENDING_DURABLE_METRIC_EVENTS = 0
+            _LAST_DURABLE_METRIC_FLUSH = time.monotonic()
+        if not pending:
+            return
+        grouped: dict[str, dict[str, int]] = {}
+        for (run_id, metric), amount in pending.items():
+            grouped.setdefault(str(run_id), {})[str(metric)] = int(amount)
+        failed: dict[tuple[str, str], int] = {}
+        for run_id, metrics in grouped.items():
+            try:
+                checkpoint = importlib.import_module("modules.checkpoint")
+                checkpoint.record_operational_metrics_batch(run_id, metrics)
+            except Exception:
+                failed.update({(run_id, metric): amount for metric, amount in metrics.items()})
+        if failed:
+            with _LOCK:
+                _PENDING_DURABLE_METRICS.update(failed)
+                for run_id in {key[0] for key in failed}:
+                    count = int(event_counts.get(run_id, 0))
+                    _PENDING_DURABLE_METRIC_EVENTS_BY_RUN[run_id] += count
+                    _PENDING_DURABLE_METRIC_EVENTS += count
+    finally:
+        _METRIC_FLUSH_LOCK.release()
+
+
+def drain_operational_metrics(run_id: str, *, timeout_seconds: float = 2.0) -> bool:
+    """Persist one run's queued metrics under a bounded, verifiable barrier."""
+    global _PENDING_DURABLE_METRIC_EVENTS, _LAST_DURABLE_METRIC_FLUSH
+    target_run_id = str(run_id or "").strip()
+    if not target_run_id:
+        return False
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _METRIC_FLUSH_LOCK.acquire(timeout=remaining):
+        return False
+    try:
+        with _LOCK:
+            pending = {
+                metric: int(amount)
+                for (pending_run_id, metric), amount in _PENDING_DURABLE_METRICS.items()
+                if pending_run_id == target_run_id and int(amount)
+            }
+            event_count = int(_PENDING_DURABLE_METRIC_EVENTS_BY_RUN.pop(target_run_id, 0))
+            for metric in pending:
+                _PENDING_DURABLE_METRICS.pop((target_run_id, metric), None)
+            _PENDING_DURABLE_METRIC_EVENTS = max(0, _PENDING_DURABLE_METRIC_EVENTS - event_count)
+        if not pending:
+            return event_count == 0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            with _LOCK:
+                _PENDING_DURABLE_METRICS.update({(target_run_id, key): value for key, value in pending.items()})
+                _PENDING_DURABLE_METRIC_EVENTS_BY_RUN[target_run_id] += event_count
+                _PENDING_DURABLE_METRIC_EVENTS += event_count
+            return False
+        try:
+            checkpoint = importlib.import_module("modules.checkpoint")
+            checkpoint.record_operational_metrics_batch(
+                target_run_id, pending, timeout_seconds=remaining,
+            )
+        except Exception:
+            with _LOCK:
+                _PENDING_DURABLE_METRICS.update({(target_run_id, key): value for key, value in pending.items()})
+                _PENDING_DURABLE_METRIC_EVENTS_BY_RUN[target_run_id] += event_count
+                _PENDING_DURABLE_METRIC_EVENTS += event_count
+            return False
+        with _LOCK:
+            _LAST_DURABLE_METRIC_FLUSH = time.monotonic()
+            return not any(key[0] == target_run_id for key in _PENDING_DURABLE_METRICS) and not _PENDING_DURABLE_METRIC_EVENTS_BY_RUN.get(target_run_id, 0)
+    finally:
+        _METRIC_FLUSH_LOCK.release()
+
+
+def freeze_durable_run_metrics(run_id: str) -> None:
+    """Disarm writes to an immutable handoff run after its metrics are drained."""
+    global _DURABLE_RUN_ID
+    target_run_id = str(run_id or "").strip()
+    with _LOCK:
+        if _DURABLE_RUN_ID != target_run_id:
+            raise RuntimeError("cannot freeze metrics for a non-current durable run")
+        if any(key[0] == target_run_id for key in _PENDING_DURABLE_METRICS) or _PENDING_DURABLE_METRIC_EVENTS_BY_RUN.get(target_run_id, 0):
+            raise RuntimeError("cannot freeze durable run with pending operational metrics")
+        _DURABLE_RUN_ID = ""
 
 
 def record_unique(name: str, key: object) -> None:
@@ -548,8 +726,16 @@ def record_unique(name: str, key: object) -> None:
     if not value:
         return
     hashed = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    durable_run_id = ""
     with _LOCK:
         _UNIQUE_TELEMETRY.setdefault(str(name), set()).add(hashed)
+        durable_run_id = _DURABLE_RUN_ID
+    if durable_run_id:
+        try:
+            checkpoint = importlib.import_module("modules.checkpoint")
+            checkpoint.record_operational_unique(durable_run_id, str(name), hashed)
+        except Exception:
+            pass
 
 
 def wait_for_request_slot(*, waiter=time.sleep, clock=time.monotonic) -> None:
@@ -620,20 +806,79 @@ def reserve_api(provider: str, budget: int | None = None, *, operation: str = ""
             query_fingerprint=flight_fingerprint,
             execution_generation=execution_generation,
         )
-        if previous:
+        retry_allowed = bool(previous and previous.get("state") == "FAILED" and checkpoint.provider_call_retry_allowed(
+            run_id=_DURABLE_RUN_ID, provider=canonical, item_index=_CURRENT_ITEM_INDEX.get(),
+            phase=_PHASE, request_fingerprint=fingerprint,
+            query_fingerprint=flight_fingerprint, execution_generation=execution_generation,
+        ))
+        if previous and not retry_allowed:
             record(f"api.{provider}.duplicate_request")
             return Reservation(False, canonical, operation, item_index, phase_name,
                                call_id=previous["call_id"],
                                reason="duplicate_request",
                                inherited_state=previous["state"])
-        call_id = checkpoint.reserve_provider_call(
-            run_id=_DURABLE_RUN_ID, provider=canonical, item_index=_CURRENT_ITEM_INDEX.get(),
-            phase=_PHASE, operation=operation or _CURRENT_OPERATION.get(),
+        work_item = checkpoint.provider_work_item_for_request(
+            run_id=_DURABLE_RUN_ID, item_index=_CURRENT_ITEM_INDEX.get(),
+            provider=canonical, operation=operation,
             request_fingerprint=fingerprint,
-            configured_limit=int(effective), effective_limit=int(effective),
-            query_fingerprint=flight_fingerprint,
-            execution_generation=execution_generation,
         )
+        if work_item is None:
+            # The production wrapper is the authoritative call preparer for
+            # conditional resolvers. Persist its exact request before checking
+            # dispatch rights; a job first discovered during this round waits
+            # for a later fair allocation and cannot bypass the work ledger.
+            need_class = {
+                "brightdata": "website",
+                "google_places": "contact",
+                "brandfetch": "identity",
+                "hunter": "identity",
+                "linkedin": "identity",
+                "llm": "identity",
+            }[canonical]
+            work_item = checkpoint.ensure_provider_work_item(
+                run_id=_DURABLE_RUN_ID, item_index=item_index,
+                source_record_id=current_source_record_id(),
+                provider=canonical, operation=operation,
+                request_fingerprint=fingerprint,
+                query_fingerprint=flight_fingerprint,
+                plan_version=1, need_class=need_class, state="READY",
+            )
+        has_work_ledger = checkpoint.provider_work_items_exist(_DURABLE_RUN_ID, canonical)
+        if checkpoint.provider_dispatch_round_exists(run_id=_DURABLE_RUN_ID, provider=canonical):
+            round_ordinal = provider_dispatch_round(canonical)
+            if round_ordinal is None or item_index < 0:
+                return rejected("dispatch_not_allocated")
+            checkpoint.rebind_dispatch_after_terminal_follower(
+                run_id=_DURABLE_RUN_ID, provider=canonical,
+                round_ordinal=round_ordinal, item_index=item_index,
+                source_record_id=current_source_record_id(),
+                job_fingerprint=str(work_item.get("job_fingerprint", "")) if work_item else "",
+                terminal_follower_receipts=terminal_provider_query_follower_receipts(canonical),
+            )
+            if not checkpoint.provider_dispatch_allocation_available(
+                run_id=_DURABLE_RUN_ID, provider=canonical,
+                round_ordinal=round_ordinal, item_index=item_index,
+                source_record_id=current_source_record_id(),
+                job_fingerprint=str(work_item.get("job_fingerprint", "")) if work_item else "",
+            ):
+                return rejected("dispatch_not_allocated")
+        elif has_work_ledger:
+            # A concrete job exists for this provider, but no current round
+            # allocated it.  It must wait for a durable READY allocation.
+            return rejected("dispatch_not_allocated")
+        try:
+            call_id = checkpoint.reserve_provider_call(
+                run_id=_DURABLE_RUN_ID, provider=canonical, item_index=_CURRENT_ITEM_INDEX.get(),
+                phase=_PHASE, operation=operation or _CURRENT_OPERATION.get(),
+                request_fingerprint=fingerprint,
+                configured_limit=int(effective), effective_limit=int(effective),
+                query_fingerprint=flight_fingerprint,
+                execution_generation=execution_generation,
+                dispatch_round_ordinal=round_ordinal if checkpoint.provider_dispatch_round_exists(run_id=_DURABLE_RUN_ID, provider=canonical) else None,
+                dispatch_source_record_id=current_source_record_id(),
+            )
+        except checkpoint.DispatchAllocationUnavailable:
+            return rejected("dispatch_not_allocated")
         if not call_id:
             previous = checkpoint.provider_call_for_fingerprint(
                 run_id=_DURABLE_RUN_ID, provider=canonical,
@@ -642,7 +887,12 @@ def reserve_api(provider: str, budget: int | None = None, *, operation: str = ""
                 query_fingerprint=flight_fingerprint,
                 execution_generation=execution_generation,
             )
-            if previous:
+            retry_allowed = bool(previous and previous.get("state") == "FAILED" and checkpoint.provider_call_retry_allowed(
+                run_id=_DURABLE_RUN_ID, provider=canonical, item_index=_CURRENT_ITEM_INDEX.get(),
+                phase=_PHASE, request_fingerprint=fingerprint,
+                query_fingerprint=flight_fingerprint, execution_generation=execution_generation,
+            ))
+            if previous and not retry_allowed:
                 record(f"api.{provider}.duplicate_request")
                 return Reservation(False, canonical, operation, item_index, phase_name,
                                    call_id=previous["call_id"],
@@ -692,6 +942,7 @@ def _volatile_free_reservation(bucket: str, kind: str, *, query_fingerprint: str
     run_id, item_index = _DURABLE_RUN_ID or "volatile", _CURRENT_ITEM_INDEX.get()
     bucket = bucket if bucket in {"discovery", "targeted"} else "discovery"
     bucket_limit = 6 if bucket == "discovery" else 4
+    physical_limit = bucket_limit * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
     with _LOCK:
         logical_key = (run_id, int(item_index), f"{bucket}:logical")
         physical_key = (run_id, int(item_index), f"{bucket}:physical")
@@ -699,9 +950,10 @@ def _volatile_free_reservation(bucket: str, kind: str, *, query_fingerprint: str
         total_physical = sum(value for (rid, idx, name), value in _FREE_QUERY_COUNTS.items() if rid == run_id and idx == int(item_index) and name.endswith(":physical"))
         key = logical_key if kind == "logical" else physical_key
         total = total_logical if kind == "logical" else total_physical
-        if total >= 10:
+        total_limit = 10 * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2)) if kind == "physical" else 10
+        if total >= total_limit:
             accepted, reason = False, f"{kind}_total_exhausted"
-        elif _FREE_QUERY_COUNTS.get(key, 0) >= bucket_limit:
+        elif _FREE_QUERY_COUNTS.get(key, 0) >= (physical_limit if kind == "physical" else bucket_limit):
             accepted, reason = False, f"{kind}_bucket_exhausted"
         else:
             accepted, reason = True, "accepted"
@@ -716,7 +968,7 @@ def _volatile_free_reservation(bucket: str, kind: str, *, query_fingerprint: str
             seed = f"{run_id}\0{item_index}\0{bucket}\0{backend}\0{query_fingerprint}\0{ordinal}"
             attempt_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()
             _FREE_PROVIDER_ATTEMPTS[attempt_id] = {"run_id": run_id, "item_index": int(item_index), "bucket": bucket, "provider": backend, "query_fingerprint": query_fingerprint, "attempt_ordinal": ordinal, "state": "RESERVED"}
-        return FreeReservation(accepted, reason, bucket, total_logical, 10, total_physical, 10, attempt_id, ordinal)
+        return FreeReservation(accepted, reason, bucket, total_logical, 10, total_physical, total_limit if kind == "physical" else 10, attempt_id, ordinal)
 
 
 def reserve_free_logical_query(bucket: str, query_fingerprint: str) -> FreeReservation:
@@ -745,12 +997,14 @@ def free_search_capacity(bucket: str | None = None) -> FreeCapacity:
         return FreeCapacity(bool(value["available"]), bucket, int(value["logical_used"]), int(value["logical_limit"]), int(value["physical_used"]), int(value["physical_limit"]))
     run_id, item_index = _DURABLE_RUN_ID or "volatile", _CURRENT_ITEM_INDEX.get()
     bucket_limit = 6 if bucket == "discovery" else 4
+    physical_bucket_limit = bucket_limit * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
+    physical_total_limit = 10 * int(getattr(config, "FREE_SEARCH_PHYSICAL_MULTIPLIER", 2))
     with _LOCK:
         logical = sum(value for (rid, idx, name), value in _FREE_QUERY_COUNTS.items() if rid == run_id and idx == int(item_index) and name.endswith(":logical"))
         physical = sum(1 for value in _FREE_PROVIDER_ATTEMPTS.values() if value["run_id"] == run_id and value["item_index"] == int(item_index))
         bucket_logical = _FREE_QUERY_COUNTS.get((run_id, int(item_index), f"{bucket}:logical"), 0)
         bucket_physical = sum(1 for value in _FREE_PROVIDER_ATTEMPTS.values() if value["run_id"] == run_id and value["item_index"] == int(item_index) and value["bucket"] == bucket)
-    return FreeCapacity(logical < 10 and physical < 10 and bucket_logical < bucket_limit and bucket_physical < bucket_limit, bucket, logical, 10, physical, 10)
+    return FreeCapacity(logical < 10 and physical < physical_total_limit and bucket_logical < bucket_limit and bucket_physical < physical_bucket_limit, bucket, logical, 10, physical, physical_total_limit)
 
 
 def complete_free_physical_attempt(attempt_id: str, success: bool, error_class: str | None = None) -> None:

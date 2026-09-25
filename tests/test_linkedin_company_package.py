@@ -273,6 +273,56 @@ class LinkedinCompanyPackageTests(unittest.TestCase):
             result.reason, "candidate_resolved_by_linkedin_website_match"
         )
 
+    def test_deferred_linkedin_serp_is_retried_after_durable_allocation(self):
+        evaluation = _evaluation()
+        blocked = linkedin_company.ProviderText(
+            "", state="BLOCKED_BUDGET", reason="dispatch_not_allocated",
+        )
+        profile = linkedin_company.ProviderRecord(
+            {"name": "ORNEK GIDA", "website": "https://ornek.com.tr"},
+            state="COMPLETED", reason="record",
+        )
+        with patch.object(config, "ENABLE_LINKEDIN_COMPANY_LOOKUP", True), patch.object(
+            config, "BRIGHTDATA_API_KEY", "secret"
+        ), patch.object(config, "LINKEDIN_COMPANY_DATASET_ID", "dataset"), patch.object(
+            linkedin_company, "_find_company_url", side_effect=[blocked, "https://linkedin.com/company/ornek"]
+        ) as find, patch.object(
+            linkedin_company, "_scrape", return_value=profile
+        ) as scrape:
+            self.assertIsNone(linkedin_company.corroborate("ORNEK GIDA", evaluation))
+            self.assertNotIn("ornek gida", linkedin_company._PROFILE_CACHE)
+            verified = linkedin_company.corroborate("ORNEK GIDA", evaluation)
+
+        self.assertTrue(verified["verified"])
+        self.assertEqual(find.call_count, 2)
+        scrape.assert_called_once()
+
+    def test_deferred_linkedin_scrape_reuses_terminal_serp_url(self):
+        evaluation = _evaluation()
+        profile_url = "https://linkedin.com/company/ornek"
+        blocked = linkedin_company.ProviderRecord(
+            state="BLOCKED_BUDGET", reason="dispatch_not_allocated",
+        )
+        profile = linkedin_company.ProviderRecord(
+            {"name": "ORNEK GIDA", "website": "https://ornek.com.tr"},
+            state="COMPLETED", reason="record",
+        )
+        with patch.object(config, "ENABLE_LINKEDIN_COMPANY_LOOKUP", True), patch.object(
+            config, "BRIGHTDATA_API_KEY", "secret"
+        ), patch.object(config, "LINKEDIN_COMPANY_DATASET_ID", "dataset"), patch.object(
+            linkedin_company, "_find_company_url", return_value=profile_url
+        ) as find, patch.object(
+            linkedin_company, "_scrape", side_effect=[blocked, profile]
+        ) as scrape:
+            self.assertIsNone(linkedin_company.corroborate("ORNEK GIDA", evaluation))
+            self.assertNotIn("ornek gida", linkedin_company._PROFILE_CACHE)
+            verified = linkedin_company.corroborate("ORNEK GIDA", evaluation)
+
+        self.assertTrue(verified["verified"])
+        find.assert_called_once_with("ORNEK GIDA")
+        self.assertEqual(scrape.call_args_list[0].args, (profile_url,))
+        self.assertEqual(scrape.call_args_list[1].args, (profile_url,))
+
 
 if __name__ == "__main__":
     unittest.main()

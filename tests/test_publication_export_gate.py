@@ -18,19 +18,38 @@ from modules import (
     quality_audit,
     report,
 )
+from strict_fixtures import publishable_content_decision
+
+
+def _publishable_row(**updates):
+    row = {
+        "source_record_id": "fixture:publication",
+        "free_state": "DONE",
+        "paid_required": False,
+        "paid_state": "NOT_REQUIRED",
+        "status": "OK_HIGH_CONFIDENCE",
+        "publication_eligible": True,
+        "website": "https://fixture.example",
+        "email": "info@fixture.example",
+        "phone": "+902120000000",
+    }
+    row.update(updates)
+    row["content_decision"] = publishable_content_decision(
+        source_record_id=row["source_record_id"],
+        website=row.get("website", "https://fixture.example"),
+        email=row.get("email", "info@fixture.example"),
+        phone=row.get("phone", "+902120000000"),
+    )
+    return row
 
 
 class PublicationExportGateTests(unittest.TestCase):
     def test_is_publishable_row_predicate(self):
         self.assertTrue(
-            publication_policy.is_publishable_row(
-                {"status": "OK_HIGH_CONFIDENCE", "publication_eligible": True}
-            )
+            publication_policy.is_publishable_row(_publishable_row())
         )
         self.assertTrue(
-            publication_policy.is_publishable_row(
-                {"status": "OK_MEDIUM_CONFIDENCE", "publication_eligible": True}
-            )
+            publication_policy.is_publishable_row(_publishable_row(status="OK_MEDIUM_CONFIDENCE"))
         )
         # Shadow mode / downgrade-eligible false cases
         self.assertFalse(
@@ -201,6 +220,16 @@ class PublicationExportGateTests(unittest.TestCase):
                     "company": "Valid Corp",
                     "status": "OK_HIGH_CONFIDENCE",
                     "publication_eligible": True,
+                    "source_record_id": "fixture:valid",
+                    "free_state": "DONE",
+                    "paid_required": False,
+                    "paid_state": "NOT_REQUIRED",
+                    "content_decision": publishable_content_decision(
+                        source_record_id="fixture:valid",
+                        website="https://valid.com",
+                        email="info@valid.com",
+                        phone="+902121112233",
+                    ),
                     "website": "https://valid.com",
                     "email": "info@valid.com",
                     "phone": "+902121112233",

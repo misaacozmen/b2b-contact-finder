@@ -56,6 +56,15 @@ def _decode_cfemail(value: str) -> str:
 
 def _contact_label(text: str) -> str:
     normalized = re.sub(r"\s+", " ", text).casefold()
+    if any(marker in normalized for marker in (
+        "web tasarım", "web tasarim", "web design", "software agency",
+        "digital agency", "website by", "site by", "designed by",
+        "developed by", "powered by",
+    )) or re.search(
+        r"\b(?:ajans|agency|developer|gelistirici|geliştirici)\b\s+(?:tarafından|tarafindan|ile|by)",
+        normalized,
+    ):
+        return "agency"
     labels = (
         (("fax", "faks"), "fax"),
         (("whatsapp", "whats app", "wa.me"), "whatsapp"),
@@ -543,14 +552,14 @@ def extract_contact_records(
                     phone_labels.append((digits, "whatsapp"))
     visible_text = _visible_text(html_text)
     for match in PHONE_RE.finditer(visible_text):
-        start, _ = match.span()
+        start, end = match.span()
         context = visible_text[max(0, start - 80):start]
         phone_labels.append((match.group(0), _contact_label(context)))
     for match in [
         *TR_PHONE_FLEX_RE.finditer(visible_text),
         *TR_SERVICE_PHONE_RE.finditer(visible_text),
     ]:
-        start, _ = match.span()
+        start, end = match.span()
         context = visible_text[max(0, start - 80):start]
         phone_labels.append((match.group(0), _contact_label(context)))
 

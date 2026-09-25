@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Callable
 
@@ -285,23 +286,60 @@ def policy_output_fields(evaluation: dict) -> dict:
 def suppress_all_contacts(row: dict, reason: str) -> None:
     row["website"] = ""
     row["website_source"] = ""
-    row["email"] = ""
-    row["email_source"] = ""
-    row["email_source_url"] = ""
-    row["alternative_emails"] = ""
-    row["alternative_email_sources"] = ""
-    row["email_verification"] = "not_checked"
-    row["email_verification_reason"] = reason
-    row["email_publication_status"] = "suppressed"
-    row["email_publication_reason"] = reason
-    row["phone"] = ""
-    row["phone_source"] = ""
-    row["phone_source_url"] = ""
-    row["phone_label"] = ""
-    row["alternative_phones"] = ""
-    row["alternative_phone_sources"] = ""
-    row["phone_publication_status"] = "suppressed"
-    row["phone_publication_reason"] = reason
+    suppress_contact_field(row, "email", reason)
+    suppress_contact_field(row, "phone", reason)
+
+
+def suppress_contact_field(row: dict, field: str, reason: str) -> None:
+    """Project one disallowed contact field out of every primary artifact."""
+    field = str(field).casefold()
+    if field == "email":
+        for name in publication_policy.CONTACT_PROJECTION_FIELDS["email"]:
+            row[name] = ""
+        row["email_verification"] = "not_checked"
+        row["email_verification_reason"] = reason
+        row["email_publication_status"] = "suppressed"
+        row["email_publication_reason"] = reason
+    elif field == "phone":
+        for name in publication_policy.CONTACT_PROJECTION_FIELDS["phone"]:
+            row[name] = ""
+        row["phone_publication_status"] = "suppressed"
+        row["phone_publication_reason"] = reason
+
+
+def project_publication_row(row: dict) -> dict:
+    """Create a fail-closed export projection without rewriting source evidence."""
+    projected = deepcopy(row)
+    decision = publication_policy.decide_row(row)
+    allowed = [str(value) for value in decision.get("allowed_contact_fields", [])]
+    for field in ("email", "phone"):
+        if field not in allowed:
+            suppress_contact_field(projected, field, f"{field}_not_published")
+    projected["publication_eligible"] = bool(decision.get("publishable"))
+    projected["publication_advisory_eligible"] = bool(decision.get("advisory_eligible"))
+    projected["website_identity_verified"] = bool(decision.get("website_identity_verified"))
+    projected["allowed_contact_fields"] = "; ".join(allowed)
+    content = row.get("content_decision") or row.get("__content_decision") or {}
+    projected["publication_field_gaps"] = "; ".join(dict.fromkeys(
+        value for value in (content.get("missing_evidence", []) if isinstance(content, dict) else [])
+        if value in {"email_evidence_missing", "phone_evidence_missing", "email_not_allowed", "phone_not_allowed"}
+    ))
+    projected["contact_status"] = (
+        "complete" if projected.get("email") and projected.get("phone")
+        else "partial" if projected.get("email") or projected.get("phone")
+        else "missing"
+    )
+    if not isinstance(projected.get("content_evidence_records"), list) and isinstance(content, dict):
+        projected["content_evidence_records"] = deepcopy(content.get("evidence_records", []))
+    projected["publication_projection_receipt"] = publication_policy.create_projection_receipt(
+        row, projected, decision,
+    )
+    projected["publication_projection_status"] = "PROJECTED"
+    return projected
+
+
+def validate_publication_projection(row: dict) -> bool:
+    return publication_policy.validate_projection(row)
 
 
 def clear_unpublished_contacts(row: dict) -> None:
@@ -364,10 +402,12 @@ def confidence_status(score: int, has_contact: bool, reasons: list[str], identit
     return "REVIEW_NEEDED", "review"
 
 
-def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapshot: dict | None = None) -> ArtifactResult:
+def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapshot: dict | None = None,
+                  operational_metrics: dict | None = None) -> ArtifactResult:
     frozen_snapshot = dict(telemetry_snapshot) if telemetry_snapshot is not None else runtime.snapshot()
     frozen_timestamp = str(frozen_snapshot.get("generated_at", "2000-01-01T00:00:00+00:00"))
     apply_global_identity_collision_gate(rows)
+    raw_rows = deepcopy(rows)
     output_root = Path(config.OUTPUT_DIR)
     staging_root = output_root / ".staging" / uuid.uuid4().hex
     staging_root.mkdir(parents=True, exist_ok=False)
@@ -375,12 +415,16 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
         return staging_root / Path(path).name
 
     all_results_path = staged(output_root / "all_results.xlsx")
-    for row in rows:
+    for row in raw_rows:
         decision = publication_policy.decide_row(row)
         row["publication_eligible"] = decision["publishable"]
         row["publication_advisory_eligible"] = decision["advisory_eligible"]
         row["website_identity_verified"] = decision["website_identity_verified"]
         row["allowed_contact_fields"] = "; ".join(decision["allowed_contact_fields"])
+        row["publication_field_gaps"] = "; ".join(dict.fromkeys(
+            value for value in (row.get("content_decision") or {}).get("missing_evidence", [])
+            if value in {"email_evidence_missing", "phone_evidence_missing", "email_not_allowed", "phone_not_allowed"}
+        ))
         if not decision["publishable"]:
             row["publication_blockers"] = "; ".join(dict.fromkeys(
                 value for value in [str(row.get("publication_blockers", "")), *decision["blockers"]] if value
@@ -406,20 +450,32 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
             else "partial" if row.get("email") or row.get("phone")
             else "missing"
         )
-        if is_publishable_row(row):
-            discovery_coverage.mark_published(
-                row.get("company", ""),
-                row.get("source_record_id", ""),
-                row.get("original_index"),
-            )
-    evidence.write_jsonl(staged(config.EVIDENCE_FILE), rows)
-    entity_registry.write_observations(staged(config.ENTITY_RELATIONSHIPS_FILE), rows, observed_at=frozen_timestamp)
-    quality_audit.write(staged(config.QUALITY_AUDIT_FILE), rows, runtime_snapshot=frozen_snapshot)
-    published_rows, review_rows = partition_output_rows(rows)
-    failed_output_rows = report.failed_rows(rows)
-    report_text = redaction.redact_text(report.build_report(rows, elapsed_seconds, runtime_snapshot=frozen_snapshot))
-    memory_rows = [dict(row) for row in published_rows]
-    for row in rows:
+    evidence.write_jsonl(staged(config.EVIDENCE_FILE), raw_rows)
+    entity_registry.write_observations(staged(config.ENTITY_RELATIONSHIPS_FILE), raw_rows, observed_at=frozen_timestamp)
+    quality_audit.write(staged(config.QUALITY_AUDIT_FILE), raw_rows, runtime_snapshot=frozen_snapshot)
+    projected_rows = [project_publication_row(row) for row in raw_rows]
+    published_rows, review_rows = partition_output_rows(projected_rows)
+    for row in published_rows:
+        discovery_coverage.mark_published(
+            row.get("company", ""),
+            row.get("source_record_id", ""),
+            row.get("original_index"),
+        )
+    failed_output_rows = report.failed_rows(projected_rows)
+    report_text = redaction.redact_text(report.build_report(
+        projected_rows, elapsed_seconds, runtime_snapshot=frozen_snapshot,
+        operational_metrics=operational_metrics,
+    ))
+    memory_rows = [deepcopy(row) for row in published_rows]
+    for row in raw_rows:
+        row.pop("__index", None)
+        row.pop("__candidates", None)
+        row.pop("__evaluation", None)
+        row.pop("__candidate_evaluations", None)
+        row.pop("__search_trace", None)
+        row.pop("__source_health", None)
+        row.pop("__paid_escalation_complete", None)
+    for row in projected_rows:
         row.pop("__index", None)
         row.pop("__candidates", None)
         row.pop("__evaluation", None)
@@ -431,7 +487,7 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
     # the dedicated audit artifacts and must never look like published firms.
     sanitized_published_rows = redaction.sanitize(published_rows)
     sanitized_review_rows = redaction.sanitize(review_rows)
-    sanitized_all_rows = redaction.sanitize(rows)
+    sanitized_all_rows = redaction.sanitize(projected_rows)
     _atomic_excel(all_results_path, excel.write_contacts, sanitized_all_rows, frozen_timestamp=frozen_timestamp)
     _atomic_excel(staged(config.CONTACTS_FILE), excel.write_contacts, sanitized_published_rows, frozen_timestamp=frozen_timestamp)
     _atomic_excel(staged(config.VERIFIED_CONTACTS_FILE), excel.write_contacts, sanitized_published_rows, frozen_timestamp=frozen_timestamp)
@@ -503,9 +559,43 @@ def write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapsho
     return ArtifactResult(report_text, artifacts, memory_rows)
 
 
+def write_partial_recovery(
+    rows: list[dict], *, output_root: Path, metadata: dict,
+) -> dict[str, object]:
+    """Write a clearly non-final recovery set for a stalled paid run."""
+    target = Path(output_root) / "partial_recovery"
+    target.mkdir(parents=True, exist_ok=True)
+    safe_rows = redaction.sanitize(deepcopy(rows))
+    payload = {
+        "partial": True,
+        "accepted_as_complete": False,
+        "metadata": redaction.sanitize(metadata),
+        "rows": safe_rows,
+    }
+    files = {
+        "partial_results.json": json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        "partial_report.txt": redaction.redact_text(
+            "SCHEDULER_STALLED\n" + json.dumps(redaction.sanitize(metadata), ensure_ascii=False, sort_keys=True)
+        ),
+    }
+    receipts = {}
+    for name, content in files.items():
+        path = target / name
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(path)
+        receipts[name] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
+    manifest = {"partial": True, "accepted_as_complete": False, "files": receipts, "metadata": redaction.sanitize(metadata)}
+    manifest_path = target / "partial_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    receipts[manifest_path.name] = {"sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "bytes": manifest_path.stat().st_size}
+    return {"directory": str(target), "files": receipts, "metadata": redaction.sanitize(metadata)}
+
+
 def publish_manifest(*, path: Path, run_id: str, input_hash: str, config_sha256: str,
                      counts: dict, artifacts: dict, complete: bool = True,
                      telemetry: dict | None = None,
+                     operational_metrics: dict | None = None,
                      finalized: bool | None = None,
                      status: str | None = None) -> None:
     if not complete or not artifacts:
@@ -525,6 +615,10 @@ def publish_manifest(*, path: Path, run_id: str, input_hash: str, config_sha256:
         payload["telemetry"] = telemetry
         telemetry_json = json.dumps(telemetry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         payload["telemetry_sha256"] = hashlib.sha256(telemetry_json.encode("utf-8")).hexdigest()
+    if operational_metrics is not None:
+        payload["operational_metrics"] = operational_metrics
+        operational_json = json.dumps(operational_metrics, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload["operational_metrics_sha256"] = hashlib.sha256(operational_json.encode("utf-8")).hexdigest()
     if finalized is not None:
         payload["finalized"] = bool(finalized)
     if status is not None:

@@ -15,6 +15,7 @@ from openpyxl import Workbook
 
 import config
 from modules import checkpoint, company_resolvers, google_places, hunter, linkedin_company, pipeline_runner, runtime, run_context, search
+from strict_fixtures import publishable_content_decision
 
 
 def _legacy_complete_fixture(tmp_path: Path) -> tuple[Path, str, Path]:
@@ -145,6 +146,7 @@ def test_real_pipeline_handoff_accepts_failed_free_item_as_terminal(tmp_path: Pa
         return index, {
             "company": company, "source_record_id": record["source_record_id"],
             "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True,
+            "content_decision": publishable_content_decision(source_record_id=record["source_record_id"], website="https://acme.example", email="", phone=""),
         }
 
     runs_dir = tmp_path / "runs"
@@ -189,6 +191,7 @@ def test_handoff_release_is_atomic_and_recomputes_policy_without_contact_loss(tm
     payload = {
         "company": "ACME MAKINA", "source_record_id": "input:0", "status": "OK_HIGH_CONFIDENCE",
         "publication_eligible": True, "website": "https://acme-makina.example", "email": "info@acme-makina.example",
+        "content_decision": publishable_content_decision(source_record_id="input:0", website="https://acme-makina.example", email="info@acme-makina.example", phone=""),
         "publication_blockers": "identity_not_publishable",
         "email_publication_status": "allowed", "identity_assessment": {"publishable": True, "conflicts": [], "support_count": 2},
         "__evaluation": {"candidate": {"url": "https://acme-makina.example"}, "has_contact": True, "email": "info@acme-makina.example", "reasons": ["page_identity_strong:1/1", "legal_name_phrase_match:2", "context_match:1/1", "country_identity_tr_text"], "identity_assessment": {"publishable": True, "conflicts": [], "support_count": 2}},
@@ -359,6 +362,9 @@ def test_six_real_adapters_route_duplicate_through_runtime_helper_without_networ
     ), patch.object(search.requests, "post", side_effect=AssertionError("network")):
         result = search._brightdata_text("Acme")
         assert result.result_state == "COMPLETED" and result.call_ids == ("old-call",)
+        assert result.origin is search.SearchOrigin.SINGLEFLIGHT_FOLLOWER
+        assert result.call_relations == {"old-call": "INHERITED"}
+        assert result.inherited_call_ids == ("old-call",)
 
     with patch.object(config, "ENABLE_GOOGLE_PLACES", True), patch.object(
         config, "GOOGLE_PLACES_API_KEY", "key"
@@ -406,6 +412,101 @@ def test_six_real_adapters_route_duplicate_through_runtime_helper_without_networ
         assert result["provider_call_ids"] == ["old-call"]
 
 
+def test_brightdata_item_stop_call_from_another_query_is_not_inherited():
+    runtime.reset()
+    runtime.set_phase("PAID")
+    runtime.set_item_context(0, "paid")
+    runtime.mark_item_stop(
+        runtime.StopScope.PAID_PROVIDER, "hunter", "other_query_stopped",
+        call_ids=("other-query-call",),
+    )
+    denied = runtime.Reservation(
+        False, "brightdata", "search", 0, "PAID",
+        call_id="other-query-call", reason="item_stop_guard",
+    )
+    outcome_token = runtime.begin_provider_attempt()
+    with patch.object(config, "BRIGHTDATA_API_KEY", "key"), patch.object(
+        runtime, "reserve_api", return_value=denied
+    ), patch.object(search.requests, "post", side_effect=AssertionError("network")), patch.object(
+        search, "_observe_brightdata_owner"
+    ) as observe_owner:
+        result = search._brightdata_text("Different query")
+    outcomes = runtime.end_provider_attempt(outcome_token)
+    assert result.result_state == "FAILED"
+    assert result.result_reason == "dispatch_not_allocated"
+    assert result.call_ids == () and result.call_relations == {}
+    assert all("other-query-call" not in outcome["call_ids"] for outcome in outcomes)
+    observe_owner.assert_not_called()
+
+
+def test_brightdata_duplicate_receipt_requires_exact_durable_flight_relation(tmp_path, monkeypatch):
+    database = tmp_path / "duplicate-flight.sqlite3"
+    monkeypatch.setattr(config, "PROGRESS_DB_FILE", database)
+    checkpoint.initialize_schema(database)
+    run_id = "a" * 64
+    budgets = {provider: (2 if provider == "brightdata" else 0) for provider in checkpoint.CANONICAL_PROVIDERS}
+    checkpoint.initialize_run(
+        run_id=run_id, input_hash="input", run_signature="duplicate-receipt",
+        context={"phase": "PAID"}, budgets=budgets,
+        items=[{"item_index": 0, "source_record_id": "s0", "free_state": "DONE", "paid_required": True, "paid_state": "RUNNING"}],
+    )
+    runtime.reset()
+    runtime.configure_durable_run(run_id, budgets)
+    runtime.set_phase("PAID")
+    runtime.set_item_context(0, "paid")
+    runtime.set_source_record_id("s0")
+    checkpoint.begin_paid_attempt(run_id=run_id, item_index=0, attempt_number=1)
+    query_fingerprint = search._brightdata_flight_fingerprint("Acme")
+    request_fingerprint = search.brightdata_request_fingerprint("Acme")
+    job = checkpoint.ensure_provider_work_item(
+        run_id=run_id, item_index=0, source_record_id="s0", provider="brightdata",
+        operation="search", request_fingerprint=request_fingerprint,
+        query_fingerprint=query_fingerprint, need_class="website",
+    )
+    candidate = {
+        "item_index": 0, "source_record_id": "s0", "need_class": "website",
+        "job_fingerprint": job["job_fingerprint"], "operation": "search",
+        "request_fingerprint": request_fingerprint, "query_fingerprint": query_fingerprint,
+        "plan_version": 1,
+    }
+    checkpoint.reserve_provider_dispatch_round(
+        run_id=run_id, provider="brightdata", round_ordinal=0,
+        candidates=[candidate], cap=1,
+    )
+    runtime.set_provider_dispatch_rounds({"brightdata": 0})
+    claim = checkpoint.claim_provider_query_flight(
+        run_id=run_id, provider="brightdata", query_fingerprint=query_fingerprint,
+        owner_token="owner",
+    )
+    reservation = runtime.reserve_api(
+        "brightdata", operation="search", request_fingerprint=request_fingerprint,
+        flight_fingerprint=query_fingerprint,
+        execution_generation=claim["execution_generation"],
+    )
+    assert reservation.accepted
+    runtime.start_api(reservation)
+    checkpoint.bind_provider_query_flight_call(
+        run_id=run_id, provider="brightdata", query_fingerprint=query_fingerprint,
+        owner_token="owner", provider_call_id=reservation.call_id,
+    )
+    runtime.complete_api(reservation, "FAILED", "controlled_fixture_failure")
+    checkpoint.finish_provider_query_flight(
+        run_id=run_id, provider="brightdata", query_fingerprint=query_fingerprint,
+        owner_token="owner", state="FAILED",
+        result={"result_state": "FAILED", "call_ids": [reservation.call_id], "flight_fingerprint": query_fingerprint},
+        call_ids=[reservation.call_id],
+    )
+    evidence = dict(
+        run_id=run_id, provider="brightdata", call_id=reservation.call_id,
+        item_index=0, phase="PAID", operation="search",
+        request_fingerprint=request_fingerprint, query_fingerprint=query_fingerprint,
+        execution_generation=claim["execution_generation"], expected_state="FAILED",
+    )
+    assert checkpoint.provider_call_matches_terminal_query_flight(**evidence)
+    assert not checkpoint.provider_call_matches_terminal_query_flight(**{**evidence, "query_fingerprint": "b" * 64})
+    assert not checkpoint.provider_call_matches_terminal_query_flight(**{**evidence, "request_fingerprint": "wrong"})
+
+
 def test_cache_hit_is_success_and_makes_no_physical_call():
     from modules import cache_store
 
@@ -448,6 +549,7 @@ def test_golden_publication_regression_fixture():
         "company": "ACME MAKINA", "source_record_id": "fixture:safe",
         "free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False,
         "status": "OK_HIGH_CONFIDENCE", "score": 90, "publication_eligible": True,
+        "content_decision": publishable_content_decision(source_record_id="fixture:safe", website="https://acme-makina.example", email="info@acme-makina.example", phone=""),
         "website": "https://acme-makina.example", "email": "info@acme-makina.example",
         "email_publication_status": "allowed", "identity_assessment": {"publishable": True, "conflicts": [], "support_count": 2},
         "__evaluation": {"candidate": {"url": "https://acme-makina.example"}, "reasons": ["page_identity_strong:1/1", "legal_name_phrase_match:2", "context_match:1/1", "country_identity_tr_text"], "identity_assessment": {"publishable": True, "conflicts": [], "support_count": 2}},

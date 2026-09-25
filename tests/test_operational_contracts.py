@@ -13,6 +13,7 @@ from openpyxl import Workbook
 import config
 from modules import checkpoint, output_artifacts, run_context, runtime
 from prepare_paid_continuation import prepare_paid_continuation
+from strict_fixtures import publishable_content_decision
 
 
 PROVIDERS = {name: 0 for name in checkpoint.CANONICAL_PROVIDERS}
@@ -186,13 +187,75 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
     workbook.save(input_file)
     workbook.close()
 
+    observations = []
+    event_order = []
+    metric_writes = []
+    parent_root_holder = {"path": None}
+
+    def sha256(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).is_file() else ""
+
+    def observe(label, active_db, artifact_db, manifest_path):
+        root = Path(manifest_path).parent
+        value = {
+            "stage": label,
+            "active_db_sha256": sha256(active_db),
+            "artifact_db_sha256": sha256(artifact_db),
+            "manifest_sha256": sha256(manifest_path),
+            "lease_held": any(lease.run_dir.resolve() == root.resolve() for lease in run_context.active_leases()),
+        }
+        observations.append(value)
+        event_order.append(label)
+        return value
+
+    real_snapshot = checkpoint.create_handoff_snapshot
+    real_write_manifest = run_context.write_manifest
+    real_validate_bundle = run_context.validate_run_bundle
+    real_record_metrics = checkpoint.record_operational_metrics_batch
+
+    def observed_snapshot(active_db, destination, **kwargs):
+        result = real_snapshot(active_db, destination, **kwargs)
+        observe("snapshot_placed", active_db, destination, Path(active_db).parent.parent / "manifest.json")
+        return result
+
+    def observed_write_manifest(path, context, run_config, *, complete=False, extra=None):
+        result = real_write_manifest(path, context, run_config, complete=complete, extra=extra)
+        if extra and extra.get("handoff"):
+            artifact = Path(path).parent / "output" / "artifacts" / extra["artifact_set_sha256"] / "recovery_state.sqlite3"
+            observe("handoff_manifest_written", Path(path).parent / "state" / "progress.sqlite3", artifact, path)
+        return result
+
+    def observed_validate_bundle(*args, **kwargs):
+        root = Path(args[0]).resolve()
+        parent_root = parent_root_holder["path"]
+        if parent_root is not None and root == parent_root.resolve():
+            manifest_path = root / "manifest.json"
+            manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact = root / "output" / "artifacts" / manifest_value["artifact_set_sha256"] / "recovery_state.sqlite3"
+            observe("continuation_validation_pre", root / "state" / "progress.sqlite3", artifact, manifest_path)
+        return real_validate_bundle(*args, **kwargs)
+
+    def observed_record_metrics(run_id, metrics, **kwargs):
+        if "candidate.handoff_metric_probe" in metrics:
+            metric_writes.append({"run_id": run_id, "amount": metrics["candidate.handoff_metric_probe"]})
+            event_order.append("handoff_metric_batch_written")
+        return real_record_metrics(run_id, metrics, **kwargs)
+
     def worker(_index, company, _logger, _website, record):
+        with runtime._LOCK:
+            runtime._LAST_DURABLE_METRIC_FLUSH = __import__("time").monotonic()
+        runtime.record("candidate.handoff_metric_probe")
+        assert runtime._PENDING_DURABLE_METRICS[(runtime.durable_run_id(), "candidate.handoff_metric_probe")] == 1
         return 0, _payload(record["source_record_id"], company=company, status="REVIEW_NEEDED", reason="needs_paid")
 
     def impossible_writer(_rows, _elapsed):
         raise AssertionError("handoff must not publish final artifacts")
 
-    with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(config, "RUNS_DIR", tmp_path / "parent-runs"):
+    with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(config, "RUNS_DIR", tmp_path / "parent-runs"), patch.object(
+        checkpoint, "create_handoff_snapshot", side_effect=observed_snapshot
+    ), patch.object(run_context, "write_manifest", side_effect=observed_write_manifest), patch.object(
+        run_context, "validate_run_bundle", side_effect=observed_validate_bundle
+    ), patch.object(checkpoint, "record_operational_metrics_batch", side_effect=observed_record_metrics):
         result = pipeline_runner.run_pipeline(
             input_file, allow_paid=False,
             process_company_fn=worker, write_outputs_fn=impossible_writer,
@@ -201,9 +264,35 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
         )
         assert result == "PAID_PENDING_APPROVAL"
     run_root = next((tmp_path / "parent-runs").iterdir())
+    parent_root_holder["path"] = run_root.resolve()
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["handoff"] is True
     assert manifest["files"]["recovery_state.sqlite3"]
+    artifact_dir = run_root / "output" / "artifacts" / manifest["artifact_set_sha256"]
+    post_return = observe(
+        "pipeline_return", run_root / "state" / "progress.sqlite3",
+        artifact_dir / "recovery_state.sqlite3", run_root / "manifest.json",
+    )
+    assert len(metric_writes) == 1 and metric_writes[0]["amount"] == 1
+    assert event_order.index("handoff_metric_batch_written") < event_order.index("snapshot_placed")
+    assert observations[-2]["active_db_sha256"] == observations[-2]["artifact_db_sha256"]
+    assert post_return["active_db_sha256"] == post_return["artifact_db_sha256"]
+    assert observations[-2]["lease_held"] is True and post_return["lease_held"] is False
+    assert runtime.durable_run_id() == ""
+    runtime.record("candidate.after_handoff_probe")
+    assert not any(key[0] == manifest["run_id"] for key in runtime._PENDING_DURABLE_METRICS)
+    runtime.reset()
+    after_reset = observe(
+        "runtime_reset", run_root / "state" / "progress.sqlite3",
+        artifact_dir / "recovery_state.sqlite3", run_root / "manifest.json",
+    )
+    assert after_reset["active_db_sha256"] == post_return["active_db_sha256"]
+    assert after_reset["artifact_db_sha256"] == post_return["artifact_db_sha256"]
+    with sqlite3.connect(run_root / "state" / "progress.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT value FROM operational_metrics WHERE run_id=? AND metric='candidate.handoff_metric_probe'",
+            (manifest["run_id"],),
+        ).fetchone() == (1,)
 
     auth = tmp_path / "approval.json"
     approval = {
@@ -215,7 +304,19 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
         "paid_source_ids_sha256": hashlib.sha256(run_context.canonical_json(["input:0"]).encode()).hexdigest(),
     }
     auth.write_text(json.dumps(approval), encoding="utf-8")
-    child_manifest = prepare_paid_continuation(run_root, auth, tmp_path / "child")
+    with patch.object(run_context, "validate_run_bundle", side_effect=observed_validate_bundle):
+        child_manifest = prepare_paid_continuation(run_root, auth, tmp_path / "child")
+    before_child_hashes = {
+        "active": sha256(run_root / "state" / "progress.sqlite3"),
+        "artifact": sha256(artifact_dir / "recovery_state.sqlite3"),
+        "manifest": sha256(run_root / "manifest.json"),
+    }
+    parent_artifact_path = artifact_dir / "recovery_state.sqlite3"
+    validation_observation = next(value for value in observations if value["stage"] == "continuation_validation_pre")
+    assert validation_observation["active_db_sha256"] == before_child_hashes["active"]
+    assert validation_observation["artifact_db_sha256"] == before_child_hashes["artifact"]
+    assert validation_observation["manifest_sha256"] == before_child_hashes["manifest"]
+    assert validation_observation["lease_held"] is False
     child_root = tmp_path / "child" / "runs" / child_manifest["run_id"]
 
     def final_writer(rows, _elapsed, *, telemetry_snapshot=None):
@@ -224,7 +325,7 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
     with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(config, "PROGRESS_DB_FILE", config.STATE_DIR / "handoff-test.sqlite3"):
         completed = pipeline_runner.run_pipeline(
             input_file, resume_run_dir=child_root, allow_paid=True,
-            process_company_fn=lambda _index, company, _logger, _website, record: (0, dict(_payload(record["source_record_id"], company=company, status="OK_HIGH_CONFIDENCE", publication_eligible=True, website="https://acme.example"), known_website_evaluation={"status": "OK_HIGH_CONFIDENCE", "website": "https://acme.example"}, paid_attempt_result="NO_CALL_NEEDED", paid_attempt_reason="supplied_website_publishable_at_paid_entry", paid_evidence_ref="test:supplied-site")),
+            process_company_fn=lambda _index, company, _logger, _website, record: (0, dict(_payload(record["source_record_id"], company=company, status="OK_HIGH_CONFIDENCE", publication_eligible=True, content_decision=publishable_content_decision(source_record_id=record["source_record_id"], website="https://acme.example", email="", phone=""), website="https://acme.example"), known_website_evaluation={"status": "OK_HIGH_CONFIDENCE", "website": "https://acme.example"}, paid_attempt_result="NO_CALL_NEEDED", paid_attempt_reason="supplied_website_publishable_at_paid_entry", paid_evidence_ref="test:supplied-site")),
             write_outputs_fn=final_writer,
             set_output_dir_fn=lambda path: setattr(config, "OUTPUT_DIR", Path(path)),
             empty_result_fn=lambda company, status, reason: _payload(company, status=status, reason=reason),
@@ -250,6 +351,110 @@ def test_real_runner_handoff_continuation_and_resume_without_provider_calls(tmp_
     assert resumed == "COMPLETE_RESUME_VERIFIED"
     resumed_manifest = json.loads((child_root / "manifest.json").read_text(encoding="utf-8"))
     assert {name: info["sha256"] for name, info in resumed_manifest["files"].items()} == artifact_hashes
+    assert before_child_hashes == {
+        "active": sha256(run_root / "state" / "progress.sqlite3"),
+        "artifact": sha256(parent_artifact_path),
+        "manifest": sha256(run_root / "manifest.json"),
+    }
+
+
+def test_pipeline_error_exit_drains_pending_metrics_before_releasing_lease(tmp_path: Path, monkeypatch):
+    from modules import pipeline_runner
+
+    input_file = tmp_path / "input.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["company", "source_record_id", "website"])
+    sheet.append(["Acme", "input:0", "https://acme.example"])
+    workbook.save(input_file)
+    workbook.close()
+
+    def worker(_index, company, _logger, _website, record):
+        with runtime._LOCK:
+            runtime._LAST_DURABLE_METRIC_FLUSH = __import__("time").monotonic()
+        runtime.record("candidate.error_exit_probe")
+        return 0, _payload(record["source_record_id"], company=company, status="REVIEW_NEEDED", reason="needs_paid")
+
+    with patch.object(config, "SEARCH_PROVIDER", "brightdata"), patch.object(
+        config, "RUNS_DIR", tmp_path / "error-runs"
+    ), patch.object(checkpoint, "mark_handoff_pending", side_effect=RuntimeError("controlled pre-seal failure")):
+        with pytest.raises(RuntimeError, match="controlled pre-seal failure"):
+            pipeline_runner.run_pipeline(
+                input_file, allow_paid=False, process_company_fn=worker,
+                write_outputs_fn=lambda *_args: (_ for _ in ()).throw(AssertionError("handoff must not publish")),
+                set_output_dir_fn=lambda path: setattr(config, "OUTPUT_DIR", Path(path)),
+                empty_result_fn=lambda company, status, reason: _payload(company, status=status, reason=reason),
+            )
+    run_root = next((tmp_path / "error-runs").iterdir())
+    database = run_root / "state" / "progress.sqlite3"
+    with sqlite3.connect(database) as connection:
+        run_id = connection.execute("SELECT run_id FROM runs").fetchone()[0]
+        assert connection.execute(
+            "SELECT value FROM operational_metrics WHERE run_id=? AND metric='candidate.error_exit_probe'",
+            (run_id,),
+        ).fetchone() == (1,)
+    assert not any(run_root.glob("output/artifacts/*/recovery_state.sqlite3"))
+    assert all(lease.run_dir.resolve() != run_root.resolve() for lease in run_context.active_leases())
+
+
+@pytest.mark.parametrize(
+    ("body_raises", "drain_raises"),
+    [(False, False), (False, True), (True, False), (True, True)],
+    ids=("success-drain-false", "success-drain-raises", "body-error-drain-false", "body-error-drain-raises"),
+)
+def test_pipeline_wrapper_always_releases_real_lease_when_final_drain_fails(
+    tmp_path: Path, monkeypatch, body_raises: bool, drain_raises: bool,
+):
+    from modules import pipeline_runner
+
+    run_dir = tmp_path / "transient-run"
+    lease = run_context.RunLease(run_dir)
+    body_error = ValueError("synthetic pipeline-body failure")
+    drain_error = OSError("synthetic metrics-drain failure")
+
+    def fake_body(*_args, **kwargs):
+        lease.acquire()
+        kwargs["_owned_lease"]["lease"] = lease
+        if body_raises:
+            raise body_error
+        return "synthetic pipeline result"
+
+    def fake_drain(*_args, **_kwargs):
+        if drain_raises:
+            raise drain_error
+        return False
+
+    monkeypatch.setattr(pipeline_runner, "_run_pipeline_impl_body", fake_body)
+    monkeypatch.setattr(runtime, "durable_run_id", lambda: "synthetic-run")
+    monkeypatch.setattr(runtime, "drain_operational_metrics", fake_drain)
+
+    invoke = lambda: pipeline_runner._run_pipeline_impl(
+        tmp_path / "input.xlsx",
+        process_company_fn=lambda *_args: None,
+        write_outputs_fn=lambda *_args: None,
+        set_output_dir_fn=lambda *_args: None,
+        empty_result_fn=lambda *_args: {},
+    )
+    if body_raises:
+        with pytest.raises(ValueError, match="synthetic pipeline-body failure") as caught:
+            invoke()
+        assert caught.value is body_error
+        assert any(
+            ("synthetic metrics-drain failure" if drain_raises else "operational metrics did not drain") in note
+            for note in body_error.__notes__
+        )
+    elif drain_raises:
+        with pytest.raises(OSError, match="synthetic metrics-drain failure") as caught:
+            invoke()
+        assert caught.value is drain_error
+    else:
+        with pytest.raises(RuntimeError, match="operational metrics did not drain before lease release"):
+            invoke()
+
+    assert all(active.run_dir.resolve() != run_dir.resolve() for active in run_context.active_leases())
+    contender = run_context.RunLease(run_dir)
+    contender.acquire()
+    contender.release()
 
 
 def test_provider_fingerprint_duplicate_and_unknown_consume_durable_budget(tmp_path: Path):
@@ -267,14 +472,48 @@ def test_provider_fingerprint_duplicate_and_unknown_consume_durable_budget(tmp_p
         runtime.configure_durable_run(run_id, budgets)
         runtime.set_phase("PAID")
         runtime.set_item_context(0, "paid")
+        runtime.set_source_record_id("input:0")
+        same_job = checkpoint.ensure_provider_work_item(
+            run_id=run_id, item_index=0, source_record_id="input:0",
+            provider="brightdata", operation="search", request_fingerprint="same",
+            need_class="website",
+        )
+        checkpoint.reserve_provider_dispatch_round(
+            run_id=run_id, provider="brightdata", round_ordinal=0,
+            candidates=[{
+                "item_index": 0, "source_record_id": "input:0", "need_class": "website",
+                "job_fingerprint": same_job["job_fingerprint"], "operation": "search",
+                "request_fingerprint": "same", "query_fingerprint": "", "plan_version": 1,
+            }],
+            cap=1,
+        )
+        runtime.set_provider_dispatch_rounds({"brightdata": 0})
         first = runtime.reserve_api("brightdata", operation="search", request_fingerprint="same")
+        assert first.accepted
+        runtime.start_api(first)
         duplicate = runtime.reserve_api("brightdata", operation="search", request_fingerprint="same")
-        second = runtime.reserve_api("brightdata", operation="search", request_fingerprint="different")
-        assert first and second
         assert not duplicate and duplicate.reason == "duplicate_request"
+        runtime.complete_api(first, "DONE")
+        different_job = checkpoint.ensure_provider_work_item(
+            run_id=run_id, item_index=0, source_record_id="input:0",
+            provider="brightdata", operation="search", request_fingerprint="different",
+            need_class="website",
+        )
+        checkpoint.reserve_provider_dispatch_round(
+            run_id=run_id, provider="brightdata", round_ordinal=1,
+            candidates=[{
+                "item_index": 0, "source_record_id": "input:0", "need_class": "website",
+                "job_fingerprint": different_job["job_fingerprint"], "operation": "search",
+                "request_fingerprint": "different", "query_fingerprint": "", "plan_version": 1,
+            }],
+            cap=1,
+        )
+        runtime.set_provider_dispatch_rounds({"brightdata": 1})
+        second = runtime.reserve_api("brightdata", operation="search", request_fingerprint="different")
+        assert second.accepted
+        runtime.start_api(second)
         assert checkpoint.provider_calls_for_item(run_id, 0) and len(checkpoint.provider_calls_for_item(run_id, 0)) == 2
-        checkpoint.complete_provider_call(call_id=first.call_id, state="UNKNOWN")
-        checkpoint.complete_provider_call(call_id=second.call_id, state="DONE")
+        runtime.complete_api(second, "UNKNOWN")
         with sqlite3.connect(db) as connection:
             usage = connection.execute("SELECT reserved,completed,failed,unknown FROM provider_usage WHERE run_id=? AND provider='brightdata'", (run_id,)).fetchone()
         assert usage == (0, 1, 0, 1)
@@ -467,6 +706,7 @@ def test_entity_memory_receipt_is_idempotent_and_preserves_observation(tmp_path:
         "status": "OK_MEDIUM_CONFIDENCE", "publication_eligible": True,
         "free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False,
         "website": "https://receipt.example", "email_source_url": "https://receipt.example/contact",
+        "content_decision": publishable_content_decision(source_record_id="input:0", website="https://receipt.example", email="", phone=""),
         "__memory_receipt_key": "run-1:input:0",
         "__evaluation": {
             "_identity_resolution": "candidate_resolved_by_target_fingerprint",
@@ -570,6 +810,7 @@ def test_finalization_fault_boundaries_resume_to_one_complete_receipt(tmp_path: 
         return 0, {
             "company": company, "source_record_id": record["source_record_id"],
             "status": "OK_HIGH_CONFIDENCE", "publication_eligible": True,
+            "content_decision": publishable_content_decision(source_record_id=record["source_record_id"], website="https://finalization.example", email="ops@finalization.example", phone="+90 212 000 00 00"),
             "website": "https://finalization.example", "email": "ops@finalization.example",
             "phone": "+90 212 000 00 00",
             "email_source_url": "https://finalization.example/contact",

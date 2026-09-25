@@ -13,6 +13,7 @@ from modules import (
     api_configuration,
     candidate_reranker,
     checkpoint,
+    company_resolvers,
     contact_decision,
     contact_publication,
     crawler,
@@ -183,6 +184,12 @@ def _legal_name_identity_score(company: str, pages: list[dict]) -> tuple[int, st
     tokens = scorer.legal_identity_tokens(company)
     if not tokens:
         return 0, "legal_name_phrase_unavailable"
+    if len(tokens) == 1:
+        if scorer.ownership_statement_match(company, text):
+            return 18, "legal_name_ownership_match:1"
+        if scorer.legal_name_phrase_match(company, text):
+            return 14, "legal_name_phrase_match:1"
+        return -8, "single_token_target_anchor_missing"
     if scorer.ownership_statement_match(company, text):
         return 20, f"legal_name_ownership_match:{min(len(tokens), 4)}"
     if len(tokens) >= 3 and scorer.legal_name_full_phrase_match(company, text):
@@ -993,13 +1000,23 @@ def _complete_resolution_evidence(
 
 def _try_linkedin_company_corroboration(
     company: str,
-    evaluations: list[dict],
-    resolution: entity_resolution.Resolution,
+    metadata: dict | list[dict] | None,
+    evaluations: list[dict] | entity_resolution.Resolution | None = None,
+    resolution: entity_resolution.Resolution | None = None,
 ) -> entity_resolution.Resolution:
     """Ask LinkedIn only for existing candidates that are still stuck."""
+    # Keep the historical three-argument helper shape working for offline
+    # callers while the pipeline itself supplies the canonical metadata.
+    if resolution is None and isinstance(evaluations, entity_resolution.Resolution):
+        resolution = evaluations
+        evaluations = metadata if isinstance(metadata, list) else []
+        metadata = None
+    if resolution is None:
+        raise TypeError("resolution is required")
+    evaluations = evaluations if isinstance(evaluations, list) else []
     if resolution.status != "unresolved" or not evaluations:
         return resolution
-    profile = entity_resolution.build_target_profile(company)
+    profile = entity_resolution.build_target_profile(company, metadata)
     targets = [
         item for item in evaluations
         if item.get("crawl_result", {}).get("pages")
@@ -1017,7 +1034,17 @@ def _try_linkedin_company_corroboration(
         )
         if linkedin_evidence.get("verified"):
             break
-    return entity_resolution.resolve_candidates(company, evaluations)
+    return entity_resolution.resolve_candidates(company, evaluations, metadata)
+
+
+def _linkedin_dispatch_pending_for_current_item() -> bool:
+    """Keep later arbitration from masking a deferred LinkedIn dispatch."""
+    run_id = runtime.durable_run_id()
+    item_index = runtime.current_item_index()
+    return bool(
+        run_id and item_index >= 0
+        and "linkedin" in checkpoint.pending_provider_names(run_id, item_index)
+    )
 
 
 def _llm_context_conflict_candidate(
@@ -1146,7 +1173,7 @@ def _try_llm_arbitration(
             )
     for evaluation in evaluations:
         evaluation["_llm_arbiter_decisions"] = decisions
-    return entity_resolution.resolve_candidates(company, evaluations)
+    return entity_resolution.resolve_candidates(company, evaluations, metadata)
 
 
 def _evaluate_llm_rejection_fallbacks(
@@ -1173,7 +1200,7 @@ def _evaluate_llm_rejection_fallbacks(
                 item.get("candidate", {}).get("url", "")
             ) not in evaluated_domains
             and (
-                _full_crawl_worthy(company, item)
+                _full_crawl_worthy(company, item, metadata)
                 or item.get("identity_assessment", {}).get(
                     "provisionally_publishable"
                 )
@@ -1225,6 +1252,30 @@ def _evaluate_candidate_with_stage(
         ),
         "reasons": evaluation.get("reasons", []),
     })
+    run_id = str(runtime.durable_run_id() or "").strip()
+    source_id = str((metadata or {}).get("source_record_id") or runtime.current_source_record_id() or "").strip()
+    execution = checkpoint.reserve_discovery_execution(
+        run_id=run_id, source_record_id=source_id,
+        stage="identity" if crawl_profile == "identity" else "contact",
+        execution_kind=f"{stage}:{scorer.normalize_domain(candidate.get('url', ''))}",
+    ) if run_id and source_id else {}
+    if run_id and source_id:
+        domain = scorer.normalize_domain(candidate.get("url", ""))
+        checkpoint.record_discovery_attempt(
+            run_id=run_id, source_record_id=source_id,
+            attempt_id=checkpoint.discovery_event_id(
+                f"{stage}:{domain}",
+                execution_id=str(execution.get("execution_id") or ""),
+                crawl_profile=crawl_profile,
+                reachable=bool(evaluation.get("crawl_result", {}).get("pages")),
+                reasons=evaluation.get("reasons", [])[:8],
+            ), stage="identity" if crawl_profile == "identity" else "contact",
+            candidate_url=str(candidate.get("url", "")),
+            transport_outcome="DONE" if evaluation.get("crawl_result", {}).get("pages") else "FAILED",
+            semantic_result="IDENTITY_EVALUATED" if crawl_profile == "identity" else "CONTACT_EVALUATED",
+            reason=";".join(str(value) for value in evaluation.get("reasons", [])[:8]),
+            execution_id=str(execution.get("execution_id") or ""),
+        )
     return evaluation
 
 
@@ -1791,6 +1842,231 @@ def _apply_publication_policy(
 def _policy_output_fields(evaluation: dict) -> dict:
     return output_artifacts.policy_output_fields(evaluation)
 
+
+def _content_evidence_records(company: str, evaluation: dict, metadata: dict | None) -> tuple[list[dict], str, list[str], bool]:
+    """Materialize evidence from observed page content, never from reason text."""
+    metadata = metadata or {}
+    records: list[dict] = []
+    pages = evaluation.get("crawl_result", {}).get("pages", [])
+    target_id = str(metadata.get("source_record_id") or runtime.current_source_record_id() or "").strip()
+    target_identity = metadata.get("target_identity") if isinstance(metadata.get("target_identity"), dict) else {}
+    canonical_name = str(
+        metadata.get("listed_legal_name")
+        or metadata.get("legal_name")
+        or target_identity.get("legal_name")
+        or target_identity.get("listed_legal_name")
+        or ""
+    ).strip()
+    canonical_brands = [
+        str(value).strip() for value in (
+            target_identity.get("brands") or metadata.get("brands") or metadata.get("brand_names") or []
+        ) if str(value).strip()
+    ]
+    canonical_tokens = scorer.legal_identity_tokens(canonical_name)
+    candidate_url = str(evaluation.get("crawl_result", {}).get("url") or evaluation.get("candidate", {}).get("url") or "")
+    candidate_domain = scorer.normalize_domain(candidate_url)
+    listed_phone = phone.normalize_phone(str(metadata.get("listed_phone") or ""))
+    selected_phone = phone.normalize_phone(str(evaluation.get("phone") or ""))
+    country_ids: list[str] = []
+    target_anchor = False
+    route = ""
+
+    for page in pages:
+        url = str(page.get("url") or "").strip()
+        final_url = str(page.get("final_url") or url).strip()
+        html = str(page.get("html") or "")
+        retrieval = str(page.get("retrieval_method") or "").casefold()
+        if not url or not final_url or not target_id or not html or retrieval not in publication_policy.SAFE_RETRIEVAL_METHODS:
+            continue
+        digest = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
+        page_domain = scorer.normalize_domain(final_url)
+        same_site = bool(candidate_domain and scorer.same_registrable_domain(candidate_domain, page_domain))
+        text = scorer.normalize_text(html[:50000])
+        observed_names = list((evaluation.get("structured_identity") or {}).get("legal_names", []))
+        observed_names.extend((evaluation.get("structured_identity") or {}).get("names", []))
+        matched_brand = next(
+            (
+                brand for brand in canonical_brands
+                if scorer.legal_name_phrase_match(brand, text)
+            ),
+            "",
+        )
+        observed_business = str(
+            next((value for value in observed_names if str(value).strip()), "")
+            or matched_brand
+            or page_domain
+        ).strip()
+        legal_match = bool(
+            same_site and canonical_name and len(canonical_tokens) >= 2
+            and scorer.legal_name_phrase_match(canonical_name, text)
+        )
+        target_name_match = bool(
+            same_site and canonical_name
+            and scorer.legal_name_phrase_match(canonical_name, text)
+        )
+        brand_name_match = bool(
+            same_site and canonical_brands and any(
+                scorer.legal_name_phrase_match(brand, text) for brand in canonical_brands
+            )
+        )
+        ownership_statements = (evaluation.get("structured_identity") or {}).get("ownership_statements", [])
+        ownership_names = [value for value in [canonical_name, *canonical_brands] if value]
+        brand_relation = bool(
+            same_site and ownership_statements and ownership_names
+            and any(
+                scorer.legal_name_phrase_match(name, str(statement))
+                for statement in ownership_statements for name in ownership_names
+            )
+        )
+        emails = [str(value).strip().casefold() for value in extractor.extract_emails(html)]
+        phones = [phone.normalize_phone(str(value)) for value in extractor.extract_phones(html)]
+        anchor_candidate = bool(
+            selected_phone
+            and selected_phone in phones
+            and (target_name_match or brand_name_match or brand_relation)
+        )
+        page_route = (
+            "LEGAL_NAME" if legal_match
+            else "BRAND_OWNER" if brand_relation
+            else "TARGET_ANCHOR" if target_name_match or brand_name_match
+            else ""
+        )
+        if page_route and not route:
+            route = page_route
+        contact_fields = []
+        observed_contacts = {}
+        selected_email = str(evaluation.get("email") or "").strip().casefold()
+        if selected_email and selected_email in emails:
+            contact_fields.append("email")
+            observed_contacts["email"] = selected_email
+        if selected_phone and selected_phone in phones:
+            contact_fields.append("phone")
+            observed_contacts["phone"] = selected_phone
+        observation_type = "legal_name" if legal_match else "brand_owner_relation" if brand_relation else "page_content"
+        observation_value = canonical_name if legal_match else (str((evaluation.get("structured_identity") or {}).get("ownership_statements", [""])[0]) if brand_relation else observed_business)
+        if anchor_candidate:
+            observation_type = "phone"
+            observation_value = selected_phone
+        evidence_id = hashlib.sha256(f"{target_id}\0{final_url}\0{digest}".encode()).hexdigest()
+        record = {
+            "evidence_id": evidence_id,
+            "target_source_record_id": target_id,
+            "evidence_source_record_id": f"crawl:{digest[:24]}",
+            "observed_business": observed_business,
+            "url": url,
+            "final_url": final_url,
+            "content_sha256": digest,
+            "retrieval_method": retrieval,
+            "observation_type": observation_type,
+            "observation_value": observation_value,
+            "location": {"kind": "page_text", "selector": "body", "excerpt_sha256": hashlib.sha256(text[:1000].encode()).hexdigest()},
+            "relation": "target_anchor" if anchor_candidate else ("first_party_identity" if page_route else "supports_target"),
+            "identity_route": page_route,
+            "first_party": same_site,
+            "role": "candidate_first_party_observation" if anchor_candidate else "",
+            "distinctive_token_count": len(canonical_tokens),
+            "legal_name_match": legal_match,
+            "full_name_match": legal_match and len(canonical_tokens) >= 2,
+            "name_supported": bool(target_name_match or brand_name_match or brand_relation),
+            "anchor_observation_type": "phone" if anchor_candidate else "",
+            "anchor_observation_value": selected_phone if anchor_candidate else "",
+            "target_anchor_candidate": anchor_candidate,
+            "explicit_relationship": brand_relation,
+            "brand_owner_relation": brand_relation,
+            "contact_fields": contact_fields,
+            "observed_contacts": observed_contacts,
+        }
+        records.append(record)
+        country_observed = bool(
+            same_site and (
+                page_domain.endswith(".tr")
+                or any(marker in text for marker in ("turkey", "türkiye", "istanbul", "ankara", "izmir", "bursa"))
+            )
+        )
+        if country_observed:
+            country_id = hashlib.sha256(f"{evidence_id}\0country".encode()).hexdigest()
+            country_record = dict(record)
+            for key in (
+                "role", "target_anchor_candidate", "anchor_observation_type",
+                "anchor_observation_value", "independent_source_evidence_id",
+                "candidate_evidence_id", "relation_evidence_id", "match_kind",
+                "matched", "name_supported",
+            ):
+                country_record.pop(key, None)
+            country_record.update({
+                "evidence_id": country_id,
+                "observation_type": "country",
+                "observation_value": "TR",
+                "location": {"kind": "page_text", "selector": "body", "marker": "TR_country_marker"},
+                "relation": "country",
+                "identity_route": "COUNTRY",
+            })
+            records.append(country_record)
+            country_ids.append(country_id)
+
+    # A listed target anchor is valid only when the independent source record
+    # and the observed phone agree; it is never inferred from a reason string.
+    listed_hash = str(metadata.get("source_detail_content_sha256") or "").casefold()
+    listed_url = str(metadata.get("source_detail_url") or "").strip()
+    candidate_name_records = [
+        item for item in records
+        if item.get("identity_route") in {"LEGAL_NAME", "BRAND_OWNER", "TARGET_ANCHOR"}
+        and item.get("first_party") is True
+        and item.get("name_supported") is True
+        and item.get("target_anchor_candidate") is True
+    ]
+    if listed_phone and selected_phone and listed_phone == selected_phone and target_id and listed_url and re.fullmatch(r"[0-9a-f]{64}", listed_hash) and candidate_name_records:
+        evidence_id = hashlib.sha256(f"{target_id}\0{listed_url}\0{listed_hash}".encode()).hexdigest()
+        candidate_record = candidate_name_records[0]
+        relation_id = hashlib.sha256(f"{evidence_id}\0{candidate_record['evidence_id']}\0target-anchor".encode()).hexdigest()
+        records.append({
+            "evidence_id": evidence_id,
+            "target_source_record_id": target_id,
+            "evidence_source_record_id": str(metadata.get("source_evidence") or f"listed:{listed_hash[:24]}"),
+            "observed_business": canonical_name or str(candidate_record.get("observed_business") or ""),
+            "url": listed_url,
+            "final_url": listed_url,
+            "content_sha256": listed_hash,
+            "retrieval_method": "official_link_reference",
+            "observation_type": "phone",
+            "observation_value": selected_phone,
+            "location": {"kind": "source_record", "field": "listed_phone"},
+            "relation": "target_anchor",
+            "identity_route": "TARGET_ANCHOR",
+            "match_kind": "phone", "matched": True,
+            "name_supported": True,
+            "role": "independent_observation",
+            "independent_source_evidence_id": evidence_id,
+            "candidate_evidence_id": candidate_record["evidence_id"],
+            "relation_evidence_id": relation_id,
+            "first_party": True,
+        })
+        records.append({
+            "evidence_id": relation_id,
+            "target_source_record_id": target_id,
+            "evidence_source_record_id": f"relation:{evidence_id[:24]}",
+            "observed_business": str(candidate_record.get("observed_business") or canonical_name or ""),
+            "url": candidate_record.get("final_url") or candidate_record.get("url") or "",
+            "final_url": candidate_record.get("final_url") or candidate_record.get("url") or "",
+            "content_sha256": candidate_record.get("content_sha256") or "",
+            "retrieval_method": candidate_record.get("retrieval_method") or "",
+            "observation_type": "target_anchor_relation",
+            "observation_value": selected_phone,
+            "location": {"kind": "explicit_relation", "source": evidence_id, "candidate": candidate_record["evidence_id"]},
+            "relation": "target_anchor",
+            "identity_route": "TARGET_ANCHOR",
+            "match_kind": "phone",
+            "matched": True,
+            "name_supported": True,
+            "role": "anchor_relation",
+            "independent_source_evidence_id": evidence_id,
+            "candidate_evidence_id": candidate_record["evidence_id"],
+            "relation_evidence_id": relation_id,
+            "first_party": True,
+        })
+        target_anchor = True
+    return records, route, country_ids, target_anchor
+
 def _exact_brand_domain(company: str, candidate: dict) -> bool:
     tokens = scorer.domain_identity_tokens(company)
     return bool(tokens) and scorer.compact_domain_core(candidate.get("url", "")) == "".join(tokens)
@@ -1959,7 +2235,7 @@ def _acquisition_brand_domain_match(company: str, candidate: dict) -> bool:
     )
 
 
-def _full_crawl_worthy(company: str, evaluation: dict) -> bool:
+def _full_crawl_worthy(company: str, evaluation: dict, metadata: dict | None = None) -> bool:
     """Spend contact-crawl budget after identity is plausible, not complete.
 
     Country evidence may live only on contact/legal pages reached by the full
@@ -1968,7 +2244,7 @@ def _full_crawl_worthy(company: str, evaluation: dict) -> bool:
     requires the complete fingerprint in entity_resolution.
     """
     fingerprint = entity_resolution.fingerprint(
-        entity_resolution.build_target_profile(company), evaluation,
+        entity_resolution.build_target_profile(company, metadata), evaluation,
     )
     if not (
         fingerprint.reachable
@@ -2007,7 +2283,7 @@ def _refine_identity_evidence(
     ranked_identity: list[dict],
 ) -> list[dict]:
     """Use one gap-directed identity recrawl before any broad contact crawl."""
-    if any(_full_crawl_worthy(company, item) for item in ranked_identity):
+    if any(_full_crawl_worthy(company, item, metadata) for item in ranked_identity):
         return ranked_identity
     refined = list(ranked_identity)
     attempts = 0
@@ -2015,7 +2291,7 @@ def _refine_identity_evidence(
         if attempts >= config.MAX_IDENTITY_EVIDENCE_RECRAWLS:
             break
         fingerprint = entity_resolution.fingerprint(
-            entity_resolution.build_target_profile(company), evaluation,
+            entity_resolution.build_target_profile(company, metadata), evaluation,
         )
         if not (
             fingerprint.reachable
@@ -2051,7 +2327,15 @@ def _refine_identity_evidence(
     return refined
 
 
-def _process_known_website(index: int, company: str, website: str, logger, metadata: dict | None = None) -> tuple[int, dict] | None:
+def _process_known_website(
+    index: int,
+    company: str,
+    website: str,
+    logger,
+    metadata: dict | None = None,
+    *,
+    defer_llm_arbitration: bool = False,
+) -> tuple[int, dict] | None:
     logger.info("Processing %s with supplied website: %s -> %s", index + 1, company, website)
     candidate = {
         "domain": scorer.normalize_domain(website),
@@ -2066,10 +2350,14 @@ def _process_known_website(index: int, company: str, website: str, logger, metad
     evaluation = _evaluate_candidate(company, candidate, metadata)
     if not evaluation["crawl_result"]["pages"]:
         return None
-    resolution = entity_resolution.resolve_candidates(company, [evaluation])
-    resolution = _try_llm_arbitration(
-        company, metadata, [evaluation], resolution,
-    )
+    resolution = entity_resolution.resolve_candidates(company, [evaluation], metadata)
+    if (
+        not defer_llm_arbitration
+        or _llm_context_conflict_candidate(company, metadata, evaluation)
+    ):
+        resolution = _try_llm_arbitration(
+            company, metadata, [evaluation], resolution,
+        )
     if evaluation.get("_llm_arbiter_rejected"):
         return None
     if resolution.status == "resolved" and resolution.selected is not None:
@@ -2159,6 +2447,55 @@ def _finalize_selected_evaluation(
         "reason": "; ".join(reason for reason in reasons if reason),
         "__evaluation": _evaluation_evidence(evaluation),
     }
+    evidence_records, identity_route, country_evidence_ids, target_anchor = _content_evidence_records(
+        company, evaluation, metadata,
+    )
+    source_id = str((metadata or {}).get("source_record_id") or runtime.current_source_record_id() or "").strip()
+    content_decision = publication_policy.evaluate_content({
+        "company": company,
+        "source_record_id": source_id,
+        "website": row.get("website", ""),
+        "candidate": evaluation.get("candidate", {}),
+        "identity_assessment": evaluation.get("identity_assessment", {}),
+        "identity_verified": identity_verified,
+        "identity_route": identity_route,
+        "evidence_records": evidence_records,
+        "country_supported": bool(country_evidence_ids),
+        "country_evidence_ids": country_evidence_ids,
+        "target_anchor": target_anchor,
+        "email": row.get("email", ""),
+        "phone": row.get("phone", ""),
+        "email_publication_status": row.get("email_publication_status", "suppressed"),
+        "phone_publication_status": row.get("phone_publication_status", "suppressed"),
+        "reasons": reasons,
+        "support_evidence_ids": [
+            item.get("evidence_id") for item in evidence_records
+            if item.get("identity_route") in {"LEGAL_NAME", "TARGET_ANCHOR", "BRAND_OWNER"}
+        ],
+    })
+    row["content_decision"] = content_decision.as_dict()
+    row["__content_decision"] = row["content_decision"]
+    row["content_evidence_records"] = evidence_records
+    row["content_target_source_record_id"] = source_id
+    run_id = str(runtime.durable_run_id() or "").strip()
+    if run_id and source_id:
+        execution = checkpoint.reserve_discovery_execution(
+            run_id=run_id, source_record_id=source_id, stage="publication",
+            execution_kind=scorer.normalize_domain(row.get("website", "")),
+        )
+        checkpoint.record_discovery_attempt(
+            run_id=run_id, source_record_id=source_id,
+            attempt_id=checkpoint.discovery_event_id(
+                f"publication:{scorer.normalize_domain(row.get('website', ''))}",
+                execution_id=str(execution.get("execution_id") or ""),
+                decision=content_decision.as_dict(),
+            ),
+            execution_id=str(execution.get("execution_id") or ""),
+            stage="publication", candidate_url=str(row.get("website", "")),
+            transport_outcome="DONE", semantic_result="PUBLICATION_EVALUATED",
+            reason=";".join(content_decision.missing_evidence or content_decision.reason_codes),
+            evidence_refs=list(content_decision.support_evidence_ids),
+        )
     if (
         row.get("publication_eligible")
         and any(
@@ -2190,18 +2527,30 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     logger.info("Processing %s: %s", index + 1, company)
     if known_website:
         try:
-            known_result = _process_known_website(index, company, known_website, logger, metadata)
+            known_result = _process_known_website(
+                index, company, known_website, logger, metadata,
+                defer_llm_arbitration=execution_phase == "PAID",
+            )
             if known_result:
                 if execution_phase == "FREE":
                     random_delay()
                     return known_result
                 known_website_evaluation = dict(known_result[1])
-                if execution_phase == "PAID" and output_artifacts.is_publishable_row(known_result[1]):
-                    row = known_result[1]
-                    row["known_website_evaluation"] = dict(known_result[1])
-                    row["paid_attempt_result"] = "NO_CALL_NEEDED"
-                    row["paid_attempt_reason"] = "supplied_website_publishable_at_paid_entry"
-                    return index, row
+                if execution_phase == "PAID":
+                    supplied_source_id = str(
+                        (metadata or {}).get("source_record_id")
+                        or runtime.current_source_record_id()
+                        or ""
+                    ).strip()
+                    no_call_decision = publication_policy.decide_supplied_website_no_call(
+                        known_result[1], source_record_id=supplied_source_id,
+                    )
+                    if no_call_decision.get("publishable"):
+                        row = known_result[1]
+                        row["known_website_evaluation"] = dict(known_result[1])
+                        row["paid_attempt_result"] = "NO_CALL_NEEDED"
+                        row["paid_attempt_reason"] = "supplied_website_publishable_at_paid_entry"
+                        return index, row
             logger.info("Supplied website failed, falling back to search: %s", company)
         except Exception as exc:
             if isinstance(exc, checkpoint.SchedulerInvariantError):
@@ -2237,7 +2586,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             )
         runtime.record("pipeline.profile_candidates_evaluated", len(profile_full))
         profile_resolution = entity_resolution.resolve_profile_anchor(
-            company, profile_full,
+            company, profile_full, metadata,
         )
         if profile_resolution.status == "resolved":
             profile_resolution.selected["_identity_resolution"] = (
@@ -2270,23 +2619,41 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     source_health = getattr(candidates, "source_health", {})
     if source_health.get("status") in {"degraded", "circuit_open", "unavailable"}:
         runtime.record("pipeline.source_degraded_companies")
-    selectable_candidates = [
+    def _source_supported_candidate(candidate: dict) -> bool:
+        return bool(
+            candidate.get("_source_profile_evidence")
+            or candidate.get("_outbound_discovery_evidence")
+            or candidate.get("_entity_evidence_url")
+            or candidate.get("_legal_name_evidence")
+            or candidate.get("_ownership_evidence")
+        )
+
+    eligible_pool = [
         candidate for candidate in candidates
-        if (
-            candidate.get("role") not in identity.EXCLUDED_ROLES
-            and (
-                candidate["score"] >= config.MIN_ACCEPT_SCORE
-                or (
-                    candidate["score"] >= config.MIN_ACCEPT_SCORE - 5
-                    and candidate.get("role") == "company_candidate"
-                    and candidate.get("_official_query_evidence", 0) >= 3
-                    and scorer.public_brand_domain_match(
-                        company, candidate.get("url", ""),
-                    )
-                )
+        if candidate.get("role") not in identity.EXCLUDED_ROLES
+        and (
+            candidate.get("score", 0) >= config.MIN_ACCEPT_SCORE
+            or (
+                candidate.get("score", 0) >= config.MIN_ACCEPT_SCORE - 5
+                and candidate.get("role") == "company_candidate"
+                and candidate.get("_official_query_evidence", 0) >= 3
+                and scorer.public_brand_domain_match(company, candidate.get("url", ""))
             )
+            or _source_supported_candidate(candidate)
         )
     ]
+    normal_candidates = [item for item in eligible_pool if not _source_supported_candidate(item)]
+    source_supported_candidates = [item for item in eligible_pool if _source_supported_candidate(item)]
+    selectable_candidates = []
+    seen_light_domains: set[str] = set()
+    for candidate in (*normal_candidates, *source_supported_candidates):
+        domain = scorer.normalize_domain(candidate.get("url", ""))
+        if domain and domain in seen_light_domains:
+            continue
+        seen_light_domains.add(domain)
+        selectable_candidates.append(candidate)
+    runtime.record("pipeline.light_candidates_normal_reserved", len(normal_candidates))
+    runtime.record("pipeline.light_candidates_source_reserved", len(source_supported_candidates))
     best = selectable_candidates[0] if selectable_candidates else None
     if not best:
         random_delay()
@@ -2316,6 +2683,56 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         )
         for candidate in eligible_candidates
     ]
+    # Resolver I/O is deliberately split from candidate evaluation.  The
+    # Brandfetch rows above have now gone through the real identity crawl; only
+    # that result can suppress the conditional Hunter stage.
+    resolver_rows = []
+    for candidate in candidates:
+        resolver_evidence = candidate.get("_resolver_discovery_evidence") or []
+        if any("brandfetch" in {str(provider).casefold() for provider in item.get("providers", [])} for item in resolver_evidence if isinstance(item, dict)):
+            resolver_rows.append({
+                "provider": "brandfetch",
+                "domain": scorer.normalize_domain(candidate.get("url", "")),
+                "name": str(next((item.get("resolved_name") for item in resolver_evidence if isinstance(item, dict) and item.get("resolved_name")), "")),
+            })
+    validated_resolver_domains = {
+        scorer.normalize_domain(item.get("candidate", {}).get("url", ""))
+        for item in identity_evaluations
+        if item.get("crawl_result", {}).get("pages")
+        and item.get("identity_assessment", {}).get("provisionally_publishable")
+        and any(
+            "brandfetch" in {str(provider).casefold() for provider in ev.get("providers", [])}
+            for ev in item.get("candidate", {}).get("_resolver_discovery_evidence", [])
+            if isinstance(ev, dict)
+        )
+    }
+    if config.ENABLE_BRANDFETCH_DOMAIN_SEARCH or config.ENABLE_HUNTER_DOMAIN_FINDER:
+        conditional_resolver_rows = company_resolvers.resolve_company_domains(
+            company,
+            brandfetch_results=resolver_rows,
+            validated_identity_domains=validated_resolver_domains,
+            include_hunter=True,
+        )
+        hunter_domains = {
+            scorer.normalize_domain(item.get("domain", ""))
+            for item in conditional_resolver_rows
+            if item.get("provider") == "hunter_domain_finder"
+        }
+        for domain in sorted(hunter_domains):
+            if not domain or any(scorer.normalize_domain(item.get("url", "")) == domain for item in candidates):
+                continue
+            candidate = {
+                "url": f"https://{domain}",
+                "query": "hunter_domain_resolver",
+                "role": "company_candidate",
+                "score": scorer.score_domain_details(company, domain).get("score", 0),
+                "_resolver_discovery_evidence": [{"providers": ["hunter_domain_finder"], "resolved_name": company}],
+            }
+            candidates.append(candidate)
+            identity_evaluations.append(_evaluate_candidate_with_stage(
+                company, candidate, metadata,
+                crawl_profile="identity", verify_email_domain=False,
+            ))
     alias_candidates = _first_party_alias_candidates(
         company,
         identity_evaluations,
@@ -2366,7 +2783,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     full_candidates = [
         item["candidate"]
         for item in ranked_identity
-        if _full_crawl_worthy(company, item)
+        if _full_crawl_worthy(company, item, metadata)
     ][: config.MAX_FULL_CANDIDATE_EVALUATIONS]
     full_candidate_domains = {
         scorer.normalize_domain(candidate.get("url", ""))
@@ -2377,9 +2794,9 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         for item in ranked_identity
         if (
             entity_resolution.fingerprint(
-                entity_resolution.build_target_profile(company), item,
+                entity_resolution.build_target_profile(company, metadata), item,
             ).domain_specificity >= 2
-            and _full_crawl_worthy(company, item)
+            and _full_crawl_worthy(company, item, metadata)
             and scorer.normalize_domain(
                 item["candidate"].get("url", "")
             ) not in full_candidate_domains
@@ -2438,7 +2855,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             full_candidates = [
                 item["candidate"]
                 for item in ranked_identity
-                if _full_crawl_worthy(company, item)
+                if _full_crawl_worthy(company, item, metadata)
             ][: config.MAX_FULL_CANDIDATE_EVALUATIONS]
             runtime.record(
                 "pipeline.identity_acquisition_candidates",
@@ -2524,7 +2941,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         reverse=True,
     )
     resolution = entity_resolution.resolve_candidates(
-        company, ranked_evaluations,
+        company, ranked_evaluations, metadata,
     )
     automation_state = evidence_acquisition.analyze(
         company,
@@ -2550,9 +2967,12 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         )
     if resolution.status == "unresolved" and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
         resolution = _try_linkedin_company_corroboration(
-            company, ranked_evaluations, resolution,
+            company, metadata, ranked_evaluations, resolution,
         )
-    if runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
+    if (
+        runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
+        and not _linkedin_dispatch_pending_for_current_item()
+    ):
         resolution = _try_llm_arbitration(
             company, metadata, ranked_evaluations, resolution,
         )
@@ -2561,9 +2981,12 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
             company, metadata, ranked_identity, ranked_evaluations,
         )
         resolution = entity_resolution.resolve_candidates(
-            company, ranked_evaluations,
+            company, ranked_evaluations, metadata,
         )
-        if runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
+        if (
+            runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
+            and not _linkedin_dispatch_pending_for_current_item()
+        ):
             resolution = _try_llm_arbitration(
                 company, metadata, ranked_evaluations, resolution,
             )
@@ -3021,6 +3444,7 @@ def cli(argv=None) -> int:
         pipeline_runner.PipelineOutcomeStatus.PAID_PENDING_APPROVAL: 20,
         pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED: 21,
         pipeline_runner.PipelineOutcomeStatus.FINALIZATION_INVARIANT: 22,
+        pipeline_runner.PipelineOutcomeStatus.SCHEDULER_STALLED: 23,
     }.get(outcome.status, 22)
 
 
