@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "fixture_id": "petzoo-acceptance-137-20260923",
+  "records_total": 137,
+  "fixture_revision": 5,
+  "fixture_change_reason": "Revision 4 aligned G:004 and G:005 and restored positive LinkedIn/LLM coverage, but worker comparison found one extra Bright Data CAPTCHA dispatch at G:006 under worker=3. Revision 5 places G:004, G:005, and G:006 before H, keeps remaining G after H, and preserves all 137 identities, providers, budgets, response routes, and subcases.",
+  "execution_order": ["A", "F", "B", "C", "D", "E", "petzoo:G:004", "petzoo:G:005", "petzoo:G:006", "H", "G"],
+  "groups": [
+    {"id": "A", "count": 20, "scenario": "supplied_website_publishable_no_call"},
+    {"id": "B", "count": 20, "scenario": "primary_brightdata"},
+    {"id": "C", "count": 20, "scenario": "shared_listing_query_then_distinct_company_query", "listed_website": "https://petzoo-c-shared.example/", "sector": "pet products"},
+    {"id": "D", "count": 20, "scenario": "http_403_browser_fallback"},
+    {"id": "E", "count": 15, "scenario": "negative_transient_retrieval", "subcases": {"http_404": 5, "timeout": 5, "http_429": 3, "http_503": 2}},
+    {"id": "F", "count": 15, "scenario": "provider_mix_hunter_quota_last_slot", "providers": ["brightdata", "brandfetch", "google_places", "hunter"]},
+    {"id": "G", "count": 15, "scenario": "header_captcha_terminal_and_unknown", "listed_website_by_ordinal": {"000": "https://petzoo-c-shared.example/"}, "subcases": {"post_send_unknown": 1}, "unknown_http_start_count": 1},
+    {"id": "H", "count": 12, "scenario": "adaptive_targeted_linkedin_llm", "subcases": {"linkedin_resolution": 5, "first_party_verified": 1, "llm_context_conflict": 6}}
+  ],
+  "providers": {
+    "brightdata": 535,
+    "google_places": 35,
+    "brandfetch": 35,
+    "hunter": 14,
+    "linkedin": 1085,
+    "llm": 478
+  },
+  "runtime_limits": {
+    "min_delay_seconds": 1.0,
+    "max_delay_seconds": 3.0,
+    "global_requests_per_second": 3.0,
+    "brightdata_requests_per_minute": 13.0,
+    "max_retries": 2,
+    "max_retry_after_seconds": 30
+  },
+  "required_workers": [1, 3],
+  "outer_timeout_seconds": 1800,
+  "prohibitions": [
+    "real_paid_network_calls",
+    "preloaded_done_or_not_required_provider_work",
+    "stubbed_pipeline_or_decision_functions",
+    "provider_budget_or_threshold_relaxation"
+  ]
+}

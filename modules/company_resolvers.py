@@ -48,11 +48,19 @@ def _clean_results(items, provider: str) -> list[dict]:
     cleaned: list[dict] = []
     seen: set[str] = set()
     for rank, item in enumerate(items or [], start=1):
-        for field in ("domain", "name", "company_name"):
-            if field in item and not isinstance(item.get(field), str):
-                raise ValueError(f"{provider} {field} is not a string")
-        if "claimed" in item and not isinstance(item.get("claimed"), bool):
-            raise ValueError(f"{provider} claimed is not a boolean")
+        if not isinstance(item, dict):
+            runtime.record(f"resolver.{provider}.invalid_row")
+            continue
+        invalid_fields = [
+            field for field in ("domain", "name", "company_name")
+            if field in item and item.get(field) is not None
+            and not isinstance(item.get(field), str)
+        ]
+        if "claimed" in item and item.get("claimed") is not None and not isinstance(item.get("claimed"), bool):
+            invalid_fields.append("claimed")
+        if invalid_fields:
+            runtime.record(f"resolver.{provider}.invalid_row")
+            continue
         domain = scorer.normalize_domain(item.get("domain", ""))
         if (
             not scorer.is_valid_hostname(domain)
@@ -132,6 +140,8 @@ def brandfetch_domains(company: str) -> list[dict]:
             raise ValueError("Brandfetch response is not a list of objects")
         items = payload
         cleaned = _clean_results(items, "brandfetch")
+        if items and not cleaned:
+            raise ValueError("all Brandfetch resolver rows are invalid")
         runtime.complete_api(reservation, "DONE")
         try:
             _save(namespace, company, items)
@@ -199,6 +209,8 @@ def hunter_domains(company: str) -> list[dict]:
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
             raise ValueError("Hunter response data is not a list of objects")
         cleaned = _clean_results(items, "hunter_domain_finder")
+        if items and not cleaned:
+            raise ValueError("all Hunter resolver rows are invalid")
         runtime.complete_api(reservation, "DONE")
         try:
             _save(namespace, company, items)
@@ -219,10 +231,46 @@ def hunter_domains(company: str) -> list[dict]:
         return runtime.provider_result([], state=state, reason=f"{type(exc).__name__}:{exc}", call_ids=(getattr(reservation, "call_id", ""),))
 
 
-def resolve_company_domains(company: str) -> list[dict]:
-    """Union enabled cheap resolvers while retaining provider provenance."""
+def resolve_company_domains(
+    company: str, *, validated_domains: set[str] | None = None,
+    validated_identity_domains: set[str] | None = None,
+    brandfetch_results: list[dict] | None = None,
+    include_hunter: bool = True,
+    candidate_evaluator=None,
+) -> list[dict]:
+    """Resolve discovery candidates; name compatibility is never sufficiency.
+
+    Brandfetch output can suppress Hunter only after a caller supplies a
+    domain that has already passed the first-party crawl and identity policy.
+    """
     combined: dict[str, dict] = {}
-    for item in [*brandfetch_domains(company), *hunter_domains(company)]:
+    brandfetch = list(brandfetch_results) if brandfetch_results is not None else brandfetch_domains(company)
+    resolver_items = list(brandfetch)
+    # ``validated_domains`` is retained for compatibility but is deliberately
+    # not sufficient: only a post-crawl identity decision may suppress Hunter.
+    validated_domains = {scorer.normalize_domain(value) for value in (validated_domains or set())}
+    validated_identity_domains = {
+        scorer.normalize_domain(value) for value in (validated_identity_domains or set())
+    }
+    evaluated_domains = set(validated_identity_domains)
+    if candidate_evaluator is not None:
+        for item in brandfetch:
+            try:
+                if candidate_evaluator(item) is True:
+                    evaluated_domains.add(scorer.normalize_domain(item.get("domain", "")))
+            except Exception:
+                runtime.record("resolver.candidate_evaluator_error")
+    sufficient_brandfetch = [
+        item for item in brandfetch
+        if _name_compatible(company, item)
+        and scorer.normalize_domain(item.get("domain", "")) in evaluated_domains
+    ]
+    if not sufficient_brandfetch and include_hunter:
+        resolver_items.extend(hunter_domains(company))
+        runtime.record("resolver.hunter.conditional_attempt")
+    elif sufficient_brandfetch:
+        runtime.record("resolver.hunter.skipped_validated_brandfetch")
+    for item in resolver_items:
         if not _name_compatible(company, item):
             runtime.record("resolver.name_mismatch_rejected")
             continue

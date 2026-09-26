@@ -39,7 +39,7 @@ def test_free_search_trace_replays_logical_and_physical_reservations(tmp_path, m
     config.CRAWL_CACHE_MODE = "refresh"
     _set_search_context()
     live = search._ddgs_text("Example Query")
-    assert live.result_state == "EMPTY"
+    assert live.result_state == "SEARCH_EXHAUSTED"
     snapshot = tmp_path / "replay.json.gz"
     replay_snapshot.write(snapshot)
 
@@ -61,7 +61,7 @@ def test_free_search_trace_replays_logical_and_physical_reservations(tmp_path, m
     assert replayed.result_state == live.result_state
     assert list(replayed) == list(live)
     assert capacity.logical_used == 1
-    assert capacity.physical_used == 1
+    assert capacity.physical_used == 2
     assert discovery_coverage.payload()["replay_miss_count"] == 0
 
 
@@ -107,7 +107,7 @@ def test_failed_backend_order_and_safe_error_class_replay(tmp_path, monkeypatch)
     _load_snapshot(snapshot)
     _set_search_context()
     replayed = search._search_text("Retry Query")
-    assert replayed.result_state == "EMPTY"
+    assert replayed.result_state == "FAILED"
     capacity = runtime.free_search_capacity("discovery")
     assert capacity.physical_used == 2
 

@@ -87,6 +87,14 @@ class DiverseQueryBudgetTests(unittest.TestCase):
                 "phone": "",
                 "score": 90 if resolved else 0,
                 "publication_eligible": resolved,
+                "content_decision": {
+                    "verified": resolved,
+                    "website_allowed": resolved,
+                    "email_allowed": resolved,
+                    "phone_allowed": False,
+                    "complete_contact": resolved,
+                    "missing_evidence": [] if resolved else ["ownership_route_evidence_missing"],
+                },
             }
 
         with tempfile.TemporaryDirectory() as directory, patch.multiple(
@@ -121,12 +129,14 @@ class DiverseQueryBudgetTests(unittest.TestCase):
         ):
             input_path = Path(directory) / "input.xlsx"
             input_path.touch()
-            with self.assertRaisesRegex(RuntimeError, "FAILED requires durable FAILED call"):
-                main.run(input_path, allow_paid=True)
+            outcome = main.run(input_path, allow_paid=True)
+
+        self.assertEqual(outcome.status, pipeline_runner.PipelineOutcomeStatus.SCHEDULER_STALLED)
 
         self.assertEqual(calls, [
             ("FREE OK", "ddgs", False),
             ("PAID NEEDED", "ddgs", False),
+            ("FREE OK", "brightdata", True),
             ("PAID NEEDED", "brightdata", True),
         ])
 

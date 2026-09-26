@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import re
 from typing import Callable
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import config
-from modules import aliases, query_planner, scorer
+from modules import aliases, network_guard, query_planner, scorer
 
 DISCOVERY_ONLY_ROLES = {
     "directory", "fair_profile", "shared_listing", "marketplace", "news",
@@ -186,38 +186,77 @@ def primary_queries(
     query_priority_fn: Callable[[str], int] = query_priority,
 ) -> list[str]:
     queries: list[str] = []
-    seen_queries = set()
-    full_name = re.sub(r"\s+", " ", company_name).strip()
-    if full_name:
-        for query in (
-            f'"{full_name}" Turkiye official website',
-            f'"{full_name}" resmi sitesi',
-        ):
+    seen_queries: set[str] = set()
+    metadata = metadata or {}
+    identity = metadata.get("target_identity") if isinstance(metadata.get("target_identity"), dict) else {}
+    raw_name = str(identity.get("company_raw") or company_name or "").strip()
+    full_name = re.sub(r"\s+", " ", raw_name).strip()
+    legal_name = re.sub(
+        r"\s+", " ",
+        str(identity.get("legal_name") or metadata.get("listed_legal_name") or metadata.get("legal_name") or ""),
+    ).strip()
+    raw_brands = identity.get("brands") or metadata.get("brands") or metadata.get("brand") or ""
+    brand_values = (
+        [str(value).strip() for value in raw_brands if str(value).strip()]
+        if isinstance(raw_brands, (list, tuple))
+        else [part.strip() for part in re.split(r"[/;\n]+", str(raw_brands)) if part.strip()]
+    )
+    multi_brand_without_legal = bool(len(brand_values) > 1 and not legal_name)
+    query_name = "" if multi_brand_without_legal else (legal_name or full_name)
+    country = next((str(value).strip() for value in (
+        *config.TARGET_COUNTRY_QUERY_TERMS, metadata.get("country", ""),
+    ) if str(value).strip()), "")
+
+    def add(query: str) -> None:
+        query = re.sub(r"\s+", " ", str(query or "")).strip()
+        key = query.casefold()
+        if query and key not in seen_queries:
+            seen_queries.add(key)
             queries.append(query)
-            seen_queries.add(query)
-    query_inputs = scorer.search_name_variants(company_name)
-    for alias in aliases.search_terms(company_name):
-        query_inputs.extend(scorer.search_name_variants(alias))
-    for query_input in dict.fromkeys(query_inputs):
-        for template in config.SEARCH_QUERY_TEMPLATES:
-            query = template.format(company=query_input)
-            if query not in seen_queries:
-                queries.append(query)
-                seen_queries.add(query)
+
+    # Source-provided routes are evidence inputs, not authority; keeping them
+    # first makes the acquisition order explicit and deterministic.
+    for value in (metadata.get("listed_website"), metadata.get("website"), metadata.get("profile_url")):
+        if str(value or "").strip():
+            add(f'"{str(value).strip()}"')
+    if query_name:
+        add(f'"{query_name}" {country} official website')
+        add(f'"{query_name}" {country} resmi sitesi')
+        add(f'"{query_name}" contact')
         for term in metadata_query_terms_fn(metadata):
-            query = f"{query_input} {term}"
-            if query not in seen_queries:
-                queries.append(query)
-                seen_queries.add(query)
-        for country in config.TARGET_COUNTRY_QUERY_TERMS:
-            for template in config.SEARCH_COUNTRY_QUERY_TEMPLATES:
-                query = template.format(company=query_input, country=country)
-                if query not in seen_queries:
-                    queries.append(query)
-                    seen_queries.add(query)
+            add(f'{query_name.casefold()} {term}')
+
+    query_inputs = [*brand_values]
+    if not multi_brand_without_legal:
+        query_inputs.append(full_name)
+    query_inputs.extend(scorer.search_name_variants(query_name or full_name))
+    for alias in aliases.search_terms(query_name or full_name):
+        query_inputs.extend(scorer.search_name_variants(alias))
+    for query_input in dict.fromkeys(value for value in query_inputs if value):
+        if query_input.casefold() == full_name.casefold() and legal_name and legal_name.casefold() == full_name.casefold():
+            continue
+        add(f'"{query_input}" {country} official website')
+        for term in metadata_query_terms_fn(metadata):
+            add(f'"{query_input}" {term} {country}')
+            if query_input.casefold() == full_name.casefold():
+                add(f'{full_name.casefold()} {term}')
+    city = str(identity.get("city") or metadata.get("city", "") or "").strip()
+    if not city:
+        address = str(metadata.get("listed_address", "") or "")
+        city = re.split(r"[,;/\n]+", address)[-1].strip()
+    if city:
+        for name in ([query_name] if query_name else brand_values):
+            add(f'"{name}" "{city}"')
+            add(f'"{name}" "{city}" contact')
+    if query_name:
+        add(f'"{query_name}" iletisim {country}')
+    for representation in re.split(r"[/;\n]+", str(identity.get("representations") or metadata.get("representations", "") or "")):
+        representation = representation.strip()
+        if representation:
+            add(f'"{representation}" {country} distributor')
     if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0:
-        return sorted(queries, key=query_priority_fn, reverse=True)[: config.MAX_SEARCH_QUERIES_PER_COMPANY]
-    return sorted(queries, key=query_priority_fn, reverse=True)
+        return queries[: config.MAX_SEARCH_QUERIES_PER_COMPANY]
+    return queries
 
 
 def query_covers_full_identity(company_name: str, query: str) -> bool:
@@ -362,6 +401,191 @@ def result_url(result: dict) -> str:
     return result.get("href") or result.get("url") or result.get("link") or ""
 
 
+def _decode_url_value(value: object, maximum: int = 2) -> str:
+    decoded = str(value or "")
+    for _ in range(maximum):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded
+
+
+def normalize_serp_result(result: dict, *, query_id: str = "", rank: int = 0) -> dict:
+    """Keep provider fields while separating raw, resolved and hint URLs."""
+    result = result if isinstance(result, dict) else {}
+    raw_url = str(result_url(result) or "").strip()
+    display_link = str(result.get("display_link") or result.get("displayLink") or "").strip()
+    cached_resolved = str(result.get("resolved_url", "") or "").strip()
+    cached_status = str(result.get("resolution_status", "") or "").strip()
+    resolved_url = cached_resolved if cached_status == "resolved" else ""
+    method = "none"
+    status = "resolved" if resolved_url else "invalid"
+    if resolved_url:
+        method = str(result.get("resolution_method") or "replay_cached")
+    if not resolved_url:
+        try:
+            parsed = urlparse(raw_url)
+        except ValueError:
+            parsed = None
+        if parsed and parsed.scheme in {"http", "https"} and parsed.hostname:
+            host = (parsed.hostname or "").casefold()
+            path = parsed.path.casefold()
+            if host in {"google.com", "google.com.tr", "www.google.com", "www.google.com.tr"} and path in {"/url", "/goto"}:
+                target = next((value for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.casefold() in {"q", "url", "u"} and value), "")
+                target = _decode_url_value(target)
+                target_parsed = urlparse(target)
+                if target_parsed.scheme in {"http", "https"} and target_parsed.hostname:
+                    resolved_url, method, status = target, "wrapper_unwrapped", "resolved"
+                else:
+                    method, status = "wrapper_opaque", "unresolved"
+            else:
+                resolved_url, method, status = raw_url, "direct", "resolved"
+        elif raw_url:
+            method, status = "invalid", "unresolved"
+    hint = display_link if display_link.startswith(("http://", "https://")) else ""
+    return {
+        "raw_url": raw_url,
+        "resolved_url": resolved_url,
+        "display_link": display_link,
+        "title": result.get("title", "") if isinstance(result.get("title", ""), str) else "",
+        "snippet": result.get("body", result.get("snippet", "")) if isinstance(result.get("body", result.get("snippet", "")), str) else "",
+        "provider": str(result.get("provider", "") or ""),
+        "query_id": str(query_id or result.get("query_id", "") or ""),
+        "rank": int(rank or result.get("rank", 0) or 0),
+        "resolution_method": method,
+        "resolution_status": status,
+        "discovery_hint": hint,
+        "provider_fields": dict(result),
+    }
+
+
+def resolve_serp_target(
+    normalized: dict,
+    *,
+    transport: Callable[..., object] | None = None,
+    max_redirects: int = 3,
+    timeout_seconds: float = 10.0,
+) -> dict:
+    """Resolve an opaque provider wrapper without guessing its token."""
+    item = dict(normalized or {})
+    if item.get("resolution_status") == "resolved":
+        return item
+    if item.get("resolution_method") != "wrapper_opaque":
+        return item
+    if transport is None:
+        item["resolution_reason"] = "opaque_redirect_transport_unavailable"
+        return item
+    import time
+    from urllib.parse import urljoin
+
+    current = str(item.get("raw_url", "") or "").strip()
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    visited: set[str] = set()
+    try:
+        for hop in range(max(0, int(max_redirects)) + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("redirect_resolution_timeout")
+            loop_key = str(current).split("#", 1)[0]
+            if loop_key in visited:
+                raise RuntimeError("redirect_loop")
+            visited.add(loop_key)
+            allowed, reason = network_guard.validate_public_http_url(current)
+            if not allowed:
+                raise RuntimeError(f"unsafe_redirect_target:{reason}")
+            if deadline - time.monotonic() <= 0:
+                raise TimeoutError("redirect_resolution_timeout")
+            remaining = deadline - time.monotonic()
+            response = transport(current, timeout=remaining)
+            try:
+                if deadline - time.monotonic() <= 0:
+                    raise TimeoutError("redirect_resolution_timeout")
+                status_code = int(getattr(response, "status_code", 0) or 0)
+                headers = getattr(response, "headers", {}) or {}
+                location = str(headers.get("location", "") or "").strip()
+                if status_code in {301, 302, 303, 307, 308}:
+                    if hop >= int(max_redirects):
+                        raise RuntimeError("redirect_limit")
+                    if not location:
+                        raise RuntimeError("redirect_without_location")
+                    current = urljoin(current, location)
+                    parsed = urlparse(current)
+                    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                        raise RuntimeError("invalid_redirect_target")
+                    allowed, reason = network_guard.validate_public_http_url(current)
+                    if not allowed:
+                        raise RuntimeError(f"unsafe_redirect_target:{reason}")
+                    if deadline - time.monotonic() <= 0:
+                        raise TimeoutError("redirect_resolution_timeout")
+                    continue
+                if not (200 <= status_code < 400):
+                    raise RuntimeError(f"http_{status_code or 'invalid'}")
+                final_url = str(getattr(response, "url", "") or current).strip()
+                parsed = urlparse(final_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    raise RuntimeError("invalid_final_target")
+                allowed, reason = network_guard.validate_public_http_url(final_url)
+                if not allowed:
+                    raise RuntimeError(f"unsafe_final_target:{reason}")
+                if deadline - time.monotonic() <= 0:
+                    raise TimeoutError("redirect_resolution_timeout")
+                if parsed.hostname.casefold() in {"google.com", "www.google.com", "google.com.tr", "www.google.com.tr"} and parsed.path.casefold() in {"/url", "/goto"}:
+                    raise RuntimeError("wrapper_target_not_resolved")
+                item.update({
+                    "resolved_url": final_url,
+                    "resolution_method": f"opaque_redirect_{hop}_hops",
+                    "resolution_status": "resolved",
+                    "resolution_reason": "redirect_chain_verified",
+                })
+                return item
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+    except Exception as exc:
+        message = str(exc).casefold()
+        if isinstance(exc, TimeoutError) or "timeout" in message:
+            reason = "redirect_resolution_timeout"
+        elif "unsafe_redirect_target" in message:
+            reason = "unsafe_redirect_target"
+        elif "unsafe_final_target" in message:
+            reason = "unsafe_final_target"
+        elif "redirect_limit" in message:
+            reason = "redirect_limit"
+        elif "redirect_loop" in message:
+            reason = "redirect_loop"
+        elif "wrapper_target_not_resolved" in message:
+            reason = "wrapper_target_not_resolved"
+        elif "invalid_redirect_target" in message:
+            reason = "invalid_redirect_target"
+        elif "redirect_without_location" in message:
+            reason = "redirect_without_location"
+        elif "http_" in message:
+            reason = "redirect_http_error"
+        else:
+            reason = "redirect_resolution_failed"
+        item["resolution_reason"] = reason
+    return item
+
+
+def normalize_serp_results(results: list[dict] | tuple[dict, ...], *, query_id: str = "") -> tuple[list[dict], dict[str, int]]:
+    normalized: list[dict] = []
+    counts = {"raw_result_count": len(results or ()), "resolved_result_count": 0, "unresolved_result_count": 0, "unresolved_redirect_count": 0}
+    for rank, result in enumerate(results or (), start=1):
+        item = normalize_serp_result(result, query_id=query_id, rank=rank)
+        if item["resolution_status"] == "resolved":
+            counts["resolved_result_count"] += 1
+        else:
+            counts["unresolved_result_count"] += 1
+            if item["resolution_method"] == "wrapper_opaque":
+                counts["unresolved_redirect_count"] += 1
+        normalized.append(item)
+    if counts["raw_result_count"] and not counts["resolved_result_count"] and counts["unresolved_result_count"]:
+        counts["result_state"] = "UNUSABLE_RESULTS"
+    return normalized, counts
+
+
 def canonical_site_url(raw_url: str) -> str:
     parsed = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
     if not parsed.netloc:
@@ -409,6 +633,15 @@ def snippet_outbound_websites(
 
 
 def can_early_stop(company_name: str, candidate: dict, metadata: dict | None = None) -> bool:
+    content = candidate.get("content_decision") or candidate.get("_content_decision")
+    if not isinstance(content, dict):
+        content = (metadata or {}).get("content_decision") if isinstance(metadata, dict) else None
+    if not isinstance(content, dict):
+        return False
+    if not bool(content.get("website_allowed")) or not bool(content.get("complete_contact")):
+        return False
+    if content.get("missing_evidence"):
+        return False
     if candidate.get("query") in {"verified_alias", "verified_entity"}:
         return True
     if candidate.get("query") == "source_profile":
@@ -421,6 +654,16 @@ def can_early_stop(company_name: str, candidate: dict, metadata: dict | None = N
     ):
         return False
     if not candidate.get("_official_query_evidence", 0):
+        return False
+    contact_evidence = bool(
+        candidate.get("_contact_evidence")
+        or candidate.get("_contact_seed_urls")
+        or candidate.get("email")
+        or candidate.get("phone")
+        or (metadata and (metadata.get("listed_email") or metadata.get("listed_phone")))
+        or any(marker in scorer.normalize_text(str(candidate.get("url", ""))) for marker in ("contact", "iletisim", "bize-ulas"))
+    )
+    if not contact_evidence:
         return False
 
     brand_tokens = scorer.domain_identity_tokens(company_name)

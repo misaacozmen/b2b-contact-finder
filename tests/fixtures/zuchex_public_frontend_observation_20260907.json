@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-09-07",
+  "source": "https://visit.zuchex.com/widget/event/zuchex-2026/exhibitors/",
+  "transport": "POST https://visit.zuchex.com/api/graphql",
+  "observed_operation": "EventExhibitorListViewConnectionQuery",
+  "observed_variables": ["withEvent", "viewId", "eventId", "endCursor", "selectedFilters"],
+  "observed_public_detail": "https://visit.zuchex.com/widget/event/zuchex-2026/exhibitor/<observed-public-id>",
+  "profile_url_field_observed_in_list_request": false,
+  "policy": "Do not add an unobserved list field or infer an endpoint; leave rows without a public detail URL as UNAVAILABLE_NO_PROFILE_URL."
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 import urllib.parse
+from functools import lru_cache
 from typing import Any
 
 from modules import redaction_scanner
@@ -137,21 +138,30 @@ def redact_text(value: str) -> str:
     return "[REDACTED]" if s_mod else p_text
 
 
-def _known_secrets() -> set[str]:
+@lru_cache(maxsize=1)
+def _secret_config_attributes() -> tuple[str, ...]:
     import config
 
-    known_secrets: set[str] = set()
-    for attr in dir(config):
-        if any(attr.endswith(s) for s in ("_API_KEY", "_CLIENT_ID", "_TOKEN", "_SECRET", "_PASSWORD")):
-            val = getattr(config, attr, None)
-            if isinstance(val, str) and val.strip():
-                known_secrets.add(val.strip())
-    return known_secrets
+    suffixes = ("_API_KEY", "_CLIENT_ID", "_TOKEN", "_SECRET", "_PASSWORD")
+    return tuple(attr for attr in vars(config) if attr.endswith(suffixes))
 
 
-def _known_secret_candidates() -> set[str]:
-    known_secrets = _known_secrets()
+def _known_secret_values() -> tuple[str, ...]:
+    import config
 
+    return tuple(sorted({
+        value.strip()
+        for attr in _secret_config_attributes()
+        if isinstance((value := getattr(config, attr, None)), str) and value.strip()
+    }))
+
+
+def _known_secrets() -> set[str]:
+    return set(_known_secret_values())
+
+
+@lru_cache(maxsize=32)
+def _known_secret_candidates_for(known_secrets: tuple[str, ...]) -> frozenset[str]:
     candidates: set[str] = set()
     for secret in known_secrets:
         candidates.update({secret, f"[REDACTED]{secret}", urllib.parse.quote(secret, safe=""), urllib.parse.quote_plus(secret)})
@@ -160,34 +170,49 @@ def _known_secret_candidates() -> set[str]:
             curr_percent = urllib.parse.quote(curr_percent, safe="")
             curr_html = html.escape(curr_html)
             candidates.update({curr_percent, curr_html})
-    return candidates
+    return frozenset(candidates)
 
 
-def _replace_known_secret_candidates(text: str) -> str:
+def _known_secret_candidates() -> set[str]:
+    return set(_known_secret_candidates_for(_known_secret_values()))
+
+
+@lru_cache(maxsize=32)
+def _known_secret_pattern(known_secrets: tuple[str, ...]) -> re.Pattern[str] | None:
+    candidates = _known_secret_candidates_for(known_secrets)
+    ordered = sorted(
+        (candidate for candidate in candidates if candidate and candidate != "[REDACTED]"),
+        key=len, reverse=True,
+    )
+    if not ordered:
+        return None
+    return re.compile("|".join(re.escape(candidate) for candidate in ordered))
+
+
+def _replace_known_secret_candidates(text: str, known_secrets: tuple[str, ...] | None = None) -> str:
     result = str(text)
-    for secret in sorted(_known_secret_candidates(), key=len, reverse=True):
-        if secret and secret != "[REDACTED]":
-            result = result.replace(secret, "[REDACTED]")
-    return result
+    values = known_secrets if known_secrets is not None else _known_secret_values()
+    pattern = _known_secret_pattern(values)
+    return pattern.sub("[REDACTED]", result) if pattern is not None else result
 
 
 def redact_crawl_body(value: str) -> str:
     """Redact credential-shaped values without deleting otherwise useful HTML."""
     raw = normalize_unicode_scalars(str(value))
     result, _ = _redact_plain_text(raw)
-    return _replace_known_secret_candidates(result)
+    return _replace_known_secret_candidates(result, _known_secret_values())
 
 
 def redact_known_values(text: str) -> str:
     if not text:
         return text
+    known_secrets = _known_secret_values()
     result = redact_text(str(text))
     if result == "[REDACTED]":
         return result
-    result = _replace_known_secret_candidates(result)
+    result = _replace_known_secret_candidates(result, known_secrets)
 
     shadow, unresolved = redaction_scanner.normalize_shadow(result)
-    known_secrets = _known_secrets()
     if unresolved or any(s and s in shadow for s in known_secrets if result != "[REDACTED]"):
         return "[REDACTED]"
     return result

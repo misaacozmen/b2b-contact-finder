@@ -16,9 +16,6 @@ SAFE_RETRIEVAL_METHODS = {
     "pdf_text",
     "pdf_ocr",
     "official_link_reference",
-    # Historical crawl entries predate per-page provenance. They remain
-    # usable only because replay itself is offline and integrity audited.
-    "unknown",
 }
 
 
@@ -48,6 +45,8 @@ def evaluate_email(website: str, record: dict) -> dict:
     blockers: list[str] = []
     if not value or "@" not in value:
         blockers.append("invalid_email_syntax")
+    if str(record.get("label", "")).casefold() == "agency":
+        blockers.append("agency_contact_not_target")
     if not source_ok:
         blockers.append(source_reason)
 
@@ -96,6 +95,8 @@ def evaluate_phone(website: str, record: dict) -> dict:
         blockers.append("invalid_phone")
     if str(record.get("label", "")).casefold() == "fax":
         blockers.append("fax_not_company_phone")
+    if str(record.get("label", "")).casefold() == "agency":
+        blockers.append("agency_contact_not_target")
     if not source_ok:
         blockers.append(source_reason)
     eligible = not blockers

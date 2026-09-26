@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 
 import main
 import calibrate_publication
+from strict_fixtures import publishable_content_decision
 from modules import (
     contact_publication,
     evidence,
@@ -82,6 +83,11 @@ class PublicationPolicyTests(unittest.TestCase):
                 "phone": "02125550000",
                 "status": "OK_HIGH_CONFIDENCE",
                 "publication_eligible": True,
+                "content_decision": publishable_content_decision(source_record_id="fixture:published", website="https://published.example", email="info@published.example", phone="02125550000"),
+                "source_record_id": "fixture:published",
+                "free_state": "DONE",
+                "paid_required": False,
+                "paid_state": "NOT_REQUIRED",
                 "email_verification": "verified",
             },
             {

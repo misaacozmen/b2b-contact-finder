@@ -120,7 +120,7 @@ def complete_resolution_evidence(
                 reverse=True,
             )
         previous = current
-        resolution = entity_resolution.resolve_candidates(company, evaluations)
+        resolution = entity_resolution.resolve_candidates(company, evaluations, metadata)
         current = evidence_acquisition.analyze(
             company,
             evaluations,

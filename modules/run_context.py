@@ -17,6 +17,10 @@ from contextlib import closing
 import config
 
 
+class SourceIdentityError(ValueError):
+    """A source row cannot be assigned one stable, non-ambiguous identity."""
+
+
 PHASES = ("FREE", "PAID", "FINALIZING", "COMPLETE")
 RUN_SCHEMA_VERSION = int(getattr(config, "RUN_SCHEMA_VERSION", 3))
 CONFIG_SCHEMA_VERSION = int(getattr(config, "CONFIG_SCHEMA_VERSION", 3))
@@ -35,6 +39,10 @@ SEMANTIC_CONFIG_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("CRAWL_CACHE_SCHEMA_VERSION", "crawl_cache_schema_version", "int"),
     ("CRAWL_CACHE_CAPABILITY_SCHEMA_VERSION", "crawl_cache_capability_schema_version", "int"),
     ("METADATA_SCHEMA_VERSION", "metadata_schema_version", "int"),
+    ("INPUT_SNAPSHOT_SCHEMA_VERSION", "input_snapshot_schema_version", "int"),
+    ("SERP_NORMALIZATION_VERSION", "serp_normalization_version", "int"),
+    ("QUERY_PLAN_VERSION", "query_plan_version", "int"),
+    ("SOURCE_RECORD_ID_VERSION", "source_record_id_version", "int"),
     ("EVIDENCE_SCHEMA_VERSION", "evidence_schema_version", "int"),
     ("MAX_WORKERS", "max_workers", "int"),
     ("GLOBAL_REQUESTS_PER_SECOND", "global_requests_per_second", "float"),
@@ -47,6 +55,7 @@ SEMANTIC_CONFIG_REGISTRY: tuple[tuple[str, str, str], ...] = (
     ("MAX_AUTONOMOUS_RESOLUTION_ROUNDS", "max_autonomous_resolution_rounds", "int"),
     ("MAX_TARGETED_QUERIES_PER_ROUND", "max_targeted_queries_per_round", "int"),
     ("MAX_TARGETED_CRAWLS_PER_ROUND", "max_targeted_crawls_per_round", "int"),
+    ("FREE_SEARCH_PHYSICAL_MULTIPLIER", "free_search_physical_multiplier", "int"),
     ("MAX_SEARCH_QUERIES_PER_COMPANY", "max_search_queries_per_company", "int"),
     ("DEFAULT_PAID_SEARCH_QUERY_LIMIT", "default_paid_search_query_limit", "int"),
     ("MAX_FALLBACK_SEARCH_QUERIES", "max_fallback_search_queries", "int"),
@@ -170,14 +179,28 @@ def source_record_identity(record: dict, *, default_source: str = "input") -> tu
     if upstream:
         value = str(upstream).strip()
         return (value if ":" in value else f"{source}:{value}"), "upstream"
-    basis = {
-        "source": source,
-        "company": str(record.get("company", "")).strip(),
-        "profile_url": str(record.get("profile_url", "")).strip(),
-        "listing_url": str(record.get("listing_url", "")).strip(),
-        "hall": str(record.get("hall", "")).strip(),
-        "stand": str(record.get("stand", "")).strip(),
-    }
+    persisted_basis = record.get("source_identity_basis")
+    if isinstance(persisted_basis, dict):
+        basis = dict(persisted_basis)
+    else:
+        # Only listing identity is hashed. Detail retrieval and enrichment are
+        # mutable evidence and must not change the source row identity.
+        profile_url = str(record.get("profile_url", "") or "").strip()
+        listing_url = str(record.get("listing_url", "") or "").strip()
+        basis = {
+            "version": int(getattr(config, "SOURCE_RECORD_ID_VERSION", 2)),
+            "source": source,
+            "profile_url": profile_url,
+            "listing_url": listing_url,
+            "company_raw": str(record.get("company", "") or "").strip(),
+            "hall": str(record.get("hall", "") or "").strip(),
+            "stand": str(record.get("stand", "") or "").strip(),
+        }
+        if not profile_url and not listing_url and not basis["company_raw"]:
+            raise SourceIdentityError("source row has no stable identity fields")
+        if isinstance(record, dict):
+            record["source_identity_basis"] = dict(basis)
+            record["source_record_id_version"] = int(basis["version"])
     return f"{source}:{hashlib.sha256(canonical_json(basis).encode('utf-8')).hexdigest()}", "derived"
 
 

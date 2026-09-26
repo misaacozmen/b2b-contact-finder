@@ -23,7 +23,13 @@ def _pct(count: int, total: int) -> str:
     return f"{(count / total * 100):.1f}%" if total else "0.0%"
 
 
-def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_snapshot: dict | None = None) -> str:
+def _measured(counters: dict, key: str):
+    """Do not turn an uninstrumented metric into a misleading zero."""
+    return counters[key] if key in counters else "ölçülmedi"
+
+
+def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_snapshot: dict | None = None,
+                 operational_metrics: dict | None = None) -> str:
     if runtime_snapshot is None:
         runtime_snapshot = runtime.snapshot()
     total = len(rows)
@@ -55,42 +61,53 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
     # artifacts differ despite identical evidence.  Runtime timing remains in
     # logs; the published report is deliberately deterministic.
     elapsed = "deterministic"
-    counters = (runtime_snapshot or {}).get("counters", {})
-    brightdata_requests = int(counters.get("api.brightdata.requests", 0))
-    linkedin_company_requests = int(counters.get("api.linkedin_company.requests", 0))
-    linkedin_company_blocked = int(counters.get("api.linkedin_company.budget_blocked", 0))
-    linkedin_company_matches = int(counters.get("api.linkedin_company.matches", 0))
-    llm_arbiter_requests = int(counters.get("api.llm_arbiter.requests", 0))
-    llm_arbiter_blocked = int(counters.get("api.llm_arbiter.budget_blocked", 0))
-    llm_arbiter_tokens = int(counters.get("api.llm_arbiter.total_tokens", 0))
-    places_requests = int(counters.get("api.google_places.requests", 0))
+    durable_operational = operational_metrics if isinstance(operational_metrics, dict) else {}
+    counters = durable_operational.get("counters") if isinstance(durable_operational.get("counters"), dict) else (runtime_snapshot or {}).get("counters", {})
+    operational_frozen = bool(isinstance(operational_metrics, dict))
+    def counter_value(key: str) -> int | str:
+        if operational_frozen and key not in counters:
+            return "ölçülmedi"
+        return int(counters.get(key, 0))
+    def unique_value(key: str) -> int | str:
+        if operational_frozen and key not in unique_counts:
+            return "ölçülmedi"
+        return int(unique_counts.get(key, 0))
+    brightdata_requests = counter_value("api.brightdata.requests")
+    linkedin_company_requests = counter_value("api.linkedin_company.requests")
+    linkedin_company_blocked = counter_value("api.linkedin_company.budget_blocked")
+    linkedin_company_matches = counter_value("api.linkedin_company.matches")
+    llm_arbiter_requests = counter_value("api.llm_arbiter.requests")
+    llm_arbiter_blocked = counter_value("api.llm_arbiter.budget_blocked")
+    llm_arbiter_tokens = counter_value("api.llm_arbiter.total_tokens")
+    places_requests = counter_value("api.google_places.requests")
     crawler_requests = int(counters.get("http.crawler.requests", 0))
     candidate_count = int(counters.get("pipeline.candidates_discovered", 0))
     identity_evaluations = int(counters.get("pipeline.identity_candidates_evaluated", 0))
     full_evaluations = int(counters.get("pipeline.full_candidates_evaluated", 0))
     source_5xx = int(counters.get("source_profile.http_5xx", 0))
     source_skips = int(counters.get("source_profile.circuit_skips", 0))
-    static_attempts = int(counters.get("recovery.static_attempts", 0))
-    static_successes = int(counters.get("recovery.static_successes", 0))
-    browser_attempts = int(counters.get("recovery.browser_attempts", 0))
-    browser_successes = int(counters.get("recovery.browser_successes", 0))
-    pdf_attempts = int(counters.get("recovery.pdf_attempts", 0))
-    pdf_successes = int(counters.get("recovery.pdf_text_successes", 0))
-    snapshot_loaded = int(counters.get("snapshot.entries_loaded", 0))
+    static_attempts = counter_value("recovery.static_attempts")
+    static_successes = counter_value("recovery.static_successes")
+    browser_attempts = counter_value("recovery.browser_attempts")
+    browser_successes = counter_value("recovery.browser_successes")
+    pdf_attempts = counter_value("recovery.pdf_attempts")
+    pdf_successes = counter_value("recovery.pdf_text_successes")
+    snapshot_loaded = counter_value("snapshot.entries_loaded")
     snapshot_hits = sum(
         int(value)
         for key, value in counters.items()
         if key.startswith("snapshot.") and key.endswith(".hit")
     )
-    stale_hits = sum(
+    stale_hit_values = [
         int(value)
         for key, value in counters.items()
         if key.startswith("cache.") and key.endswith(".stale_hit")
-    )
-    email_field_allowed = int(counters.get("contact_policy.email.allowed", 0))
-    email_field_suppressed = int(counters.get("contact_policy.email.suppressed", 0))
-    phone_field_allowed = int(counters.get("contact_policy.phone.allowed", 0))
-    phone_field_suppressed = int(counters.get("contact_policy.phone.suppressed", 0))
+    ]
+    stale_hits = sum(stale_hit_values) if stale_hit_values else ("ölçülmedi" if operational_frozen else 0)
+    email_field_allowed = counter_value("contact_policy.email.allowed")
+    email_field_suppressed = counter_value("contact_policy.email.suppressed")
+    phone_field_allowed = counter_value("contact_policy.phone.allowed")
+    phone_field_suppressed = counter_value("contact_policy.phone.suppressed")
     coverage = discovery_coverage.payload()
     policy_downgrades = sum(
         1 for row in rows
@@ -115,15 +132,15 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
     not_found_count = sum(
         1 for row in rows if row.get("status") == "WEBSITE_NOT_FOUND"
     )
-    brightdata_queries = int(counters.get("api.brightdata.queries", 0))
-    brightdata_retries = int(counters.get("api.brightdata.retries", 0))
-    brightdata_cooldowns = int(counters.get("api.brightdata.cooldown_retries", 0))
-    brightdata_blocked = int(counters.get("api.brightdata.budget_blocked", 0))
-    search_provider_failures = int(counters.get("search.provider_failures", 0))
-    crawler_blocked = int(counters.get("http.crawler.budget_blocked", 0))
-    static_skips = int(counters.get("recovery.static_skips", 0))
-    host_variant_attempts = int(counters.get("recovery.host_variant_attempts", 0))
-    host_variant_successes = int(counters.get("recovery.host_variant_successes", 0))
+    brightdata_queries = counter_value("api.brightdata.queries")
+    brightdata_retries = counter_value("api.brightdata.retries")
+    brightdata_cooldowns = counter_value("api.brightdata.cooldown_retries")
+    brightdata_blocked = counter_value("api.brightdata.budget_blocked")
+    search_provider_failures = counter_value("search.provider_failures")
+    crawler_blocked = counter_value("http.crawler.budget_blocked")
+    static_skips = counter_value("recovery.static_skips")
+    host_variant_attempts = counter_value("recovery.host_variant_attempts")
+    host_variant_successes = counter_value("recovery.host_variant_successes")
     durable_scheduler = (
         runtime_snapshot if (runtime_snapshot or {}).get("receipt_schema_version")
         else (runtime_snapshot or {}).get("durable_scheduler")
@@ -133,21 +150,21 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
         if isinstance(durable_scheduler, dict) and "paid_query_limit_per_company" in durable_scheduler
         else "UNAVAILABLE"
     )
-    unique_counts = (runtime_snapshot or {}).get("unique_counts", {})
-    browser_recovered_companies = int(unique_counts.get("recovery.browser_recovered_companies", 0))
-    browser_publication_companies = int(unique_counts.get("recovery.browser_publication_companies", 0))
-    interstitial_live_pages_rejected = int(counters.get("live.site.security_interstitial_rejected", 0))
-    interstitial_cache_pages_rejected = int(counters.get("cache.site.security_interstitial_rejected", 0))
-    interstitial_hosts = int(unique_counts.get("recovery.security_interstitial_hosts", 0))
-    browser_root_attempts = int(counters.get("recovery.browser.root.attempts", 0))
-    browser_root_successes = int(counters.get("recovery.browser.root.successes", 0))
-    browser_root_errors = int(counters.get("recovery.browser.root.errors", 0))
-    browser_identity_attempts = int(counters.get("recovery.browser.identity.attempts", 0))
-    browser_identity_successes = int(counters.get("recovery.browser.identity.successes", 0))
-    browser_identity_errors = int(counters.get("recovery.browser.identity.errors", 0))
-    browser_contact_attempts = int(counters.get("recovery.browser.contact.attempts", 0))
-    browser_contact_successes = int(counters.get("recovery.browser.contact.successes", 0))
-    browser_contact_errors = int(counters.get("recovery.browser.contact.errors", 0))
+    unique_counts = durable_operational.get("unique_counts") if isinstance(durable_operational.get("unique_counts"), dict) else (runtime_snapshot or {}).get("unique_counts", {})
+    browser_recovered_companies = unique_value("recovery.browser_recovered_companies")
+    browser_publication_companies = unique_value("recovery.browser_publication_companies")
+    interstitial_live_pages_rejected = counter_value("live.site.security_interstitial_rejected")
+    interstitial_cache_pages_rejected = counter_value("cache.site.security_interstitial_rejected")
+    interstitial_hosts = unique_value("recovery.security_interstitial_hosts")
+    browser_root_attempts = counter_value("recovery.browser.root.attempts")
+    browser_root_successes = counter_value("recovery.browser.root.successes")
+    browser_root_errors = counter_value("recovery.browser.root.errors")
+    browser_identity_attempts = counter_value("recovery.browser.identity.attempts")
+    browser_identity_successes = counter_value("recovery.browser.identity.successes")
+    browser_identity_errors = counter_value("recovery.browser.identity.errors")
+    browser_contact_attempts = counter_value("recovery.browser.contact.attempts")
+    browser_contact_successes = counter_value("recovery.browser.contact.successes")
+    browser_contact_errors = counter_value("recovery.browser.contact.errors")
     durable_scheduler = (
         runtime_snapshot if (runtime_snapshot or {}).get("receipt_schema_version")
         else (runtime_snapshot or {}).get("durable_scheduler", {})
@@ -224,6 +241,11 @@ def build_report(rows: list[dict], elapsed_seconds: float | None, *, runtime_sna
             f"P4 replay snapshot: yuklenen={snapshot_loaded}; isabet={snapshot_hits}; eski-cache-isabeti={stale_hits}",
             f"P5 aday e-posta alan karari: izin={email_field_allowed}; baskilanan={email_field_suppressed}",
             f"P5 aday telefon alan karari: izin={phone_field_allowed}; baskilanan={phone_field_suppressed}",
+            "Operasyonel SERP metrikleri: "
+            f"ham={_measured(counters, 'search.serp.raw_result_count')}; "
+            f"cozulen={_measured(counters, 'search.serp.resolved_result_count')}; "
+            f"cozulmemis={_measured(counters, 'search.serp.unresolved_redirect_count')}; "
+            f"kabul={_measured(counters, 'search.serp.candidate_accepted')}",
             (
                 "P6 discovery kapsami: "
                 f"cozulen={coverage['resolved_companies']}; "

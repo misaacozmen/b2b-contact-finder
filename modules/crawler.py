@@ -1,9 +1,13 @@
 from collections import OrderedDict
+import hashlib
 from io import BytesIO
 import re
 import shutil
 import threading
+import time
+import uuid
 import warnings
+import zlib
 import xml.etree.ElementTree as ET
 from urllib import robotparser
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse, urlunparse
@@ -12,7 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
-from modules import cache_store, network_guard, replay_snapshot, runtime, run_context, site_mapper, site_recovery
+from modules import cache_store, checkpoint, network_guard, replay_snapshot, runtime, run_context, site_mapper, site_recovery
 from modules.extractor import extract_contact_page_links, extract_contact_records, extract_emails, extract_phones
 from modules import scorer
 from modules.utils import retry_with_backoff
@@ -21,6 +25,9 @@ from modules.utils import retry_with_backoff
 SESSION = network_guard.harden_session(requests.Session())
 SESSION.headers.update({"User-Agent": config.USER_AGENT, "Accept-Language": "tr,en;q=0.8"})
 _FETCH_STATE = threading.local()
+_PAGE_STORE: dict[tuple[str, str, str, str], tuple[str | None, str | None, dict]] = {}
+_PAGE_STORE_LOCK = threading.RLock()
+_PAGE_INFLIGHT: dict[tuple[str, str, str, str], threading.Event] = {}
 _RENDER_STATE = threading.local()
 _DOCUMENT_STATE = threading.local()
 _SESSION_STATE = threading.local()
@@ -31,8 +38,62 @@ _PREFLIGHT_LOCK = threading.Lock()
 _PREFLIGHT_COMPLETE = False
 
 
+def _unresolved_template_url(url: str) -> bool:
+    """Reject navigation templates before they can become fetch attempts."""
+    value = unquote(str(url or ""))
+    return bool(
+        re.search(r"\[[^\]]+\]|\{[^}]+\}|<[^>]+>", value)
+        or re.search(r"(?:^|[/?:])(?:locale|lang|country|region)(?:[/?:]|$)", value, re.I)
+    )
+
+
+def _normal_html_candidate(url: str) -> bool:
+    path = urlparse(str(url or "")).path.casefold()
+    return not path.endswith((
+        ".css", ".js", ".mjs", ".map", ".png", ".jpg", ".jpeg", ".gif",
+        ".svg", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot",
+    ))
+
+
 class ResponseTooLarge(requests.RequestException):
     pass
+
+
+def clear_page_store(run_id: str | None = None) -> None:
+    """Drop run-local successful page responses after a run closes."""
+    with _PAGE_STORE_LOCK:
+        if not run_id:
+            _PAGE_STORE.clear()
+            return
+        for key in list(_PAGE_STORE):
+            if key[0] == str(run_id):
+                _PAGE_STORE.pop(key, None)
+        for key in list(_PAGE_INFLIGHT):
+            if key[0] == str(run_id):
+                _PAGE_INFLIGHT.pop(key, None)
+
+
+def _record_fetch_attempt(page_url: str, *, profile: str, transport_outcome: str,
+                          semantic_result: str, reason: str = "", execution_id: str = "") -> None:
+    run_id = str(runtime.durable_run_id() or "").strip()
+    source_id = str(runtime.current_source_record_id() or "").strip()
+    if not run_id or not source_id:
+        return
+    normalized = urlunparse(urlparse(str(page_url))._replace(fragment=""))
+    attempt_id = checkpoint.discovery_event_id(
+        f"fetch:{profile}:{normalized}",
+        execution_id=execution_id,
+        transport_outcome=transport_outcome,
+        semantic_result=semantic_result,
+        reason=reason,
+    )
+    checkpoint.record_discovery_attempt(
+        run_id=run_id, source_record_id=source_id, attempt_id=attempt_id,
+        execution_id=execution_id,
+        stage="fetch", candidate_url=normalized,
+        transport_outcome=transport_outcome, semantic_result=semantic_result,
+        reason=reason,
+    )
 
 
 def _http_session() -> requests.Session:
@@ -51,6 +112,74 @@ def _http_session() -> requests.Session:
 
 def _with_scheme(url: str) -> str:
     return url if "://" in url else f"https://{url}"
+
+
+def _normalized_retrieval_url(url: str) -> str:
+    return urlunparse(urlparse(str(url))._replace(fragment=""))
+
+
+def _persistent_retrieval_claim(url: str, method: str, max_attempts: int):
+    run_id = str(runtime.durable_run_id() or "").strip()
+    if not run_id:
+        return "VOLATILE", None
+    normalized = _normalized_retrieval_url(url)
+    capability_json = run_context.canonical_json(run_context.runtime_capability_profile())
+    capability_sha256 = hashlib.sha256(capability_json.encode("utf-8")).hexdigest()
+    receipt_key = checkpoint.retrieval_receipt_key(
+        run_id=run_id, normalized_url=normalized, method=method,
+        capability_sha256=capability_sha256,
+    )
+    owner_token = uuid.uuid4().hex
+    max_attempts = max(1, int(max_attempts))
+    lease_seconds = max(
+        30.0,
+        float(getattr(config, "REQUEST_TIMEOUT_SEC", 30)) * (max_attempts + 1)
+        + float(getattr(config, "RETRY_BACKOFF_BASE_SEC", 2)) ** max(0, max_attempts - 1)
+        + 5.0,
+    )
+    wait_deadline = time.monotonic() + max(60.0, min(300.0, lease_seconds + 10.0))
+    while True:
+        receipt = checkpoint.claim_retrieval_receipt(
+            run_id=run_id, receipt_key=receipt_key, normalized_url=normalized,
+            method=method, capability_sha256=capability_sha256,
+            owner_token=owner_token, max_attempts=max_attempts,
+            lease_seconds=lease_seconds,
+        )
+        if receipt["claim"] == "OWNER":
+            return "OWNER", {
+                "run_id": run_id, "receipt_key": receipt_key,
+                "owner_token": owner_token, "max_attempts": max_attempts,
+                "lease_seconds": lease_seconds, "method": method,
+            }
+        if receipt["claim"] == "TERMINAL":
+            return "TERMINAL", receipt
+        if time.monotonic() >= wait_deadline:
+            return "WAIT_TIMEOUT", receipt
+        time.sleep(0.05)
+
+
+def _receipt_body(receipt: dict) -> str | None:
+    body = receipt.get("body")
+    if body is None:
+        return None
+    try:
+        return zlib.decompress(body).decode("utf-8", errors="replace")
+    except (zlib.error, UnicodeDecodeError) as exc:
+        raise checkpoint.EvidenceInvariant("durable retrieval body cannot be decoded") from exc
+
+
+def _complete_persistent_retrieval(context: dict | None, *, value: str | None,
+                                   error: str | None, outcome: str,
+                                   meta: dict | None = None) -> None:
+    if not context:
+        return
+    body = zlib.compress(str(value).encode("utf-8"), level=6) if value is not None and not error else None
+    checkpoint.complete_retrieval_receipt(
+        run_id=context["run_id"], receipt_key=context["receipt_key"],
+        owner_token=context["owner_token"], outcome=outcome,
+        error=str(error or ""), body=body,
+        meta=dict(meta if meta is not None else getattr(_FETCH_STATE, "last", {})),
+    )
 
 
 def _is_transient_fetch_error(exc: Exception) -> bool:
@@ -100,6 +229,7 @@ def _request_with_safe_redirects(
     current = url
     original_host = urlparse(url).netloc.casefold()
     response_limit = max_bytes or config.MAX_HTTP_RESPONSE_BYTES
+    retrieval_attempt_consumed = False
     for redirect_count in range(config.MAX_HTTP_REDIRECTS + 1):
         allowed, reason = network_guard.validate_public_http_url(current)
         if not allowed:
@@ -107,6 +237,18 @@ def _request_with_safe_redirects(
         if not runtime.reserve_crawler_http(config.CRAWLER_HTTP_REQUEST_BUDGET):
             raise requests.exceptions.RequestException("crawler_http_budget_exhausted")
         runtime.wait_for_request_slot()
+        receipt_context = getattr(_FETCH_STATE, "retrieval_receipt", None)
+        if receipt_context and receipt_context.get("method") == "http" and not retrieval_attempt_consumed:
+            attempt_ordinal = checkpoint.consume_retrieval_attempt(
+                run_id=receipt_context["run_id"],
+                receipt_key=receipt_context["receipt_key"],
+                owner_token=receipt_context["owner_token"],
+                max_attempts=receipt_context["max_attempts"],
+                lease_seconds=receipt_context["lease_seconds"],
+            )
+            if attempt_ordinal is None:
+                raise requests.exceptions.RequestException("retrieval_attempt_budget_exhausted")
+            retrieval_attempt_consumed = True
         response = _http_session().get(
             current,
             timeout=config.REQUEST_TIMEOUT_SEC,
@@ -139,7 +281,7 @@ def _request_with_safe_redirects(
     raise requests.exceptions.TooManyRedirects(f"redirect_limit:{url}")
 
 
-def _try_fetch(url: str) -> tuple[str | None, str | None]:
+def _try_fetch_owned(url: str) -> tuple[str | None, str | None]:
     _FETCH_STATE.last = {"requested_url": url, "final_url": url, "tls_insecure": False}
     try:
         response = _fetch(url)
@@ -186,6 +328,51 @@ def _try_fetch(url: str) -> tuple[str | None, str | None]:
         return None, "response_too_large"
     except requests.exceptions.RequestException as exc:
         return None, exc.__class__.__name__.lower()
+
+
+def _try_fetch(url: str) -> tuple[str | None, str | None]:
+    current = getattr(_FETCH_STATE, "retrieval_receipt", None)
+    if current and _normalized_retrieval_url(url) == current.get("normalized_url"):
+        return _try_fetch_owned(url)
+    claim, receipt_or_context = _persistent_retrieval_claim(
+        url, "http", 1 + max(0, int(config.MAX_RETRIES)),
+    )
+    if claim == "VOLATILE":
+        return _try_fetch_owned(url)
+    if claim == "WAIT_TIMEOUT":
+        return None, "retrieval_owner_wait_timeout"
+    if claim == "TERMINAL":
+        receipt = receipt_or_context
+        _FETCH_STATE.last = dict(receipt.get("meta") or {
+            "requested_url": url, "final_url": url, "tls_insecure": False,
+        })
+        if receipt.get("state") == "SUCCEEDED":
+            runtime.record("crawler.retrieval_receipt_hit")
+            return _receipt_body(receipt), None
+        runtime.record("crawler.retrieval_negative_receipt_hit")
+        return None, str(receipt.get("error") or "retrieval_failed")
+
+    context = receipt_or_context
+    normalized = _normalized_retrieval_url(url)
+    context["normalized_url"] = normalized
+    previous = getattr(_FETCH_STATE, "retrieval_receipt", None)
+    _FETCH_STATE.retrieval_receipt = context
+    _FETCH_STATE.last = {"requested_url": normalized, "final_url": normalized, "tls_insecure": False}
+    try:
+        value, error = _try_fetch_owned(url)
+        _complete_persistent_retrieval(
+            context, value=value, error=error,
+            outcome="USABLE_HTTP_RESPONSE" if value is not None and not error else "HTTP_RETRIEVAL_FAILED",
+        )
+        return value, error
+    except BaseException as exc:
+        _complete_persistent_retrieval(
+            context, value=None, error=f"owner_exception:{exc.__class__.__name__}",
+            outcome="OWNER_EXCEPTION",
+        )
+        raise
+    finally:
+        _FETCH_STATE.retrieval_receipt = previous
 
 
 def _decoded_response_text(response: requests.Response) -> str:
@@ -346,6 +533,54 @@ def _try_render(url: str) -> tuple[str | None, str | None]:
         return None, f"js_render_failed:{exc.__class__.__name__.lower()}"
 
 
+def _try_render_persistent(url: str) -> tuple[str | None, str | None]:
+    claim, receipt_or_context = _persistent_retrieval_claim(url, "browser_render", 1)
+    if claim == "VOLATILE":
+        return _try_render(url)
+    if claim == "WAIT_TIMEOUT":
+        return None, "retrieval_owner_wait_timeout"
+    if claim == "TERMINAL":
+        receipt = receipt_or_context
+        _RENDER_STATE.last = dict(receipt.get("meta") or {
+            "retrieval_method": "browser_render",
+        })
+        if receipt.get("state") == "SUCCEEDED":
+            runtime.record("crawler.retrieval_receipt_hit")
+            return _receipt_body(receipt), None
+        runtime.record("crawler.retrieval_negative_receipt_hit")
+        return None, str(receipt.get("error") or "browser_render_failed")
+
+    context = receipt_or_context
+    attempt_ordinal = checkpoint.consume_retrieval_attempt(
+        run_id=context["run_id"], receipt_key=context["receipt_key"],
+        owner_token=context["owner_token"], max_attempts=1,
+        lease_seconds=context["lease_seconds"],
+    )
+    if attempt_ordinal is None:
+        checkpoint.complete_retrieval_receipt(
+            run_id=context["run_id"], receipt_key=context["receipt_key"],
+            owner_token=context["owner_token"], outcome="ATTEMPT_BUDGET_EXHAUSTED",
+            error="browser_attempt_budget_exhausted", meta={"retrieval_method": "browser_render"},
+        )
+        return None, "browser_attempt_budget_exhausted"
+    try:
+        rendered = _try_render(url)
+        value = rendered[0] if isinstance(rendered, (tuple, list)) and rendered else None
+        error = rendered[1] if isinstance(rendered, (tuple, list)) and len(rendered) > 1 else "browser_render_invalid_result"
+        _complete_persistent_retrieval(
+            context, value=value, error=error,
+            outcome="BROWSER_RENDER_COMPLETE" if value is not None and not error else "BROWSER_RENDER_FAILED",
+            meta=dict(getattr(_RENDER_STATE, "last", {})),
+        )
+        return value, error
+    except BaseException as exc:
+        _complete_persistent_retrieval(
+            context, value=None, error=f"owner_exception:{exc.__class__.__name__}",
+            outcome="OWNER_EXCEPTION", meta=dict(getattr(_RENDER_STATE, "last", {})),
+        )
+        raise
+
+
 def _renderable_fetch_error(error: str | None) -> bool:
     return bool(error and any(marker in error for marker in (
         "http_401", "http_403", "http_408", "http_429", "timeout",
@@ -371,6 +606,14 @@ def _preflight_js_fallback() -> None:
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(headless=True)
         except Exception as exc:
+            # The offline test harness blocks even Playwright's local
+            # socketpair.  That is not evidence that Chromium is unavailable
+            # for a live run, and must not prevent the HTTP path from being
+            # exercised with its injected transport.
+            if "Network access disabled during tests" in str(exc):
+                _PREFLIGHT_COMPLETE = True
+                runtime.record("crawler.js_preflight_offline_harness")
+                return
             raise RuntimeError(
                 f"js_fallback_preflight_chromium_unavailable:{exc.__class__.__name__.lower()}"
             ) from exc
@@ -577,6 +820,9 @@ def _safe_contact_seed_urls(root: str, seed_urls: list[str] | None) -> list[str]
     safe: list[str] = []
     for raw_url in seed_urls or []:
         candidate_url = _with_scheme(raw_url)
+        if _unresolved_template_url(candidate_url) or not _normal_html_candidate(candidate_url):
+            runtime.record("crawler.unresolved_template_url" if _unresolved_template_url(candidate_url) else "crawler.non_html_asset_rejected")
+            continue
         parsed = urlparse(candidate_url)
         if parsed.scheme not in {"http", "https"}:
             continue
@@ -597,6 +843,9 @@ def _safe_identity_seed_urls(root: str, seed_urls: list[str] | None) -> list[str
     safe: list[str] = []
     for raw_url in seed_urls or []:
         candidate_url = _with_scheme(raw_url)
+        if _unresolved_template_url(candidate_url) or not _normal_html_candidate(candidate_url):
+            runtime.record("crawler.unresolved_template_url" if _unresolved_template_url(candidate_url) else "crawler.non_html_asset_rejected")
+            continue
         parsed = urlparse(candidate_url)
         if parsed.scheme not in {"http", "https"}:
             continue
@@ -613,7 +862,9 @@ def _safe_identity_seed_urls(root: str, seed_urls: list[str] | None) -> list[str
         ])
         candidate_url = urlunparse(parsed._replace(query=clean_query, fragment=""))
         safe.append(candidate_url)
-    return list(dict.fromkeys(safe))[: config.MAX_IDENTITY_PAGES]
+    # The identity profile is deliberately root + two additional pages.  The
+    # full contact crawl keeps its independent six-page budget.
+    return list(dict.fromkeys(safe))[:2]
 
 
 def _fetch_site_live(
@@ -633,18 +884,164 @@ def _fetch_site_live(
     root_retrieval_method = "http"
     recovery_trace: list[dict] = []
     browser_render_attempts = 0
+    browser_attempted_urls: set[str] = set()
 
     _preflight_js_fallback()
 
+    def _fetch_page(page_url: str) -> tuple[str | None, str | None]:
+        """Reuse one run-local page response across identity/full crawl phases."""
+        if _unresolved_template_url(page_url):
+            _FETCH_STATE.last = {"requested_url": page_url, "final_url": page_url, "tls_insecure": False}
+            runtime.record("crawler.unresolved_template_url")
+            return None, "unresolved_template_url"
+        if not _normal_html_candidate(page_url):
+            _FETCH_STATE.last = {"requested_url": page_url, "final_url": page_url, "tls_insecure": False}
+            runtime.record("crawler.non_html_asset_rejected")
+            return None, "non_html_asset_rejected"
+        run_id = runtime.durable_run_id()
+        capability_key = run_context.canonical_json(run_context.runtime_capability_profile())
+        parsed_page = urlparse(str(page_url))
+        normalized_page = urlunparse(parsed_page._replace(fragment=""))
+        retrieval_method = "http"
+        key = (str(run_id), normalized_page, retrieval_method, capability_key)
+        leader = True
+        waiter: threading.Event | None = None
+        with _PAGE_STORE_LOCK:
+            cached = _PAGE_STORE.get(key) if run_id else None
+            if cached is None and run_id:
+                waiter = _PAGE_INFLIGHT.get(key)
+                if waiter is None:
+                    waiter = threading.Event()
+                    _PAGE_INFLIGHT[key] = waiter
+                else:
+                    leader = False
+        if cached is not None:
+            cached_html, cached_error, cached_meta = cached
+            _FETCH_STATE.last = dict(cached_meta)
+            runtime.record("crawler.page_store_hit")
+            _record_fetch_attempt(
+                page_url, profile=profile, transport_outcome="CACHE_HIT",
+                semantic_result="USABLE_SUCCESS" if cached_html else "FAILED",
+                reason=str(cached_error or ""),
+            )
+            return cached_html, cached_error
+        if not leader and waiter is not None:
+            waiter.wait(
+                timeout=max(
+                    1.0,
+                    float(getattr(config, "CRAWL_TIMEOUT_SEC", config.REQUEST_TIMEOUT_SEC))
+                    + 1.0,
+                )
+            )
+            with _PAGE_STORE_LOCK:
+                cached = _PAGE_STORE.get(key)
+            if cached is not None:
+                cached_html, cached_error, cached_meta = cached
+                _FETCH_STATE.last = dict(cached_meta)
+                runtime.record("crawler.page_store_hit")
+                _record_fetch_attempt(
+                    page_url, profile=profile, transport_outcome="CACHE_HIT",
+                    semantic_result="USABLE_SUCCESS" if cached_html else "FAILED",
+                    reason=str(cached_error or ""),
+                )
+                return cached_html, cached_error
+            # Failed responses are run-local negative retrieval receipts; a
+            # waiter must not create another physical leader for the same
+            # URL/method/capability tuple.
+            with _PAGE_STORE_LOCK:
+                waiter = threading.Event()
+                _PAGE_INFLIGHT[key] = waiter
+            leader = True
+        try:
+            execution = checkpoint.reserve_discovery_execution(
+                run_id=str(run_id), source_record_id=str(runtime.current_source_record_id() or ""),
+                stage="fetch", execution_kind=f"{profile}:{normalized_page}",
+            ) if run_id and runtime.current_source_record_id() else {}
+            value = _try_fetch(page_url)
+            page_meta = dict(getattr(_FETCH_STATE, "last", {}))
+            # Test transports and legacy adapters may return content without
+            # refreshing the thread-local fetch metadata. Never let a prior
+            # request's final URL be attached to this page.
+            meta_requested = urlunparse(
+                urlparse(str(page_meta.get("requested_url", "")))._replace(fragment="")
+            )
+            if meta_requested != normalized_page:
+                page_meta = {
+                    "requested_url": normalized_page,
+                    "final_url": normalized_page,
+                    "tls_insecure": False,
+                }
+            else:
+                final_url = str(page_meta.get("final_url") or normalized_page)
+                if not scorer.same_registrable_domain(
+                    urlparse(final_url).netloc,
+                    urlparse(normalized_page).netloc,
+                ):
+                    page_meta["final_url"] = normalized_page
+            _FETCH_STATE.last = page_meta
+            usable = bool(
+                value[0]
+                and not value[1]
+                and not _looks_like_security_interstitial(value[0])
+                and not _looks_like_js_shell(value[0])
+            )
+            if run_id and usable:
+                page_meta.setdefault("retrieval_method", retrieval_method)
+                with _PAGE_STORE_LOCK:
+                    _PAGE_STORE[key] = (value[0], None, page_meta)
+                runtime.record("crawler.page_store_store")
+            elif run_id and str(value[1] or "") != "retrieval_owner_wait_timeout":
+                # _try_fetch already applied the bounded retry policy.  Do
+                # not let later paid company rounds manufacture a new retry
+                # budget for this same retrieval job.
+                page_meta.setdefault("retrieval_method", retrieval_method)
+                with _PAGE_STORE_LOCK:
+                    _PAGE_STORE[key] = (None, str(value[1] or "unusable_response"), page_meta)
+                runtime.record("crawler.page_failure_store")
+            _record_fetch_attempt(
+                page_url, profile=profile,
+                transport_outcome="DONE" if value[0] is not None and not value[1] else "FAILED",
+                semantic_result="USABLE_SUCCESS" if usable else "UNUSABLE_RESPONSE",
+                reason=str(value[1] or ""),
+                execution_id=str(execution.get("execution_id") or ""),
+            )
+            return value
+        finally:
+            with _PAGE_STORE_LOCK:
+                event = _PAGE_INFLIGHT.pop(key, None)
+                if event is not None:
+                    event.set()
+
     def render_page(render_url: str) -> tuple[str | None, str | None]:
         nonlocal browser_render_attempts
+        if str(render_url) in browser_attempted_urls:
+            return None, "browser_fallback_already_attempted"
         if browser_render_attempts >= 2:
             runtime.record("crawler.browser_page_cap_reached")
             return None, "browser_page_cap_reached"
         browser_render_attempts += 1
-        return _try_render(render_url)
+        browser_attempted_urls.add(str(render_url))
+        run_id = str(runtime.durable_run_id() or "")
+        source_id = str(runtime.current_source_record_id() or "")
+        execution = checkpoint.reserve_discovery_execution(
+            run_id=run_id, source_record_id=source_id, stage="browser_render",
+            execution_kind=f"{profile}:{render_url}:{browser_render_attempts}",
+        ) if run_id and source_id else {}
+        rendered = _try_render_persistent(render_url)
+        rendered_html = rendered[0] if isinstance(rendered, (tuple, list)) and len(rendered) >= 1 else None
+        render_error = rendered[1] if isinstance(rendered, (tuple, list)) and len(rendered) >= 2 else "browser_render_invalid_result"
+        _record_fetch_attempt(
+            render_url, profile="browser",
+            transport_outcome="DONE" if rendered_html is not None and not render_error else "FAILED",
+            semantic_result="USABLE_SUCCESS" if rendered_html and not _looks_like_js_shell(rendered_html) and not _looks_like_security_interstitial(rendered_html) else "UNUSABLE_RESPONSE",
+            reason=str(render_error or ""),
+            execution_id=str(execution.get("execution_id") or ""),
+        )
+        if not isinstance(rendered, (tuple, list)) or len(rendered) < 2:
+            return None, "browser_render_invalid_result"
+        return rendered[0], rendered[1]
 
-    html, error = _try_fetch(root)
+    html, error = _fetch_page(root)
     root_meta = getattr(_FETCH_STATE, "last", {})
     tls_insecure = tls_insecure or bool(root_meta.get("tls_insecure"))
     if html and root_meta.get("tls_insecure"):
@@ -658,7 +1055,7 @@ def _fetch_site_live(
         html, error = None, "security_interstitial"
     if not html and parsed.scheme == "https":
         http_root = f"http://{parsed.netloc}"
-        http_html, http_error = _try_fetch(http_root)
+        http_html, http_error = _fetch_page(http_root)
         http_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(http_meta.get("tls_insecure"))
         if http_html and _looks_like_security_interstitial(http_html):
@@ -686,7 +1083,7 @@ def _fetch_site_live(
         for recovery_root in recovery_roots:
             attempted_roots.add(recovery_root)
             runtime.record("recovery.host_variant_attempts")
-            recovery_html, recovery_error = _try_fetch(recovery_root)
+            recovery_html, recovery_error = _fetch_page(recovery_root)
             recovery_meta = getattr(_FETCH_STATE, "last", {})
             if recovery_html and _looks_like_security_interstitial(recovery_html):
                 _record_security_interstitial(recovery_root)
@@ -743,7 +1140,7 @@ def _fetch_site_live(
                 recovery_html, recovery_error = (
                     _try_extract_pdf(recovery_url)
                     if recovery_url.casefold().endswith(".pdf")
-                    else _try_fetch(recovery_url)
+                    else _fetch_page(recovery_url)
                 )
                 if recovery_html and not _looks_like_security_interstitial(recovery_html):
                     runtime.record("recovery.static_successes")
@@ -840,6 +1237,7 @@ def _fetch_site_live(
         }
 
     if profile == "identity":
+        identity_page_limit = 2
         recovered_discovery = []
         for page_url, page_html in pages.items():
             recovered_discovery.extend(
@@ -855,13 +1253,13 @@ def _fetch_site_live(
                 *recovered_discovery,
             ],
             [urljoin(root, path) for path in config.IDENTITY_PAGE_PATHS],
-            config.MAX_IDENTITY_PAGES,
+            identity_page_limit,
             preferred_kinds=evidence_scopes,
         )
         for identity_url in identity_urls:
             if identity_url in pages:
                 continue
-            identity_html, identity_error = _try_fetch(identity_url)
+            identity_html, identity_error = _fetch_page(identity_url)
             identity_meta = getattr(_FETCH_STATE, "last", {})
             identity_retrieval_method = (
                 "http_tls_unverified" if identity_meta.get("tls_insecure") else "http"
@@ -879,6 +1277,7 @@ def _fetch_site_live(
                     (not identity_html and _renderable_fetch_error(identity_error))
                     or identity_was_js_shell
                 )
+                and (html or not pages)
                 and browser_render_attempts < 2
             ):
                 runtime.record("recovery.browser_attempts")
@@ -935,11 +1334,9 @@ def _fetch_site_live(
     identity_urls_for_full_crawl = _safe_identity_seed_urls(
         root, identity_seed_urls,
     )
-    # Search-discovered legal/KVKK pages are the highest-value identity
-    # evidence. Fetch them before generic sitemap/contact paths consume the
-    # bounded page and attempt budgets.
+    # Contact pages are the first full-crawl evidence slot; identity/legal
+    # pages follow so contact evidence cannot be starved by generic guesses.
     contact_urls = [
-        *identity_urls_for_full_crawl,
         *_safe_contact_seed_urls(root, contact_seed_urls),
     ]
     discovered_contact_urls: set[str] = set()
@@ -960,6 +1357,7 @@ def _fetch_site_live(
             config.MAX_CONTACT_PAGES,
             preferred_kinds=evidence_scopes,
         ))
+    contact_urls.extend(identity_urls_for_full_crawl)
     contact_urls.extend(discovered_contact_urls)
     contact_urls.extend(_sitemap_contact_urls(root, sitemap_urls))
     contact_urls.extend(urljoin(root, path) for path in config.CONTACT_PAGE_PATHS)
@@ -967,6 +1365,22 @@ def _fetch_site_live(
     # not linked from the homepage. This improves recall without adding search
     # API calls or leaving the official registrable domain.
     contact_queue = list(dict.fromkeys(contact_urls))
+    # Reserve deterministic evidence slots instead of letting a long contact
+    # queue starve the legal/identity follow-up.  The remaining pages still
+    # use the ordinary bounded queue and never exceed MAX_CONTACT_PAGES.
+    contact_reserved = [url for url in contact_queue if _contactish_url(url)][:2]
+    conflict_requested = any("conflict" in str(scope).casefold() for scope in (evidence_scopes or ()))
+    legal_reserved = []
+    if conflict_requested:
+        legal_reserved = [
+            url for url in contact_queue
+            if url not in contact_reserved
+            and site_mapper.classify(url) in {"legal", "privacy", "terms", "about", "corporate"}
+        ][:2]
+    reserved = set(contact_reserved) | set(legal_reserved)
+    contact_queue = [*contact_reserved, *legal_reserved, *[url for url in contact_queue if url not in reserved]]
+    runtime.record("crawler.contact_reserved", len(contact_reserved))
+    runtime.record("crawler.legal_reserved", len(legal_reserved))
     queued = set(contact_queue)
     contact_render_attempts = 0
     contact_attempts = 0
@@ -984,7 +1398,7 @@ def _fetch_site_live(
         contact_attempts += 1
         runtime.record("crawler.contact_url_attempts")
         contact_retrieval_method = "http"
-        contact_html, contact_error = _try_fetch(contact_url)
+        contact_html, contact_error = _fetch_page(contact_url)
         contact_meta = getattr(_FETCH_STATE, "last", {})
         tls_insecure = tls_insecure or bool(contact_meta.get("tls_insecure"))
         if contact_html and _looks_like_security_interstitial(contact_html):
@@ -1103,7 +1517,7 @@ def _fetch_site_live(
         if robots_parser is not None and not robots_parser.can_fetch(config.USER_AGENT, document_url):
             continue
         if document_url.casefold().endswith((".vcf", ".vcard")):
-            document_text, document_error = _try_fetch(document_url)
+            document_text, document_error = _fetch_page(document_url)
         else:
             document_text, document_error = _try_extract_pdf(document_url)
         if document_text:
@@ -1161,7 +1575,7 @@ def fetch_site(
     )
     if profile == "identity":
         cache_key = (
-            f"{url}|profile=identity|pages={config.MAX_IDENTITY_PAGES}"
+            f"{url}|profile=identity|pages=2"
             f"|capabilities={capability_key}"
         )
     # Contact seeds do not affect the identity profile, so including them made

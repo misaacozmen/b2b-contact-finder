@@ -84,10 +84,15 @@ def configure_run_budget(company_count: int) -> int:
     ):
         limit = max(0, configured)
     else:
-        usable_budget = int(
-            config.BRIGHTDATA_REQUEST_BUDGET
-            * (1.0 - config.BRIGHTDATA_RETRY_RESERVE_FRACTION)
-        )
+        if config.MAX_SEARCH_QUERIES_PER_COMPANY > 0:
+            # An explicit primary-query contract must not be reduced by the
+            # adaptive retry reserve.  The physical budget still caps it.
+            usable_budget = int(config.BRIGHTDATA_REQUEST_BUDGET)
+        else:
+            usable_budget = int(
+                config.BRIGHTDATA_REQUEST_BUDGET
+                * (1.0 - config.BRIGHTDATA_RETRY_RESERVE_FRACTION)
+            )
         fair_share = max(1, usable_budget // company_count)
         limit = min(max(1, configured), fair_share)
     runtime.record("search.paid_query_limit_per_company", limit)

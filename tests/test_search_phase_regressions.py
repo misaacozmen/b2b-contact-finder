@@ -268,16 +268,16 @@ def durable(tmp_path, monkeypatch):
 def test_real_authorized_e2e_uses_main_process_company_and_recording_transport(tmp_path, monkeypatch):
     source = tmp_path / "input.xlsx"
     _input_book(source, ["FREE CO", "PAID CO"])
-    transport = RecordingPaidTransport([Response(200, {"organic": [{"link": "https://paidco.example", "title": "PAID CO", "description": "PAID CO resmi şirket sitesi Türkiye"}]})])
+    transport = RecordingPaidTransport([Response(200, {"organic": [{"link": "https://paidco.example", "title": "PAID CO", "description": "PAID CO resmi şirket sitesi Türkiye"}]}) for _ in range(3)])
     runs = _real_run_setup(tmp_path, monkeypatch, transport)
     outcome = main.run(source, allow_paid=True)
     root = next(runs.iterdir())
     assert outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["phase"] == "COMPLETE" and len(transport.journal) == 1
+    assert manifest["phase"] == "COMPLETE" and len(transport.journal) == 3
     monkeypatch.setattr(config, "PROGRESS_DB_FILE", root / "state" / "progress.sqlite3")
     telemetry = checkpoint.derive_telemetry(manifest["run_id"])["provider_budgets"]["brightdata"]
-    assert {key: telemetry[key] for key in ("effective_limit", "reserved_total", "done", "failed", "unknown", "physical_http_attempts")} == {"effective_limit": 8, "reserved_total": 1, "done": 1, "failed": 0, "unknown": 0, "physical_http_attempts": 1}
+    assert {key: telemetry[key] for key in ("effective_limit", "reserved_total", "done", "failed", "unknown", "physical_http_attempts")} == {"effective_limit": 8, "reserved_total": 3, "done": 3, "failed": 0, "unknown": 0, "physical_http_attempts": 3}
     _capture_scenario("authorized_free_paid", root / "state" / "progress.sqlite3", run_root=root, transport=transport, outcome=outcome)
 
 
@@ -322,8 +322,12 @@ def test_paid_provider_stop_stops_remaining_provider_queries(monkeypatch):
 
 def test_two_distinct_http_5xx_owner_queries_open_circuit_and_third_makes_no_post(tmp_path, monkeypatch):
     init_run(tmp_path / "circuit.sqlite3", count=3, budget=3)
+    # This test isolates the provider circuit; durable paid calls must now
+    # consume concrete scheduler allocations instead of writing directly.
+    runtime.configure_durable_run("", {})
     monkeypatch.setattr(config, "SEARCH_PROVIDER", "brightdata")
     monkeypatch.setattr(config, "BRIGHTDATA_API_KEY", "fake")
+    monkeypatch.setattr(config, "BRIGHTDATA_REQUEST_BUDGET", 3)
     monkeypatch.setattr(config, "BRIGHTDATA_CIRCUIT_FAILURE_THRESHOLD", 2)
     monkeypatch.setattr(config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 0)
     monkeypatch.setattr(config, "GLOBAL_REQUESTS_PER_SECOND", 0)
@@ -333,9 +337,11 @@ def test_two_distinct_http_5xx_owner_queries_open_circuit_and_third_makes_no_pos
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: (posts.append(1) or Response(500, {"error": "down"})))
     for index, query in enumerate(("a", "b")):
         runtime.reset_item_stop_state(index)
+        runtime.set_source_record_id(f"s{index}")
         checkpoint.begin_paid_attempt(run_id="run", item_index=index, attempt_number=1)
         assert search._brightdata_text(query).result_state == "FAILED"
     runtime.reset_item_stop_state(2)
+    runtime.set_source_record_id("s2")
     result = search._safe_search_text("c")
     assert len(posts) == 2 and search._brightdata_circuit_open() and result.origin is search.SearchOrigin.CIRCUIT_BLOCK
 
@@ -679,6 +685,39 @@ def test_unknown_from_primary_blocks_targeted_and_every_later_paid_resolver(dura
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: (calls.append("brightdata") or (_ for _ in ()).throw(requests.ReadTimeout("post-send"))))
     result = search._brightdata_text("primary")
     assert result.stop_scope is runtime.StopScope.MANUAL_AUTHORIZATION
+    source_record_id = checkpoint.load_run_items("run")[0]["source_record_id"]
+    secondary_query = "secondary"
+    secondary_fingerprint = search._brightdata_flight_fingerprint(secondary_query)
+    secondary_job = checkpoint.ensure_provider_work_item(
+        run_id="run", item_index=0, source_record_id=source_record_id,
+        provider="brightdata", operation="search",
+        request_fingerprint=search.brightdata_request_fingerprint(secondary_query),
+        query_fingerprint=secondary_fingerprint, state="READY",
+    )
+    with sqlite3.connect(durable) as db:
+        before_calls = db.execute(
+            "SELECT COUNT(*) FROM provider_calls WHERE run_id='run'",
+        ).fetchone()[0]
+    blocked = search._brightdata_text(secondary_query)
+    assert blocked.call_ids == ()
+    assert blocked.result_reason == "dispatch_not_allocated"
+    flight = checkpoint.load_provider_query_flight(
+        run_id="run", provider="brightdata",
+        query_fingerprint=secondary_fingerprint,
+    )
+    assert flight["result"]["result_reason"] == "dispatch_not_allocated"
+    assert flight["call_ids"] == []
+    assert checkpoint.reconcile_provider_work_item_to_flight(
+        run_id="run", job_fingerprint=secondary_job["job_fingerprint"],
+    ) is False
+    assert checkpoint.load_provider_work_items(
+        "run", item_index=0, provider="brightdata",
+    )[-1]["state"] == "READY"
+    with sqlite3.connect(durable) as db:
+        after_calls = db.execute(
+            "SELECT COUNT(*) FROM provider_calls WHERE run_id='run'",
+        ).fetchone()[0]
+    assert after_calls == before_calls
     for provider in ("brightdata", "google_places", "hunter", "brandfetch", "linkedin", "llm"):
         rejected = runtime.reserve_api(provider, budget=1, operation="later", request_fingerprint=provider)
         assert not rejected and rejected.reason == "item_stop_guard"
@@ -701,6 +740,54 @@ def test_cache_hit_and_singleflight_follower_do_not_mutate_circuit(monkeypatch):
     search.SearchResults([], "cache_hit", "brightdata", result_state="FAILED", origin=search.SearchOrigin.CROSS_RUN_CACHE)
     search.SearchResults([], "singleflight", "brightdata", result_state="FAILED", origin=search.SearchOrigin.SINGLEFLIGHT_FOLLOWER)
     assert search._BRIGHTDATA_CONSECUTIVE_FAILURES == 0 and not search._brightdata_circuit_open()
+
+
+def test_paid_brightdata_circuit_is_stable_across_round_completion_orders(monkeypatch):
+    monkeypatch.setattr(config, "BRIGHTDATA_CIRCUIT_FAILURE_THRESHOLD", 3)
+    monkeypatch.setattr(runtime, "_DURABLE_RUN_ID", "circuit-round-parity")
+    monkeypatch.setattr(runtime, "record", lambda *_args, **_kwargs: None)
+    canonical = {
+        0: "FAILED", 1: "FAILED", 2: "COMPLETED", 3: "FAILED", 4: "FAILED",
+    }
+    observed = []
+    try:
+        for completion_order in ((0, 1, 2, 3, 4), (0, 3, 4, 1, 2)):
+            search.reset_run_state()
+            runtime.set_provider_dispatch_rounds({"brightdata": 7})
+            search.begin_brightdata_dispatch_round("circuit-round-parity", 7)
+            for item_index in completion_order:
+                runtime.set_item_context(item_index, "paid")
+                search._observe_brightdata_owner(
+                    flight_fingerprint=f"flight-{item_index}",
+                    state=canonical[item_index], http_attempted=True,
+                )
+                # No worker may observe a mid-round trip caused by whichever
+                # thread happened to finish its response first.
+                assert not search._brightdata_circuit_open()
+            search.finish_brightdata_dispatch_round("circuit-round-parity", 7)
+            observed.append((search._BRIGHTDATA_CONSECUTIVE_FAILURES, search._brightdata_circuit_open()))
+
+        assert observed == [(2, False), (2, False)]
+
+        search.reset_run_state()
+        runtime.set_provider_dispatch_rounds({"brightdata": 8})
+        search.begin_brightdata_dispatch_round("circuit-round-parity", 8)
+        for item_index in (2, 0, 1):
+            runtime.set_item_context(item_index, "paid")
+            search._observe_brightdata_owner(
+                flight_fingerprint=f"trip-{item_index}",
+                state="FAILED", http_attempted=True,
+            )
+        assert not search._brightdata_circuit_open()
+        search.finish_brightdata_dispatch_round("circuit-round-parity", 8)
+        assert search._brightdata_circuit_open()
+        runtime.set_provider_dispatch_rounds({"brightdata": 9})
+        search.begin_brightdata_dispatch_round("circuit-round-parity", 9)
+        assert search._brightdata_circuit_open()
+        search.finish_brightdata_dispatch_round("circuit-round-parity", 9)
+    finally:
+        search.reset_run_state()
+        runtime.set_provider_dispatch_rounds({})
 
 
 def test_expired_no_call_or_all_failed_flight_is_safely_reclaimed(tmp_path):
@@ -1144,6 +1231,51 @@ def _mixed_paid_evidence(path: Path, final_result: str, paid_state: str):
 def test_paid_evidence_unknown_has_precedence_over_done(tmp_path):
     _mixed_paid_evidence(tmp_path / "precedence.sqlite3", "COMPLETED", "DONE")
     with pytest.raises(checkpoint.EvidenceInvariant): checkpoint.validate_paid_evidence("run")
+
+
+def test_paid_attempt_accepts_mixed_done_and_failed_flights_when_aggregate_completed(tmp_path):
+    init_run(tmp_path / "mixed-terminal-flights.sqlite3", budget=2)
+    runtime.set_item_context(0, "paid")
+    checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    calls = []
+    for fingerprint, state in (("done-flight", "DONE"), ("failed-flight", "FAILED")):
+        owner = fingerprint + "-owner"
+        checkpoint.claim_provider_query_flight(
+            run_id="run", provider="brightdata", query_fingerprint=fingerprint, owner_token=owner,
+        )
+        reservation = runtime.reserve_api(
+            "brightdata", operation=fingerprint, request_fingerprint=fingerprint,
+            flight_fingerprint=fingerprint, execution_generation=1,
+        )
+        runtime.start_api(reservation)
+        checkpoint.bind_provider_query_flight_call(
+            run_id="run", provider="brightdata", query_fingerprint=fingerprint,
+            owner_token=owner, provider_call_id=reservation.call_id,
+        )
+        if state == "DONE":
+            runtime.mark_api_http_started(reservation, 1, fingerprint)
+            checkpoint.bind_provider_call_transport_receipt(
+                call_id=reservation.call_id,
+                endpoint_sha256="a" * 64,
+                request_shape_sha256="b" * 64,
+            )
+            checkpoint.complete_provider_call_and_flight_success(
+                run_id="run", provider="brightdata", query_fingerprint=fingerprint,
+                owner_token=owner, provider_call_id=reservation.call_id,
+                result={}, call_ids=[reservation.call_id],
+            )
+        else:
+            runtime.complete_api(reservation, state)
+            checkpoint.finish_provider_query_flight(
+                run_id="run", provider="brightdata", query_fingerprint=fingerprint,
+                owner_token=owner, state=state, result={}, call_ids=[reservation.call_id],
+            )
+        calls.append(reservation.call_id)
+    checkpoint.record_paid_attempt(
+        run_id="run", item_index=0, attempt_number=1, result="COMPLETED", call_ids=calls,
+    )
+    with sqlite3.connect(config.PROGRESS_DB_FILE) as db:
+        assert db.execute("SELECT result FROM paid_attempts").fetchone() == ("COMPLETED",)
 
 
 def test_paid_evidence_done_rejects_blocked_budget_outcome(tmp_path):

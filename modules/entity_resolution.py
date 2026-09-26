@@ -378,28 +378,86 @@ class Resolution:
     reason: str
 
 
+CANONICAL_TARGET_FIELDS = (
+    "source_record_id", "company_raw", "display_name", "legal_name", "brands",
+    "country", "sector", "city", "listed_website", "listed_email",
+    "listed_phone", "listed_address", "listing_url", "profile_url",
+    "source_evidence",
+)
+
+
+def _split_brand_candidates(value: object) -> list[str]:
+    """Split only explicit catalogue separators; preserve names containing '&' or '-'."""
+    values = re.split(r"[/;\n]+", str(value or ""))
+    return list(dict.fromkeys(
+        re.sub(r"\s+", " ", item).strip(" \t\r\n,.")
+        for item in values
+        if re.sub(r"\s+", " ", item).strip(" \t\r\n,.")
+    ))
+
+
+def canonical_target_identity(record: dict | None) -> dict:
+    """Build the immutable, source-faithful target identity used by a run."""
+    record = record or {}
+    company_raw = str(record.get("company", "") or "").strip()
+    legal_name = str(
+        record.get("listed_legal_name") or record.get("legal_name") or ""
+    ).strip()
+    raw_brands = record.get("brands") or record.get("brand") or ""
+    brands = _split_brand_candidates(raw_brands)
+    if not brands and company_raw and ("/" in company_raw or ";" in company_raw or "\n" in company_raw):
+        brands = _split_brand_candidates(company_raw)
+    source_evidence = record.get("source_evidence", [])
+    if isinstance(source_evidence, str):
+        source_evidence = [source_evidence] if source_evidence.strip() else []
+    if not isinstance(source_evidence, list):
+        source_evidence = []
+    identity = {
+        "source_record_id": str(record.get("source_record_id", "") or "").strip(),
+        "company_raw": company_raw,
+        "display_name": company_raw,
+        "legal_name": legal_name,
+        "brands": brands,
+        "country": str(record.get("country", "") or "").strip(),
+        "sector": str(record.get("sector", "") or "").strip(),
+        "city": str(record.get("city", "") or "").strip(),
+        "listed_website": str(record.get("listed_website") or record.get("website") or "").strip(),
+        "listed_email": str(record.get("listed_email", "") or "").strip(),
+        "listed_phone": str(record.get("listed_phone", "") or "").strip(),
+        "listed_address": str(record.get("listed_address", "") or "").strip(),
+        "listing_url": str(record.get("listing_url", "") or "").strip(),
+        "profile_url": str(record.get("profile_url", "") or "").strip(),
+        "source_evidence": list(source_evidence),
+    }
+    return identity
+
+
 def build_target_profile(company: str, metadata: dict | None = None) -> TargetProfile:
     metadata = metadata or {}
+    canonical = metadata.get("target_identity") if isinstance(metadata.get("target_identity"), dict) else {}
+    canonical_name = str(canonical.get("company_raw") or company or "").strip()
+    if canonical.get("display_name"):
+        canonical_name = str(canonical.get("display_name")).strip()
     legal_source = " ".join(str(metadata.get(key, "") or "") for key in (
         "listed_legal_name", "legal_name", "legal_title", "legal_company_name",
-    ))
+    )) or str(canonical.get("legal_name", "") or "")
     brand_source = " ".join(str(metadata.get(key, "") or "") for key in (
         "brands", "brand", "representations",
-    ))
+    )) or " ".join(str(value) for value in canonical.get("brands", ()))
     context_source = " ".join(str(metadata.get(key, "") or "") for key in (
         "sector", "category", "product", "description", "fair", "trade_show",
     ))
-    legal_tokens = tuple(dict.fromkeys(scorer.legal_identity_tokens(f"{company} {legal_source}")))
+    legal_tokens = tuple(dict.fromkeys(scorer.legal_identity_tokens(f"{canonical_name} {legal_source}")))
     brand_tokens = tuple(dict.fromkeys(
-        scorer.primary_brand_tokens(company, limit=2)
+        scorer.primary_brand_tokens(canonical_name, limit=2)
         + scorer.primary_brand_tokens(brand_source, limit=2)
     ))
     context_tokens = tuple(dict.fromkeys(
-        scorer.context_tokens(f"{company} {context_source}")
+        scorer.context_tokens(f"{canonical_name} {context_source}")
         + scorer.metadata_contexts(metadata)
     ))
     return TargetProfile(
-        company=company,
+        company=canonical_name,
         legal_tokens=legal_tokens,
         brand_tokens=brand_tokens,
         context_tokens=context_tokens,
@@ -761,9 +819,10 @@ def _tournament(
 def resolve_profile_anchor(
     company: str,
     evaluations: list[dict],
+    metadata: dict | None = None,
 ) -> Resolution:
     """Resolve explicit profile routes before broad web search is attempted."""
-    profile = build_target_profile(company)
+    profile = build_target_profile(company, metadata)
     candidates = [
         (item, fingerprint(profile, item))
         for item in evaluations
@@ -814,9 +873,10 @@ def resolve_profile_anchor(
 def resolve_candidates(
     company: str,
     evaluations: list[dict],
+    metadata: dict | None = None,
 ) -> Resolution:
     """Select one identity candidate; compare only candidates that prove identity."""
-    profile = build_target_profile(company)
+    profile = build_target_profile(company, metadata)
     candidates = [
         (item, fingerprint(profile, item))
         for item in evaluations

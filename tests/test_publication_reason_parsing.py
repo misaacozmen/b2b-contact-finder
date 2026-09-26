@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from modules.publication_policy import is_publishable_row
+from strict_fixtures import publishable_content_decision
 
 
 def _row(**updates):
@@ -44,6 +45,10 @@ def test_positive_legal_name_token_is_whitespace_position_independent():
                 website="https://acme.com",
                 reason=f"{reason}; country_identity_tr_tld; context_match:1/1",
             )
+            row["content_decision"] = publishable_content_decision(
+                source_record_id=row["source_record_id"], website=row["website"],
+                email=row["email"], phone=row["phone"],
+            )
             assert is_publishable_row(row)
 
 
@@ -70,6 +75,7 @@ def test_exact_resolved_context_token_is_not_a_conflict():
     }
     for field in ("reason", "publication_blockers", "__evaluation"):
         row = _row()
+        row["content_decision"] = publishable_content_decision(source_record_id=row["source_record_id"], website=row["website"], email=row["email"], phone=row["phone"])
         if field == "__evaluation":
             row[field] = {
                 "identity_assessment": {"publishable": True, "conflicts": []},

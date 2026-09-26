@@ -243,8 +243,8 @@ class IdentityArchitectureTests(unittest.TestCase):
             "modules.crawler.site_mapper.classify", return_value="about"
         ):
             result = crawler.fetch_site("https://example.com", profile="identity")
-        self.assertEqual(fetch.call_count, 7)
-        self.assertEqual(len(result["pages"]), 7)
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(len(result["pages"]), 3)
 
     def test_stage_metrics_separate_candidate_selection_and_publication(self):
         with tempfile.TemporaryDirectory() as directory:

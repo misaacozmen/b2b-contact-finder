@@ -94,10 +94,10 @@ class OpenRouterClient:
         call_ids = []
         for attempt in range(3):
             fingerprint = runtime.request_fingerprint(
-                "llm", "arbiter", {"prompt": prompt, "schema": response_schema, "ordinal": attempt + 1},
+                "llm", "arbiter", {"prompt": prompt, "schema": response_schema},
             )
             reservation = runtime.reserve_api(
-                "llm", operation=f"arbiter.retry_{attempt + 1}", request_fingerprint=fingerprint,
+                "llm", operation="arbiter", request_fingerprint=fingerprint,
             )
             if not reservation:
                 raise ProviderRejected(runtime.rejected_provider_result(reservation))
