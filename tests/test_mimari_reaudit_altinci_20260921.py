@@ -162,7 +162,10 @@ def test_k09_budget_100_gives_each_firm_only_first_primary_right(tmp_path, monke
     )
     outcome = main.run(source, allow_paid=True)
     root = next(runs.iterdir())
-    assert outcome.status is pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED
+    assert outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE
+    assert (root / "output" / "rapor.md").is_file()
+    run_status = json.loads((root / "output" / "run_status.json").read_text(encoding="utf-8"))
+    assert run_status["run_status"] == "TAMAMLANDI"
     assert len(transport.journal) == 100
     database = root / "state" / "progress.sqlite3"
     with sqlite3.connect(database) as db:
@@ -210,7 +213,8 @@ def test_k09_budget_100_gives_each_firm_only_first_primary_right(tmp_path, monke
         assert len(terminal_reasons) == 200
         assert all(reason == "dispatch_not_allocated" for reason in terminal_reasons)
         assert db.execute(
-            "SELECT COUNT(*) FROM run_items WHERE run_id=? AND paid_state='BLOCKED_BUDGET'",
+            "SELECT COUNT(*) FROM run_items WHERE run_id=? AND paid_state='FAILED' "
+            "AND last_error='paid_budget_exhausted'",
             (run_id,),
         ).fetchone()[0] == 100
     measurement = {
@@ -225,10 +229,7 @@ def test_k09_budget_100_gives_each_firm_only_first_primary_right(tmp_path, monke
         "remaining_terminal_reasons": {reason: terminal_reasons.count(reason) for reason in sorted(set(terminal_reasons))},
         "dispatch_allocation_count": len(allocation_rows),
         "budget_terminal_count": len(terminal_reasons),
-        "run_complete": outcome.status in {
-            pipeline_runner.PipelineOutcomeStatus.COMPLETE,
-            pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED,
-        },
+        "run_complete": outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE,
     }
     target = os.environ.get("B2B_K09_MEASUREMENTS", "").strip()
     if target:

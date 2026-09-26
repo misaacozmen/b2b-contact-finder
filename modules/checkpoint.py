@@ -125,6 +125,9 @@ class OutcomeInvariant(SchedulerInvariantError):
     pass
 
 
+ITEM_ISOLATION_PREFIX = "invariant:"
+
+
 class ReplayInvariantError(SchedulerInvariantError):
     """A behavioral replay record does not match the durable execution."""
 
@@ -4541,117 +4544,179 @@ def wait_provider_query_flight(*, run_id: str, provider: str, query_fingerprint:
     raise StateTransitionInvariant("singleflight waiter deadline expired before a durable terminal or reclaim state")
 
 
-def validate_paid_evidence(run_id: str) -> dict[str, int]:
+def mark_item_invariant_failure(*, run_id: str, item_index: int, error: BaseException) -> None:
+    """Terminalize one item after an item-scoped ledger contradiction."""
+    message = f"{ITEM_ISOLATION_PREFIX}{type(error).__name__}:{str(error)[:200]}"
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE run_items SET paid_state='FAILED',last_error=? "
+            "WHERE run_id=? AND item_index=? AND paid_required=1",
+            (message, str(run_id), int(item_index)),
+        )
+        connection.execute(
+            "UPDATE provider_work_items SET state='FAILED',terminal_reason='item_invariant_isolated',updated_at=? "
+            "WHERE run_id=? AND item_index=? AND state IN ('READY','WAITING_DEPENDENCY','RESERVED')",
+            (now, str(run_id), int(item_index)),
+        )
+        connection.commit()
+
+
+def terminalize_unresolved_paid_items(run_id: str) -> int:
+    """Convert unresolved paid outcomes into auditable terminal failures."""
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        updated = connection.execute(
+            "UPDATE run_items SET paid_state='FAILED',last_error=CASE paid_state "
+            "WHEN 'UNKNOWN' THEN 'provider_call_unknown_outcome' "
+            "ELSE 'paid_budget_exhausted' END "
+            "WHERE run_id=? AND paid_required=1 AND paid_state IN ('UNKNOWN','BLOCKED_BUDGET')",
+            (str(run_id),),
+        ).rowcount
+        connection.execute(
+            "UPDATE provider_work_items SET state='FAILED',terminal_reason='unresolved_paid_item_terminalized',updated_at=? "
+            "WHERE run_id=? AND state IN ('READY','WAITING_DEPENDENCY','RESERVED','ALLOCATED') "
+            "AND item_index IN (SELECT item_index FROM run_items WHERE run_id=? AND paid_required=1 "
+            "AND last_error IN ('provider_call_unknown_outcome','paid_budget_exhausted'))",
+            (now, str(run_id), str(run_id)),
+        )
+        connection.commit()
+    return int(updated)
+
+
+def validate_paid_evidence(run_id: str, *, collect: bool = False) -> dict[str, Any]:
     from modules import scorer
     with closing(_connect()) as connection:
-        items = connection.execute("SELECT item_index,paid_state FROM run_items WHERE run_id=? AND paid_required=1", (run_id,)).fetchall()
-        for item_index, paid_state in items:
-            attempt = connection.execute(
-                "SELECT paid_attempt_id,result,evidence_kind,input_snapshot_sha256 FROM paid_attempts WHERE run_id=? AND item_index=? AND phase='PAID' ORDER BY attempt_number DESC LIMIT 1",
-                (run_id, int(item_index)),
-            ).fetchone()
-            if not attempt:
-                raise EvidenceInvariant(f"current paid attempt missing for item {item_index}")
-            paid_attempt_id, attempt_result, evidence_kind, snapshot_hash = map(str, attempt)
-            valid_results = {
-                "DONE": {"COMPLETED", "NO_CALL_NEEDED"}, "FAILED": {"FAILED"},
-                "UNKNOWN": {"UNKNOWN"}, "BLOCKED_BUDGET": {"BLOCKED_BUDGET"},
-            }
-            if str(paid_state) not in valid_results or attempt_result not in valid_results[str(paid_state)]:
-                raise EvidenceInvariant(f"paid state and current attempt result mismatch for item {item_index}")
-            links = connection.execute(
-                "SELECT pc.state,pac.relation,pac.provider,pac.provider_call_id,pc.item_index,pac.query_fingerprint,pac.execution_generation,pc.provider,pc.flight_fingerprint FROM paid_attempt_calls pac JOIN provider_calls pc ON pc.call_id=pac.provider_call_id AND pc.run_id=pac.run_id AND pc.provider=pac.provider WHERE pac.run_id=? AND pac.item_index=? AND pac.paid_attempt_id=?",
-                (run_id, int(item_index), paid_attempt_id),
-            ).fetchall()
-            raw_link_count = connection.execute("SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=?", (run_id, int(item_index), paid_attempt_id)).fetchone()[0]
-            if int(raw_link_count) != len(links):
-                raise EvidenceInvariant("paid attempt relation does not join exact provider call scope")
-            states = {str(row[0]) for row in links}
-            flight_unknown = connection.execute(
-                "SELECT 1 FROM provider_query_flights f JOIN provider_query_flight_consumers c ON c.run_id=f.run_id AND c.provider=f.provider AND c.query_fingerprint=f.query_fingerprint AND c.execution_generation=f.execution_generation WHERE c.run_id=? AND c.item_index=? AND c.paid_attempt_id=? AND f.state='UNKNOWN'",
-                (run_id, int(item_index), paid_attempt_id),
-            ).fetchone()
-            has_unknown_or_nonterminal = bool(
-                states.intersection({"UNKNOWN", "RESERVED", "RUNNING"}) or flight_unknown
-            )
-            if has_unknown_or_nonterminal and (attempt_result != "UNKNOWN" or str(paid_state) != "UNKNOWN"):
-                raise EvidenceInvariant("UNKNOWN/nonterminal evidence has precedence over every terminal outcome")
-            if not has_unknown_or_nonterminal and "DONE" in states and attempt_result not in {"COMPLETED", "NO_CALL_NEEDED"}:
-                raise EvidenceInvariant("DONE evidence has precedence over non-success terminal outcomes")
-            for call_state, relation, provider, call_id, owner_item, fingerprint, generation, call_provider, call_fingerprint in links:
-                if str(provider) != str(call_provider) or str(fingerprint) != str(call_fingerprint):
-                    raise EvidenceInvariant("paid attempt call scope columns differ from provider call")
-                if str(relation) == "OWNER" and int(owner_item) != int(item_index):
-                    raise EvidenceInvariant("OWNER relation requires provider call item match")
-                if str(relation) == "INHERITED":
-                    consumer = connection.execute("SELECT 1 FROM provider_query_flight_consumers c JOIN provider_query_flight_terminals t ON t.run_id=c.run_id AND t.provider=c.provider AND t.query_fingerprint=c.query_fingerprint AND t.execution_generation=c.execution_generation JOIN provider_calls pc ON pc.run_id=c.run_id AND pc.provider=c.provider AND pc.call_id=c.provider_call_id LEFT JOIN provider_query_flight_results r ON r.run_id=c.run_id AND r.provider=c.provider AND r.query_fingerprint=c.query_fingerprint AND r.execution_generation=c.execution_generation WHERE c.run_id=? AND c.item_index=? AND c.paid_attempt_id=? AND c.provider_call_id=? AND c.provider=? AND c.query_fingerprint=? AND c.execution_generation=? AND c.relation='INHERITED' AND ((t.state='DONE' AND r.provider_call_id IS NOT NULL) OR (t.state='FAILED' AND pc.state='FAILED'))", (run_id, int(item_index), paid_attempt_id, str(call_id), str(provider), str(fingerprint), int(generation))).fetchone()
-                    if not consumer:
-                        raise EvidenceInvariant("INHERITED relation lacks same-generation result receipt")
-            no_call = False
-            if attempt_result == "NO_CALL_NEEDED" and evidence_kind == "supplied_website_publishable_at_paid_entry":
-                physical_calls = connection.execute("SELECT COUNT(*) FROM paid_attempt_calls pac JOIN provider_calls pc ON pc.run_id=pac.run_id AND pc.provider=pac.provider AND pc.call_id=pac.provider_call_id WHERE pac.run_id=? AND pac.item_index=? AND pac.paid_attempt_id=? AND pc.http_started_at<>''", (run_id, int(item_index), paid_attempt_id)).fetchone()[0]
-                if physical_calls:
-                    raise EvidenceInvariant("supplied website no-call evidence requires exact zero paid physical calls")
-                immutable = connection.execute("SELECT snapshot_sha256,snapshot_json FROM immutable_input_snapshots WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
-                receipt = connection.execute("SELECT input_snapshot_sha256,normalized_input_website,evaluation_payload_sha256,result_payload_sha256,publication_eligible,evaluator_schema_version FROM paid_no_call_evidence WHERE run_id=? AND item_index=? AND paid_attempt_id=?", (run_id, int(item_index), paid_attempt_id)).fetchone()
-                result_row = connection.execute("SELECT payload FROM results WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
-                if immutable and receipt and result_row:
-                    snapshot_payload = json.loads(str(immutable[1])); result_payload = json.loads(str(result_row[0])); evaluation = result_payload.get("known_website_evaluation")
-                    evaluation_text = json.dumps(_json_safe(evaluation), ensure_ascii=False, sort_keys=True, separators=(",", ":")) if isinstance(evaluation, dict) else ""
-                    result_text = json.dumps(_json_safe(result_payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                    normalized = scorer.normalize_domain(str(snapshot_payload.get("website", "")))
-                    no_call = bool(not physical_calls and snapshot_hash and snapshot_hash == str(immutable[0]) == str(receipt[0]) and normalized and normalized == str(receipt[1]) == scorer.normalize_domain(str(result_payload.get("website", ""))) and hashlib.sha256(evaluation_text.encode()).hexdigest() == str(receipt[2]) and hashlib.sha256(result_text.encode()).hexdigest() == str(receipt[3]) and int(receipt[4]) == 1 and int(receipt[5]) >= 1 and result_payload.get("publication_eligible") is True and str(result_payload.get("status", "")) in {"OK_HIGH_CONFIDENCE", "OK_MEDIUM_CONFIDENCE"})
-            elif attempt_result == "NO_CALL_NEEDED" and evidence_kind == "terminal_paid_result_reference":
-                no_call = bool(links) and all(str(row[1]) == "INHERITED" and str(row[0]) == "DONE" for row in links)
-            if paid_state == "DONE" and "DONE" not in states and not no_call:
-                raise EvidenceInvariant(f"current paid attempt lacks DONE relational evidence for item {item_index}")
-            if paid_state == "FAILED":
-                if links and "FAILED" not in states:
-                    raise EvidenceInvariant(f"FAILED requires durable FAILED call linked to current paid attempt for item {item_index}")
-                if not links:
-                    local = connection.execute(
-                        "SELECT source_record_id,input_snapshot_sha256,stage,typed_reason,dispatch_started FROM paid_local_failure_receipts WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
-                        (run_id, int(item_index), paid_attempt_id),
-                    ).fetchone()
-                    immutable = connection.execute(
-                        "SELECT snapshot_sha256 FROM immutable_input_snapshots WHERE run_id=? AND item_index=?",
-                        (run_id, int(item_index)),
-                    ).fetchone()
-                    item_source = connection.execute(
-                        "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
-                        (run_id, int(item_index)),
-                    ).fetchone()
-                    provider_rows = connection.execute(
-                        "SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
-                        (run_id, int(item_index), paid_attempt_id),
-                    ).fetchone()[0]
-                    if (
-                        not local or not immutable or not item_source
-                        or str(local[0]) != str(item_source[0])
-                        or str(local[1]) != str(immutable[0])
-                        or not str(local[2]).strip()
-                        or not str(local[3]).strip()
-                        or int(local[4]) != 0
-                        or int(provider_rows) != 0
-                    ):
-                        raise EvidenceInvariant(f"FAILED requires immutable local-failure receipt for pre-dispatch item {item_index}")
-            if paid_state == "UNKNOWN" and not has_unknown_or_nonterminal:
-                raise OutcomeInvariant(f"zero-call UNKNOWN lacks related provider evidence for item {item_index}")
-            if paid_state == "BLOCKED_BUDGET":
-                if states.intersection({"DONE", "UNKNOWN", "RESERVED", "RUNNING"}):
-                    raise EvidenceInvariant("provider evidence has precedence over BLOCKED_BUDGET")
-                plans = connection.execute("SELECT provider,authorized,effective_limit FROM paid_attempt_provider_plan WHERE run_id=? AND item_index=? AND paid_attempt_id=?", (run_id, int(item_index), paid_attempt_id)).fetchall()
-                if not plans:
-                    raise EvidenceInvariant("BLOCKED_BUDGET lacks current frozen provider plan")
-                for provider, authorized, effective_limit in plans:
-                    if not int(authorized):
-                        continue
-                    terminal = connection.execute("SELECT 1 FROM paid_attempt_calls pac JOIN provider_calls pc ON pc.call_id=pac.provider_call_id WHERE pac.paid_attempt_id=? AND pc.provider=? AND pc.state IN ('DONE','FAILED') LIMIT 1", (paid_attempt_id, str(provider))).fetchone()
-                    blocked = connection.execute("SELECT 1 FROM paid_attempt_block_links l JOIN provider_budget_blocks b ON b.block_id=l.block_id WHERE l.paid_attempt_id=? AND b.run_id=? AND b.item_index=? AND b.provider=? AND b.provider<>'ddgs' LIMIT 1", (paid_attempt_id, run_id, int(item_index), str(provider))).fetchone()
-                    if not terminal and not blocked:
-                        raise EvidenceInvariant(f"BLOCKED_BUDGET lacks current-plan evidence for provider {provider}")
-    return {"historical_zero_call_paid_failure": 0}
-
+        items = connection.execute("SELECT item_index,paid_state,last_error FROM run_items WHERE run_id=? AND paid_required=1", (run_id,)).fetchall()
+        violations: list[dict[str, Any]] = []
+        for item_index, paid_state, last_error in items:
+            if str(last_error or "").startswith(ITEM_ISOLATION_PREFIX):
+                continue
+            try:
+                attempt = connection.execute(
+                    "SELECT paid_attempt_id,result,evidence_kind,input_snapshot_sha256 FROM paid_attempts WHERE run_id=? AND item_index=? AND phase='PAID' ORDER BY attempt_number DESC LIMIT 1",
+                    (run_id, int(item_index)),
+                ).fetchone()
+                if not attempt:
+                    raise EvidenceInvariant(f"current paid attempt missing for item {item_index}")
+                paid_attempt_id, attempt_result, evidence_kind, snapshot_hash = map(str, attempt)
+                unresolved_terminalized = (
+                    str(paid_state) == "FAILED"
+                    and str(last_error or "") in {"provider_call_unknown_outcome", "paid_budget_exhausted"}
+                )
+                valid_results = {
+                    "DONE": {"COMPLETED", "NO_CALL_NEEDED"}, "FAILED": {"FAILED"},
+                    "UNKNOWN": {"UNKNOWN"}, "BLOCKED_BUDGET": {"BLOCKED_BUDGET"},
+                }
+                if (
+                    not unresolved_terminalized
+                    and (str(paid_state) not in valid_results or attempt_result not in valid_results[str(paid_state)])
+                ):
+                    raise EvidenceInvariant(f"paid state and current attempt result mismatch for item {item_index}")
+                links = connection.execute(
+                    "SELECT pc.state,pac.relation,pac.provider,pac.provider_call_id,pc.item_index,pac.query_fingerprint,pac.execution_generation,pc.provider,pc.flight_fingerprint FROM paid_attempt_calls pac JOIN provider_calls pc ON pc.call_id=pac.provider_call_id AND pc.run_id=pac.run_id AND pc.provider=pac.provider WHERE pac.run_id=? AND pac.item_index=? AND pac.paid_attempt_id=?",
+                    (run_id, int(item_index), paid_attempt_id),
+                ).fetchall()
+                raw_link_count = connection.execute("SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=?", (run_id, int(item_index), paid_attempt_id)).fetchone()[0]
+                if int(raw_link_count) != len(links):
+                    raise EvidenceInvariant("paid attempt relation does not join exact provider call scope")
+                states = {str(row[0]) for row in links}
+                flight_unknown = connection.execute(
+                    "SELECT 1 FROM provider_query_flights f JOIN provider_query_flight_consumers c ON c.run_id=f.run_id AND c.provider=f.provider AND c.query_fingerprint=f.query_fingerprint AND c.execution_generation=f.execution_generation WHERE c.run_id=? AND c.item_index=? AND c.paid_attempt_id=? AND f.state='UNKNOWN'",
+                    (run_id, int(item_index), paid_attempt_id),
+                ).fetchone()
+                has_unknown_or_nonterminal = bool(
+                    states.intersection({"UNKNOWN", "RESERVED", "RUNNING"}) or flight_unknown
+                )
+                if (
+                    has_unknown_or_nonterminal and not unresolved_terminalized
+                    and (attempt_result != "UNKNOWN" or str(paid_state) != "UNKNOWN")
+                ):
+                    raise EvidenceInvariant("UNKNOWN/nonterminal evidence has precedence over every terminal outcome")
+                if not has_unknown_or_nonterminal and "DONE" in states and attempt_result not in {"COMPLETED", "NO_CALL_NEEDED"}:
+                    raise EvidenceInvariant("DONE evidence has precedence over non-success terminal outcomes")
+                for call_state, relation, provider, call_id, owner_item, fingerprint, generation, call_provider, call_fingerprint in links:
+                    if str(provider) != str(call_provider) or str(fingerprint) != str(call_fingerprint):
+                        raise EvidenceInvariant("paid attempt call scope columns differ from provider call")
+                    if str(relation) == "OWNER" and int(owner_item) != int(item_index):
+                        raise EvidenceInvariant("OWNER relation requires provider call item match")
+                    if str(relation) == "INHERITED":
+                        consumer = connection.execute("SELECT 1 FROM provider_query_flight_consumers c JOIN provider_query_flight_terminals t ON t.run_id=c.run_id AND t.provider=c.provider AND t.query_fingerprint=c.query_fingerprint AND t.execution_generation=c.execution_generation JOIN provider_calls pc ON pc.run_id=c.run_id AND pc.provider=c.provider AND pc.call_id=c.provider_call_id LEFT JOIN provider_query_flight_results r ON r.run_id=c.run_id AND r.provider=c.provider AND r.query_fingerprint=c.query_fingerprint AND r.execution_generation=c.execution_generation WHERE c.run_id=? AND c.item_index=? AND c.paid_attempt_id=? AND c.provider_call_id=? AND c.provider=? AND c.query_fingerprint=? AND c.execution_generation=? AND c.relation='INHERITED' AND ((t.state='DONE' AND r.provider_call_id IS NOT NULL) OR (t.state='FAILED' AND pc.state='FAILED'))", (run_id, int(item_index), paid_attempt_id, str(call_id), str(provider), str(fingerprint), int(generation))).fetchone()
+                        if not consumer:
+                            raise EvidenceInvariant("INHERITED relation lacks same-generation result receipt")
+                no_call = False
+                if attempt_result == "NO_CALL_NEEDED" and evidence_kind == "supplied_website_publishable_at_paid_entry":
+                    physical_calls = connection.execute("SELECT COUNT(*) FROM paid_attempt_calls pac JOIN provider_calls pc ON pc.run_id=pac.run_id AND pc.provider=pac.provider AND pc.call_id=pac.provider_call_id WHERE pac.run_id=? AND pac.item_index=? AND pac.paid_attempt_id=? AND pc.http_started_at<>''", (run_id, int(item_index), paid_attempt_id)).fetchone()[0]
+                    if physical_calls:
+                        raise EvidenceInvariant("supplied website no-call evidence requires exact zero paid physical calls")
+                    immutable = connection.execute("SELECT snapshot_sha256,snapshot_json FROM immutable_input_snapshots WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
+                    receipt = connection.execute("SELECT input_snapshot_sha256,normalized_input_website,evaluation_payload_sha256,result_payload_sha256,publication_eligible,evaluator_schema_version FROM paid_no_call_evidence WHERE run_id=? AND item_index=? AND paid_attempt_id=?", (run_id, int(item_index), paid_attempt_id)).fetchone()
+                    result_row = connection.execute("SELECT payload FROM results WHERE run_id=? AND item_index=?", (run_id, int(item_index))).fetchone()
+                    if immutable and receipt and result_row:
+                        snapshot_payload = json.loads(str(immutable[1])); result_payload = json.loads(str(result_row[0])); evaluation = result_payload.get("known_website_evaluation")
+                        evaluation_text = json.dumps(_json_safe(evaluation), ensure_ascii=False, sort_keys=True, separators=(",", ":")) if isinstance(evaluation, dict) else ""
+                        result_text = json.dumps(_json_safe(result_payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        normalized = scorer.normalize_domain(str(snapshot_payload.get("website", "")))
+                        no_call = bool(not physical_calls and snapshot_hash and snapshot_hash == str(immutable[0]) == str(receipt[0]) and normalized and normalized == str(receipt[1]) == scorer.normalize_domain(str(result_payload.get("website", ""))) and hashlib.sha256(evaluation_text.encode()).hexdigest() == str(receipt[2]) and hashlib.sha256(result_text.encode()).hexdigest() == str(receipt[3]) and int(receipt[4]) == 1 and int(receipt[5]) >= 1 and result_payload.get("publication_eligible") is True and str(result_payload.get("status", "")) in {"OK_HIGH_CONFIDENCE", "OK_MEDIUM_CONFIDENCE"})
+                elif attempt_result == "NO_CALL_NEEDED" and evidence_kind == "terminal_paid_result_reference":
+                    no_call = bool(links) and all(str(row[1]) == "INHERITED" and str(row[0]) == "DONE" for row in links)
+                if paid_state == "DONE" and "DONE" not in states and not no_call:
+                    raise EvidenceInvariant(f"current paid attempt lacks DONE relational evidence for item {item_index}")
+                if paid_state == "FAILED":
+                    if links and "FAILED" not in states and not unresolved_terminalized:
+                        raise EvidenceInvariant(f"FAILED requires durable FAILED call linked to current paid attempt for item {item_index}")
+                    if not links and not unresolved_terminalized:
+                        local = connection.execute(
+                            "SELECT source_record_id,input_snapshot_sha256,stage,typed_reason,dispatch_started FROM paid_local_failure_receipts WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+                            (run_id, int(item_index), paid_attempt_id),
+                        ).fetchone()
+                        immutable = connection.execute(
+                            "SELECT snapshot_sha256 FROM immutable_input_snapshots WHERE run_id=? AND item_index=?",
+                            (run_id, int(item_index)),
+                        ).fetchone()
+                        item_source = connection.execute(
+                            "SELECT source_record_id FROM run_items WHERE run_id=? AND item_index=?",
+                            (run_id, int(item_index)),
+                        ).fetchone()
+                        provider_rows = connection.execute(
+                            "SELECT COUNT(*) FROM paid_attempt_calls WHERE run_id=? AND item_index=? AND paid_attempt_id=?",
+                            (run_id, int(item_index), paid_attempt_id),
+                        ).fetchone()[0]
+                        if (
+                            not local or not immutable or not item_source
+                            or str(local[0]) != str(item_source[0])
+                            or str(local[1]) != str(immutable[0])
+                            or not str(local[2]).strip()
+                            or not str(local[3]).strip()
+                            or int(local[4]) != 0
+                            or int(provider_rows) != 0
+                        ):
+                            raise EvidenceInvariant(f"FAILED requires immutable local-failure receipt for pre-dispatch item {item_index}")
+                if paid_state == "UNKNOWN" and not has_unknown_or_nonterminal:
+                    raise OutcomeInvariant(f"zero-call UNKNOWN lacks related provider evidence for item {item_index}")
+                if paid_state == "BLOCKED_BUDGET":
+                    if states.intersection({"DONE", "UNKNOWN", "RESERVED", "RUNNING"}):
+                        raise EvidenceInvariant("provider evidence has precedence over BLOCKED_BUDGET")
+                    plans = connection.execute("SELECT provider,authorized,effective_limit FROM paid_attempt_provider_plan WHERE run_id=? AND item_index=? AND paid_attempt_id=?", (run_id, int(item_index), paid_attempt_id)).fetchall()
+                    if not plans:
+                        raise EvidenceInvariant("BLOCKED_BUDGET lacks current frozen provider plan")
+                    for provider, authorized, effective_limit in plans:
+                        if not int(authorized):
+                            continue
+                        terminal = connection.execute("SELECT 1 FROM paid_attempt_calls pac JOIN provider_calls pc ON pc.call_id=pac.provider_call_id WHERE pac.paid_attempt_id=? AND pc.provider=? AND pc.state IN ('DONE','FAILED') LIMIT 1", (paid_attempt_id, str(provider))).fetchone()
+                        blocked = connection.execute("SELECT 1 FROM paid_attempt_block_links l JOIN provider_budget_blocks b ON b.block_id=l.block_id WHERE l.paid_attempt_id=? AND b.run_id=? AND b.item_index=? AND b.provider=? AND b.provider<>'ddgs' LIMIT 1", (paid_attempt_id, run_id, int(item_index), str(provider))).fetchone()
+                        if not terminal and not blocked:
+                            raise EvidenceInvariant(f"BLOCKED_BUDGET lacks current-plan evidence for provider {provider}")
+            except EvidenceInvariant as exc:
+                if not collect:
+                    raise
+                violations.append({"item_index": int(item_index), "error": str(exc)[:200]})
+    result: dict[str, Any] = {"historical_zero_call_paid_failure": 0}
+    if collect:
+        result["violations"] = violations
+    return result
 
 def release_handoff_pending(run_id: str, *, expected_count: int) -> dict[str, int]:
     """Atomically remove the temporary overlay and recompute publication policy."""

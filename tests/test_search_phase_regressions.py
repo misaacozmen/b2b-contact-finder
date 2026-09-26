@@ -339,8 +339,9 @@ def test_real_unknown_e2e_has_one_total_paid_call_without_test_side_break(tmp_pa
     monkeypatch.setattr(config, "ENABLE_LLM_ARBITER", True); monkeypatch.setattr(config, "LLM_ARBITER_BUDGET", 2)
     outcome = main.run(source, allow_paid=True)
     root = next((tmp_path / "runs").iterdir())
-    assert outcome.status is pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED and len(transport.journal) == 1
-    assert not (root / "output" / "artifacts").exists()
+    assert outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE and len(transport.journal) == 1
+    assert json.loads((root / "output" / "run_status.json").read_text(encoding="utf-8"))["run_status"] == "TAMAMLANDI"
+    assert (root / "output" / "rapor.md").is_file()
     _capture_scenario("unknown_item_stop", root / "state" / "progress.sqlite3", run_root=root, transport=transport, outcome=outcome)
 
 
@@ -1773,10 +1774,10 @@ def test_unknown_checkpoint_active_resume_is_valid_and_no_network_occurs(tmp_pat
     recorder = RecordingPaidTransport([requests.ReadTimeout("post-send")])
     runs = _real_run_setup(tmp_path, monkeypatch, recorder)
     first = main.run(source, allow_paid=True); root = next(runs.iterdir())
-    assert first.status is pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED
+    assert first.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE
     runtime.reset(); search.reset_run_state()
     resumed = main.run(source, allow_paid=True, resume_run=root)
-    assert resumed.status is pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED and len(recorder.journal) == 1
+    assert resumed.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE_RESUME_VERIFIED and len(recorder.journal) == 1
 
 
 @pytest.mark.parametrize("mutation", ["positive", "cross", "excess", "missing_attribution", "cap"])

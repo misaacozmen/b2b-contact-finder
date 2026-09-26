@@ -29,6 +29,7 @@ from modules import (
     output_artifacts,
     replay_snapshot,
     report,
+    run_report,
     runtime,
     runtime_paths,
     run_budget,
@@ -284,42 +285,46 @@ def _prepare_provider_work_items(
 ) -> None:
     """Materialize only provider jobs whose request identity is known now."""
     for idx in item_indexes:
-        record = company_records[idx]
-        def ensure_work(**kwargs):
-            work = checkpoint.ensure_provider_work_item(**kwargs)
-            if work.get("query_fingerprint"):
-                checkpoint.reconcile_provider_work_item_to_flight(
-                    run_id=run_id, job_fingerprint=work["job_fingerprint"],
-                )
-            return work
-        # Primary Bright Data work is frozen by the durable query plan.
-        if paid_settings["search_provider"] == "brightdata":
-            # Only the next query has a concrete dispatch identity before the
-            # production search path runs. Later planned queries become jobs
-            # when the real query executor prepares them; pre-materializing
-            # every unused fallback creates phantom READY work after success.
-            for query in checkpoint.load_paid_query_plan(run_id, idx)[:1]:
-                fingerprint = search.brightdata_request_fingerprint(query)
-                flight = checkpoint.load_provider_query_flight(
-                    run_id=run_id, provider="brightdata",
-                    query_fingerprint=search._brightdata_flight_fingerprint(query),
-                )
-                state = "READY"
-                terminal_reason = ""
-                if flight and str(flight.get("state", "")) in {"DONE", "FAILED", "UNKNOWN"}:
-                    durable_result = flight.get("result") if isinstance(flight.get("result"), dict) else {}
-                    if str(durable_result.get("result_reason", "")) != "dispatch_not_allocated":
-                        state = str(flight["state"])
-                        terminal_reason = "durable_flight_terminal"
-                ensure_work(
-                    run_id=run_id, item_index=idx,
-                    source_record_id=str(record.get("source_record_id", "")),
-                    provider="brightdata", operation="search",
-                    request_fingerprint=fingerprint,
-                    query_fingerprint=search._brightdata_flight_fingerprint(query),
-                    plan_version=1, need_class="website",
-                    state=state, terminal_reason=terminal_reason,
-                )
+        try:
+            record = company_records[idx]
+            def ensure_work(**kwargs):
+                work = checkpoint.ensure_provider_work_item(**kwargs)
+                if work.get("query_fingerprint"):
+                    checkpoint.reconcile_provider_work_item_to_flight(
+                        run_id=run_id, job_fingerprint=work["job_fingerprint"],
+                    )
+                return work
+            # Primary Bright Data work is frozen by the durable query plan.
+            if paid_settings["search_provider"] == "brightdata":
+                # Only the next query has a concrete dispatch identity before the
+                # production search path runs. Later planned queries become jobs
+                # when the real query executor prepares them; pre-materializing
+                # every unused fallback creates phantom READY work after success.
+                for query in checkpoint.load_paid_query_plan(run_id, idx)[:1]:
+                    fingerprint = search.brightdata_request_fingerprint(query)
+                    flight = checkpoint.load_provider_query_flight(
+                        run_id=run_id, provider="brightdata",
+                        query_fingerprint=search._brightdata_flight_fingerprint(query),
+                    )
+                    state = "READY"
+                    terminal_reason = ""
+                    if flight and str(flight.get("state", "")) in {"DONE", "FAILED", "UNKNOWN"}:
+                        durable_result = flight.get("result") if isinstance(flight.get("result"), dict) else {}
+                        if str(durable_result.get("result_reason", "")) != "dispatch_not_allocated":
+                            state = str(flight["state"])
+                            terminal_reason = "durable_flight_terminal"
+                    ensure_work(
+                        run_id=run_id, item_index=idx,
+                        source_record_id=str(record.get("source_record_id", "")),
+                        provider="brightdata", operation="search",
+                        request_fingerprint=fingerprint,
+                        query_fingerprint=search._brightdata_flight_fingerprint(query),
+                        plan_version=1, need_class="website",
+                        state=state, terminal_reason=terminal_reason,
+                    )
+        except (checkpoint.EvidenceInvariant, checkpoint.StateTransitionInvariant, checkpoint.LedgerInvariant, checkpoint.OutcomeInvariant) as exc:
+            logging.getLogger(__name__).exception("provider work preparation invariant isolated item=%s", idx)
+            checkpoint.mark_item_invariant_failure(run_id=run_id, item_index=idx, error=exc)
 
 
 def _materialize_observed_search_jobs(
@@ -329,92 +334,96 @@ def _materialize_observed_search_jobs(
     for idx, row in results_by_index.items():
         if idx < 0 or idx >= len(company_records) or not isinstance(row, dict):
             continue
-        source = str(company_records[idx].get("source_record_id", ""))
-        trace = row.get("__search_trace", ())
-        if not isinstance(trace, (list, tuple)):
-            trace = ()
-        queries: list[tuple[str, str]] = []
-        primary_plan = set(checkpoint.load_paid_query_plan(run_id, idx))
-        for entry in trace:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("source", "")).casefold() == "brightdata":
-                query = str(entry.get("query", "")).strip()
-                if query in primary_plan:
-                    phase = str(entry.get("phase", "primary"))
-                    queries.append((query, "website" if phase == "primary" else "website_discovery"))
-        for query_kind in ("adaptive", "targeted", "fallback"):
-            entries = checkpoint.load_paid_query_plan_entries(
-                run_id, idx, query_kind=query_kind,
-            )
-            queries.extend(
-                (entry["query"], "website_discovery") for entry in entries
-            )
-        # A frozen targeted plan is not itself an executed provider job. Only
-        # queries the production executor actually attempted (including a
-        # durable dispatch deferral) may enter the work ledger here. A query
-        # can occur in both primary and adaptive traces; materialize that
-        # logical request once, preferring its primary classification.
-        unique_queries: dict[str, tuple[str, str, str]] = {}
-        for query, need_class in queries:
-            query = " ".join(query.split())
-            request_fingerprint = search.brightdata_request_fingerprint(query)
-            query_fingerprint = search._brightdata_flight_fingerprint(query)
-            previous = unique_queries.get(request_fingerprint)
-            if previous:
-                if previous[2] != query_fingerprint:
-                    raise checkpoint.ResumeInvariant("provider work item identity drift")
-                if previous[1] == "website" or need_class != "website":
+        try:
+            source = str(company_records[idx].get("source_record_id", ""))
+            trace = row.get("__search_trace", ())
+            if not isinstance(trace, (list, tuple)):
+                trace = ()
+            queries: list[tuple[str, str]] = []
+            primary_plan = set(checkpoint.load_paid_query_plan(run_id, idx))
+            for entry in trace:
+                if not isinstance(entry, dict):
                     continue
-            unique_queries[request_fingerprint] = (query, need_class, query_fingerprint)
-        for request_fingerprint, (query, need_class, query_fingerprint) in unique_queries.items():
-            existing = checkpoint.provider_work_item_for_request(
-                run_id=run_id, item_index=idx, provider="brightdata",
-                operation="search", request_fingerprint=request_fingerprint,
-            )
-            if existing:
-                if existing["query_fingerprint"] != query_fingerprint:
-                    raise checkpoint.ResumeInvariant("provider work item identity drift")
-                # Once a logical job is durable, its original classification
-                # is immutable across replayed or overlapping query traces.
-                need_class = existing["need_class"]
-            flight = checkpoint.load_provider_query_flight(
-                run_id=run_id, provider="brightdata",
-                query_fingerprint=query_fingerprint,
-            )
-            state = "READY"
-            terminal_reason = ""
-            if flight and str(flight.get("state", "")) in {"DONE", "FAILED", "UNKNOWN"}:
-                result = flight.get("result") if isinstance(flight.get("result"), dict) else {}
-                if str(result.get("result_reason", "")) != "dispatch_not_allocated":
-                    state = str(flight["state"])
-                    terminal_reason = "durable_flight_terminal"
-            work = checkpoint.ensure_provider_work_item(
-                run_id=run_id, item_index=idx, source_record_id=source,
-                provider="brightdata", operation="search",
-                request_fingerprint=request_fingerprint,
-                query_fingerprint=query_fingerprint,
-                plan_version=1, need_class=need_class,
-                state=state, terminal_reason=terminal_reason,
-            )
-            checkpoint.reconcile_provider_work_item_to_flight(
-                run_id=run_id, job_fingerprint=work["job_fingerprint"],
-            )
-        pending_providers = checkpoint.mark_item_paid_pending_for_work(
-            run_id=run_id, item_index=idx,
-        )
-        if pending_providers:
-            row["paid_state"] = "PENDING"
-            row["dispatch_pending_providers"] = pending_providers
-            row["__paid_escalation_complete"] = False
-        else:
-            row["dispatch_pending_providers"] = []
-            reconciled = checkpoint.reconcile_paid_item_state_after_work_materialization(
+                if str(entry.get("source", "")).casefold() == "brightdata":
+                    query = str(entry.get("query", "")).strip()
+                    if query in primary_plan:
+                        phase = str(entry.get("phase", "primary"))
+                        queries.append((query, "website" if phase == "primary" else "website_discovery"))
+            for query_kind in ("adaptive", "targeted", "fallback"):
+                entries = checkpoint.load_paid_query_plan_entries(
+                    run_id, idx, query_kind=query_kind,
+                )
+                queries.extend(
+                    (entry["query"], "website_discovery") for entry in entries
+                )
+            # A frozen targeted plan is not itself an executed provider job. Only
+            # queries the production executor actually attempted (including a
+            # durable dispatch deferral) may enter the work ledger here. A query
+            # can occur in both primary and adaptive traces; materialize that
+            # logical request once, preferring its primary classification.
+            unique_queries: dict[str, tuple[str, str, str]] = {}
+            for query, need_class in queries:
+                query = " ".join(query.split())
+                request_fingerprint = search.brightdata_request_fingerprint(query)
+                query_fingerprint = search._brightdata_flight_fingerprint(query)
+                previous = unique_queries.get(request_fingerprint)
+                if previous:
+                    if previous[2] != query_fingerprint:
+                        raise checkpoint.ResumeInvariant("provider work item identity drift")
+                    if previous[1] == "website" or need_class != "website":
+                        continue
+                unique_queries[request_fingerprint] = (query, need_class, query_fingerprint)
+            for request_fingerprint, (query, need_class, query_fingerprint) in unique_queries.items():
+                existing = checkpoint.provider_work_item_for_request(
+                    run_id=run_id, item_index=idx, provider="brightdata",
+                    operation="search", request_fingerprint=request_fingerprint,
+                )
+                if existing:
+                    if existing["query_fingerprint"] != query_fingerprint:
+                        raise checkpoint.ResumeInvariant("provider work item identity drift")
+                    # Once a logical job is durable, its original classification
+                    # is immutable across replayed or overlapping query traces.
+                    need_class = existing["need_class"]
+                flight = checkpoint.load_provider_query_flight(
+                    run_id=run_id, provider="brightdata",
+                    query_fingerprint=query_fingerprint,
+                )
+                state = "READY"
+                terminal_reason = ""
+                if flight and str(flight.get("state", "")) in {"DONE", "FAILED", "UNKNOWN"}:
+                    result = flight.get("result") if isinstance(flight.get("result"), dict) else {}
+                    if str(result.get("result_reason", "")) != "dispatch_not_allocated":
+                        state = str(flight["state"])
+                        terminal_reason = "durable_flight_terminal"
+                work = checkpoint.ensure_provider_work_item(
+                    run_id=run_id, item_index=idx, source_record_id=source,
+                    provider="brightdata", operation="search",
+                    request_fingerprint=request_fingerprint,
+                    query_fingerprint=query_fingerprint,
+                    plan_version=1, need_class=need_class,
+                    state=state, terminal_reason=terminal_reason,
+                )
+                checkpoint.reconcile_provider_work_item_to_flight(
+                    run_id=run_id, job_fingerprint=work["job_fingerprint"],
+                )
+            pending_providers = checkpoint.mark_item_paid_pending_for_work(
                 run_id=run_id, item_index=idx,
             )
-            if reconciled:
-                row.update(reconciled)
-                row["__paid_escalation_complete"] = reconciled["paid_state"] != "PENDING"
+            if pending_providers:
+                row["paid_state"] = "PENDING"
+                row["dispatch_pending_providers"] = pending_providers
+                row["__paid_escalation_complete"] = False
+            else:
+                row["dispatch_pending_providers"] = []
+                reconciled = checkpoint.reconcile_paid_item_state_after_work_materialization(
+                    run_id=run_id, item_index=idx,
+                )
+                if reconciled:
+                    row.update(reconciled)
+                    row["__paid_escalation_complete"] = reconciled["paid_state"] != "PENDING"
+        except (checkpoint.EvidenceInvariant, checkpoint.StateTransitionInvariant, checkpoint.LedgerInvariant, checkpoint.OutcomeInvariant) as exc:
+            logging.getLogger(__name__).exception("observed search job materialization invariant isolated item=%s", idx)
+            checkpoint.mark_item_invariant_failure(run_id=run_id, item_index=idx, error=exc)
 
 
 def _verify_complete_artifacts(run_root: Path, manifest: dict) -> None:
@@ -647,6 +656,37 @@ def _durable_output_rows(run_id: str, fallback: dict[int, dict] | None = None) -
     return rows
 
 
+def _write_run_report(
+    *, run_id: str, output_root: Path, fallback: dict[int, dict] | None,
+    run_status: str, status_detail: str, elapsed_seconds: float | None,
+    telemetry: dict | None = None,
+) -> dict[str, str]:
+    logger = logging.getLogger(__name__)
+    logger.info("=== AŞAMA 3/3: RAPOR — %s ===", run_status)
+    try:
+        rows = _durable_output_rows(run_id, fallback)
+    except Exception:
+        logger.exception("durable output rows could not be loaded for report run_id=%s", run_id)
+        rows = list((fallback or {}).values())
+    if telemetry is None:
+        try:
+            telemetry = checkpoint.derive_telemetry(run_id)
+        except Exception:
+            logger.exception("run telemetry could not be loaded for report run_id=%s", run_id)
+            telemetry = runtime.snapshot()
+    try:
+        return run_report.write_run_report(
+            rows, output_root=output_root, run_status=run_status,
+            status_detail=status_detail, elapsed_seconds=elapsed_seconds,
+            telemetry=telemetry,
+        )
+    except Exception:
+        # The report writer's contract is never to raise; preserve pipeline
+        # outcomes even if a future implementation violates that contract.
+        logger.exception("run report writer failed unexpectedly run_id=%s", run_id)
+        return {"run_report": "unexpected_writer_exception"}
+
+
 def _drain_memory_outbox(run_id: str, *, replay: bool) -> None:
     from modules import entity_memory
     if replay:
@@ -712,6 +752,7 @@ def _run_pipeline_impl(
     from_run_manifest: Path | None = None,
 ) -> str:
     owned_lease: dict[str, Any] = {}
+    report_context: dict[str, Any] = {}
     try:
         return _run_pipeline_impl_body(
             input_file, output_dir=output_dir, companies=companies,
@@ -724,7 +765,26 @@ def _run_pipeline_impl(
             resume_run_dir=resume_run_dir,
             from_run_manifest=from_run_manifest,
             _owned_lease=owned_lease,
+            _report_context=report_context,
         )
+    except BaseException as exc:
+        run_id = str(report_context.get("run_id", ""))
+        if run_id:
+            _write_run_report(
+                run_id=run_id,
+                output_root=Path(report_context["output_root"]),
+                fallback=report_context.get("results_by_index"),
+                run_status=(
+                    "KISMI_KULLANICI_DURDURDU"
+                    if isinstance(exc, KeyboardInterrupt) else "KISMI_KOSU_HATASI"
+                ),
+                status_detail=f"{type(exc).__name__}:{str(exc)[:300]}",
+                elapsed_seconds=max(
+                    0.0,
+                    time.monotonic() - float(report_context.get("start_time", time.monotonic())),
+                ),
+            )
+        raise
     finally:
         lease = owned_lease.get("lease")
         if lease is not None:
@@ -761,6 +821,7 @@ def _run_pipeline_impl_body(
     resume_run_dir: Path | None = None,
     from_run_manifest: Path | None = None,
     _owned_lease: dict[str, Any] | None = None,
+    _report_context: dict[str, Any] | None = None,
 ) -> str:
     active_scheduler_heartbeats: dict[int, _SchedulerProgressHeartbeat] = {}
     previous_paid_enabled = bool(getattr(config, "PAID_ENABLED", True))
@@ -940,6 +1001,13 @@ def _run_pipeline_impl_body(
         elif run_root.name != context.run_id:
             raise ValueError("--run-dir must end with the canonical run_id")
     manifest_path = run_root / "manifest.json"
+    if _report_context is not None:
+        _report_context.update({
+            "run_id": context.run_id,
+            "output_root": run_root / "output",
+            "results_by_index": {},
+            "start_time": start_time,
+        })
     lease = run_context.RunLease(run_root)
     lease.acquire()
     if _owned_lease is not None:
@@ -1043,6 +1111,11 @@ def _run_pipeline_impl_body(
                     },
                 )
                 run_context.validate_run_bundle(run_root, expected_input_hash=input_hash, expected_config_hash=run_config.sha256, expected_source_ids=[record["source_record_id"] for record in company_records], profile="COMPLETE")
+            _write_run_report(
+                run_id=context.run_id, output_root=run_root / "output", fallback=None,
+                run_status="TAMAMLANDI", status_detail="COMPLETE_RESUME_VERIFIED",
+                elapsed_seconds=max(0.0, time.monotonic() - start_time),
+            )
             return PipelineOutcome(PipelineOutcomeStatus.COMPLETE_RESUME_VERIFIED, "COMPLETE_RESUME_VERIFIED")
         # FINALIZING resumes reconcile the immutable artifact boundary below;
         # they must not enter either provider phase.
@@ -1098,6 +1171,11 @@ def _run_pipeline_impl_body(
             )
             if any(entry["state"] not in {"DONE", "SKIPPED_REPLAY"} for entry in checkpoint.load_memory_outbox_entries(context.run_id)):
                 raise checkpoint.OutcomeInvariant("prepared finalization left memory outbox entries")
+            _write_run_report(
+                run_id=context.run_id, output_root=run_root / "output", fallback=None,
+                run_status="TAMAMLANDI", status_detail="FINALIZATION_RESUME_RECONCILED",
+                elapsed_seconds=max(0.0, time.monotonic() - start_time),
+            )
             return PipelineOutcome(PipelineOutcomeStatus.FINALIZATION_RESUME_RECONCILED, "FINALIZATION_RESUME_RECONCILED")
     ensure_directories()
     logger = setup_logging()
@@ -1146,6 +1224,13 @@ def _run_pipeline_impl_body(
         runtime.restore(prior_state["runtime_snapshot"])
     results_by_index: dict[int, dict] = {}
     results_by_index.update(checkpoint.load_results_by_id(context.run_id))
+    if _report_context is not None:
+        _report_context.update({
+            "run_id": context.run_id,
+            "output_root": run_root / "output",
+            "results_by_index": results_by_index,
+            "start_time": start_time,
+        })
 
     item_states = {item["item_index"]: item for item in checkpoint.load_run_items(context.run_id)}
     checkpoint.reconcile_unknown_provider_calls(context.run_id)
@@ -1212,6 +1297,14 @@ def _run_pipeline_impl_body(
         def process_one(idx: int, record: dict):
             runtime.set_item_context(idx, phase_name.lower())
             runtime.set_source_record_id(record.get("source_record_id", ""))
+            if paid_phase:
+                gaps = record.get("field_gaps", record.get("missing_fields", ""))
+                if isinstance(gaps, (list, tuple, set)):
+                    gaps = ",".join(sorted(str(value) for value in gaps))
+                if not gaps:
+                    prior_row = results_by_index.get(idx) or {}
+                    gaps = ",".join(field for field in ("website", "email", "phone") if not prior_row.get(field))
+                logger.info("[ÜCRETLİ] Processing %s: %s — eksik: %s", idx + 1, record.get("company", ""), gaps)
             if paid_phase and int(item_states.get(idx, {}).get("paid_attempts", 0)) > 0:
                 prior = results_by_index.get(idx) or {}
                 prior_trace = prior.get("__search_trace", ())
@@ -1311,9 +1404,22 @@ def _run_pipeline_impl_body(
                         continue
                     idx, row = result
                 except Exception as exc:
+                    idx = futures[future]
+                    if paid_phase and isinstance(exc, (
+                        checkpoint.EvidenceInvariant, checkpoint.StateTransitionInvariant,
+                        checkpoint.LedgerInvariant, checkpoint.OutcomeInvariant,
+                    )):
+                        logger.exception("paid item invariant isolated item=%s", idx)
+                        checkpoint.mark_item_invariant_failure(
+                            run_id=context.run_id, item_index=idx, error=exc,
+                        )
+                        item_states[idx] = next(
+                            item for item in checkpoint.load_run_items(context.run_id)
+                            if int(item["item_index"]) == int(idx)
+                        )
+                        continue
                     if isinstance(exc, checkpoint.SchedulerInvariantError):
                         raise
-                    idx = futures[future]
                     company = company_records[idx]["company"]
                     logger.exception("Unhandled processing failure for %s", company)
                     if not paid_phase:
@@ -1532,16 +1638,32 @@ def _run_pipeline_impl_body(
                     scheduler_states = classify_scheduler_states(row, attempt_number=int(row.get("attempt_number", 1)), publication_gate=content_decision_ready(row))
                     free_state = str(scheduler_states["free_state"])
                     paid_state = str(scheduler_states["paid_state"])
-                checkpoint.save_item_transaction(
-                    run_id=context.run_id, item_index=idx,
-                    source_record_id=company_records[idx]["source_record_id"], payload=row,
-                    free_state=free_state,
-                    paid_state=paid_state,
-                    paid_required=bool(scheduler_states["paid_required"]),
-                    free_attempts=int(row.get("attempt_number", 1)),
-                    paid_attempts=(int(existing_item.get("paid_attempts", 0)) + 1) if paid_phase else int(existing_item.get("paid_attempts", 0)),
-                    last_error=attempt_reason if paid_phase else str(row.get("reason", "")),
-                )
+                try:
+                    checkpoint.save_item_transaction(
+                        run_id=context.run_id, item_index=idx,
+                        source_record_id=company_records[idx]["source_record_id"], payload=row,
+                        free_state=free_state,
+                        paid_state=paid_state,
+                        paid_required=bool(scheduler_states["paid_required"]),
+                        free_attempts=int(row.get("attempt_number", 1)),
+                        paid_attempts=(int(existing_item.get("paid_attempts", 0)) + 1) if paid_phase else int(existing_item.get("paid_attempts", 0)),
+                        last_error=attempt_reason if paid_phase else str(row.get("reason", "")),
+                    )
+                except (
+                    checkpoint.EvidenceInvariant, checkpoint.StateTransitionInvariant,
+                    checkpoint.LedgerInvariant, checkpoint.OutcomeInvariant,
+                ) as exc:
+                    if not paid_phase:
+                        raise
+                    logger.exception("paid item persistence invariant isolated item=%s", idx)
+                    checkpoint.mark_item_invariant_failure(
+                        run_id=context.run_id, item_index=idx, error=exc,
+                    )
+                    item_states[idx] = next(
+                        item for item in checkpoint.load_run_items(context.run_id)
+                        if int(item["item_index"]) == int(idx)
+                    )
+                    continue
                 if paid_phase and attempt_result == "NO_CALL_NEEDED" and attempt_reason == "supplied_website_publishable_at_paid_entry":
                     checkpoint.record_paid_no_call_evidence(
                         run_id=context.run_id, item_index=idx,
@@ -1582,6 +1704,7 @@ def _run_pipeline_impl_body(
         config.LINKEDIN_COMPANY_REQUEST_BUDGET = 0
         config.LLM_ARBITER_BUDGET = 0
         runtime.record("pipeline.free_pass_companies", len(pending))
+        logger.info("=== AŞAMA 1/3: ÜCRETSİZ ARAMA — %s firma ===", len(pending))
         if resume_phase not in {"PAID", "FINALIZING", "COMPLETE"}:
             execute_phase(pending, paid_phase=False)
 
@@ -1640,12 +1763,30 @@ def _run_pipeline_impl_body(
         if escalation and not allow_paid:
             if resume_phase == "FREE":
                 checkpoint.transition_phase(context.run_id, "PAID", expected_count=len(company_records))
+                context = context.with_phase("PAID")
+                run_context.write_manifest(
+                    manifest_path, context, run_config, complete=False,
+                    extra={
+                        "phase": "PAID", "paid_enabled": False,
+                        "paid_pending": len(escalation),
+                        "paid_query_limit_per_company": paid_query_limit,
+                        **query_plan_receipt,
+                    },
+                )
             if not runtime.drain_operational_metrics(context.run_id, timeout_seconds=2.0):
                 if _owned_lease is not None:
                     _owned_lease["handoff_metric_drain_failed"] = True
                 raise RuntimeError(
                     "handoff was not published because operational metrics could not be drained"
                 )
+            _write_run_report(
+                run_id=context.run_id, output_root=run_root / "output",
+                fallback=results_by_index,
+                run_status="KISMI_UCRETLI_ONAY_BEKLIYOR",
+                status_detail=PipelineOutcomeStatus.PAID_PENDING_APPROVAL.value,
+                elapsed_seconds=max(0.0, time.monotonic() - start_time),
+                telemetry=checkpoint.derive_telemetry(context.run_id),
+            )
             if _owned_lease is not None:
                 _owned_lease["handoff_sealing"] = True
             # Derive the last mutable telemetry view before sealing.  From this
@@ -1711,10 +1852,24 @@ def _run_pipeline_impl_body(
             if _owned_lease is not None:
                 _owned_lease["handoff_frozen"] = True
             return PipelineOutcome(PipelineOutcomeStatus.PAID_PENDING_APPROVAL, "PAID_PENDING_APPROVAL")
+        if resume_phase != "FINALIZING" and not (paid_escalation_enabled and escalation):
+            logger.info("=== AŞAMA 2/3: ÜCRETLİ TAMAMLAMA ATLANDI — eksik alanı olan firma yok veya ücretli kapalı ===")
         if resume_phase != "FINALIZING" and paid_escalation_enabled and escalation:
+            skipped_complete = max(0, len(company_records) - len(escalation))
+            logger.info("=== AŞAMA 2/3: ÜCRETLİ TAMAMLAMA — %s firma (eksiksiz olduğu için atlanan: %s) ===", len(escalation), skipped_complete)
             runtime.record("pipeline.paid_escalation_companies", len(escalation))
             if resume_phase != "PAID":
                 checkpoint.transition_phase(context.run_id, "PAID", expected_count=len(company_records))
+                context = context.with_phase("PAID")
+                run_context.write_manifest(
+                    manifest_path, context, run_config, complete=False,
+                    extra={
+                        "phase": "PAID", "paid_enabled": run_config.paid_enabled,
+                        "paid_pending": len(escalation),
+                        "paid_query_limit_per_company": paid_query_limit,
+                        **query_plan_receipt,
+                    },
+                )
             pending_escalation = list(escalation)
             paid_round_ordinal = 0
             while pending_escalation:
@@ -1850,6 +2005,13 @@ def _run_pipeline_impl_body(
                             **checkpoint.paid_query_plan_receipt(context.run_id),
                         },
                     )
+                    _write_run_report(
+                        run_id=context.run_id, output_root=run_root / "output",
+                        fallback=results_by_index,
+                        run_status="KISMI_ZAMANLAYICI_DURDU",
+                        status_detail=PipelineOutcomeStatus.SCHEDULER_STALLED.value,
+                        elapsed_seconds=max(0.0, time.monotonic() - start_time),
+                    )
                     return PipelineOutcome(
                         PipelineOutcomeStatus.SCHEDULER_STALLED,
                         PipelineOutcomeStatus.SCHEDULER_STALLED.value,
@@ -1889,6 +2051,13 @@ def _run_pipeline_impl_body(
                             **checkpoint.paid_query_plan_receipt(context.run_id),
                         },
                     )
+                    _write_run_report(
+                        run_id=context.run_id, output_root=run_root / "output",
+                        fallback=results_by_index,
+                        run_status="KISMI_ZAMANLAYICI_DURDU",
+                        status_detail=PipelineOutcomeStatus.SCHEDULER_STALLED.value,
+                        elapsed_seconds=max(0.0, time.monotonic() - start_time),
+                    )
                     return PipelineOutcome(
                         PipelineOutcomeStatus.SCHEDULER_STALLED,
                         PipelineOutcomeStatus.SCHEDULER_STALLED.value,
@@ -1926,31 +2095,25 @@ def _run_pipeline_impl_body(
         manifest_path, context, run_config, complete=False,
         extra=checkpoint.paid_query_plan_receipt(context.run_id),
     )
-    checkpoint.validate_paid_evidence(context.run_id)
-    manual_review_items = [
-        item for item in checkpoint.load_run_items(context.run_id)
-        if item.get("paid_required") and item.get("paid_state") in {"UNKNOWN", "BLOCKED_BUDGET"}
-    ]
-    if manual_review_items:
-        context = context.with_phase("PAID")
-        run_context.write_manifest(
-            manifest_path, context, run_config, complete=False,
-            extra={
-                "phase": "PAID",
-                "paid_pending": 0,
-                "manual_authorization_review_required": True,
-                "manual_review_item_indexes": [item["item_index"] for item in manual_review_items],
-                "paid_query_limit_per_company": paid_query_limit,
-                **checkpoint.paid_query_plan_receipt(context.run_id),
-            },
+    evidence_result = checkpoint.validate_paid_evidence(context.run_id, collect=True)
+    for violation in evidence_result.get("violations", []):
+        checkpoint.mark_item_invariant_failure(
+            run_id=context.run_id,
+            item_index=int(violation["item_index"]),
+            error=checkpoint.EvidenceInvariant(str(violation.get("error", ""))),
         )
-        return PipelineOutcome(PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED, "PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED")
+    checkpoint.terminalize_unresolved_paid_items(context.run_id)
 
     if any(str(item.get("quarantine_state", "")) == "HANDOFF_PENDING" for item in checkpoint.load_run_items(context.run_id)):
         checkpoint.release_handoff_pending(context.run_id, expected_count=len(company_records))
 
     if resume_phase != "FINALIZING":
         checkpoint.transition_phase(context.run_id, "FINALIZING", expected_count=len(company_records))
+        context = context.with_phase("FINALIZING")
+        run_context.write_manifest(
+            manifest_path, context, run_config, complete=False,
+            extra={"phase": "FINALIZING", **checkpoint.paid_query_plan_receipt(context.run_id)},
+        )
     runtime.set_phase("FINALIZING")
     existing_intent = checkpoint.load_finalization_intent(context.run_id)
     if existing_intent and existing_intent.get("status") == "STARTED":
@@ -1997,6 +2160,13 @@ def _run_pipeline_impl_body(
         raise checkpoint.OutcomeInvariant("writer must return immutable artifact metadata")
     memory_rows = getattr(artifact_result, "entity_memory_rows", [])
     _verify_artifact_metadata(run_root, artifacts)
+    _write_run_report(
+        run_id=context.run_id, output_root=run_root / "output",
+        fallback=results_by_index, run_status="TAMAMLANDI",
+        status_detail="normal_finalization",
+        elapsed_seconds=float(output_context.get("elapsed_seconds", finalization_elapsed)),
+        telemetry=frozen_telemetry,
+    )
     run_context.validate_run_bundle(
         run_root, expected_input_hash=input_hash,
         expected_config_hash=run_config.sha256,

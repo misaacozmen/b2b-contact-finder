@@ -1483,8 +1483,12 @@ def test_p11_group_c_real_terminal_follower_under_small_fixture_budget(tmp_path,
         for row in transport_rows
     ), "terminal follower did not dispatch its distinct durably planned query in the same round"
     assert all(row["call_id"] in call_by_id and call_by_id[row["call_id"]][2] == row["provider"] for row in transport_rows)
-    assert getattr(outcome.status, "value", str(outcome.status)) == pipeline_runner.PipelineOutcomeStatus.PAID_MANUAL_AUTHORIZATION_REVIEW_REQUIRED.value
-    assert manifest["manual_review_item_indexes"] == [1]
+    assert outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE
+    assert (run_root / "output" / "rapor.md").is_file()
+    run_status = json.loads((run_root / "output" / "run_status.json").read_text(encoding="utf-8"))
+    assert run_status["run_status"] == "TAMAMLANDI"
+    report = (run_root / "output" / "rapor.md").read_text(encoding="utf-8")
+    assert "PETZOO C-001" in report and "paid_budget_exhausted" in report
 
 
 def test_p11_group_f_uses_last_hunter_slots_for_distinct_eligible_sources(tmp_path, monkeypatch):
@@ -1577,11 +1581,10 @@ def test_p04_real_pipeline_post_send_unknown_is_not_retried_or_replaced_by_ddgs(
     assert starts[0]["provider"] == "brightdata"
     assert len(calls) == 1 and calls[0][0:2] == ("brightdata", "UNKNOWN") and calls[0][2]
     assert any(row[0] == "brightdata" and row[1] == "UNKNOWN" for row in work)
-    assert all(row[0] == "brightdata" and row[1] in {"UNKNOWN", "READY"} for row in work)
-    assert all(not row[3] for row in work if row[1] == "READY")
-    assert items == [("UNKNOWN",)]
-    assert manifest["complete"] is False
-    assert getattr(outcome.status, "value", str(outcome.status)) != pipeline_runner.PipelineOutcomeStatus.COMPLETE.value
+    assert all(row[0] == "brightdata" and row[1] in {"UNKNOWN", "FAILED"} for row in work)
+    assert items == [("FAILED",)]
+    assert manifest["complete"] is True
+    assert outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE
     assert len([row for row in transport if row.get("kind") == "paid_transport_terminal"]) == 1
 
 
