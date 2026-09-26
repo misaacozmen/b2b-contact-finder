@@ -182,7 +182,9 @@ class RunStateIsolationTests(unittest.TestCase):
                 "representations": "Example GmbH",
             }])
             record = excel.read_company_records(path)[0]
-            self.assertEqual(record["listed_phone"], "+90 212 555 00 00")
+            self.assertEqual(record["listed_phone"], "02125550000")
+            self.assertEqual(record["listed_phone_raw"], "+90 212 555 00 00")
+            self.assertEqual(record["listed_phone_input_status"], "OK")
             self.assertEqual(record["listed_email"], "info@ornek.example")
             self.assertEqual(record["listed_address"], "İstanbul")
             self.assertEqual(record["brands"], "Örnek")

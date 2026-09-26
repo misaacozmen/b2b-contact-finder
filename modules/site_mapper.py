@@ -44,7 +44,10 @@ def discover(html: str, base_url: str, include_documents: bool = True) -> list[d
     soup = BeautifulSoup(html or "", "html.parser")
 
     def add(raw_url: str, label: str = "") -> None:
-        url = urldefrag(urljoin(base_url, raw_url or ""))[0]
+        try:
+            url = urldefrag(urljoin(base_url, raw_url or ""))[0]
+        except ValueError:
+            return
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             return

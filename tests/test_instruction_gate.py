@@ -370,7 +370,7 @@ class EnrichedInputTests(unittest.TestCase):
 
         self.assertEqual(before, after_input)
         self.assertEqual([row["company"] for row in after_output], ["Alpha", "Beta"])
-        self.assertEqual(after_output[0]["listed_website"], "https://alpha.example")
+        self.assertEqual(after_output[0]["listed_website"], "https://alpha.example/")
         self.assertEqual(after_output[1]["source_detail_status"], "UNAVAILABLE_NO_PROFILE_URL")
 
     def test_texhibition_detail_merge_requires_matching_profile_identity(self):

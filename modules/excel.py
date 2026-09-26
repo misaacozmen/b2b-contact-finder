@@ -8,7 +8,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
 import config
-from modules import redaction
+from modules import redaction, reference_inputs
 
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
@@ -149,6 +149,19 @@ def read_company_records(path: Path) -> list[dict]:
                 "_id": value_for(row, ("_id", "id"), None),
             }
         )
+        record = records[-1]
+        website_value, website_status = reference_inputs.normalize_reference_url(record.get("website"))
+        listed_value, listed_status = reference_inputs.normalize_reference_url(record.get("listed_website"))
+        phone_value, phone_status = reference_inputs.normalize_reference_phone(record.get("listed_phone"))
+        record["website_raw"] = record.get("website") or ""
+        record["listed_website_raw"] = record.get("listed_website") or ""
+        record["listed_phone_raw"] = record.get("listed_phone") or ""
+        record["website"] = website_value
+        record["listed_website"] = listed_value
+        record["listed_phone"] = phone_value
+        record["website_input_status"] = website_status
+        record["listed_website_status"] = listed_status
+        record["listed_phone_input_status"] = phone_status
     return records
 
 
@@ -346,6 +359,8 @@ def write_company_records(path: Path, rows: Iterable[dict]) -> None:
             "listed_legal_name", "source_detail_status", "source_detail_url",
             "source_detail_content_sha256", "source_evidence", "sector", "description",
             "source_record_id", "_id", "listed_phone_status", "listed_address_status",
+            "website_raw", "listed_website_raw", "listed_phone_raw",
+            "website_input_status", "listed_website_status", "listed_phone_input_status",
         ],
         rows,
     )

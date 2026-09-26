@@ -271,7 +271,10 @@ def _request_with_safe_redirects(
             raise requests.exceptions.TooManyRedirects(
                 f"redirect_without_location:{current}"
             )
-        target = urljoin(current, location)
+        try:
+            target = urljoin(current, location)
+        except ValueError as exc:
+            raise requests.exceptions.InvalidURL("invalid_redirect_url") from exc
         target_host = urlparse(target).netloc.casefold()
         if not scorer.same_registrable_domain(original_host, target_host):
             raise requests.exceptions.InvalidURL(f"cross_domain_redirect:{target}")
@@ -739,7 +742,10 @@ def _document_links(html: str, base_url: str) -> list[str]:
     host = urlparse(base_url).netloc.casefold()
     urls = []
     for link in BeautifulSoup(html, "html.parser").find_all("a", href=True):
-        url = urljoin(base_url, link.get("href", ""))
+        try:
+            url = urljoin(base_url, link.get("href", ""))
+        except ValueError:
+            continue
         if not scorer.same_registrable_domain(urlparse(url).netloc.casefold(), host):
             continue
         label = f"{url} {link.get_text(' ', strip=True)}".casefold()
