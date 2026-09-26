@@ -34,13 +34,28 @@ def is_enabled() -> bool:
     )
 
 
+def email_gap_fill_enabled() -> bool:
+    return (
+        bool(getattr(config, "PAID_ENABLED", True))
+        and config.ENABLE_HUNTER_EMAIL_GAP_FILL
+        and bool(config.HUNTER_API_KEY)
+    )
+
+
+def domain_search_request_fingerprint(domain: str) -> str:
+    return runtime.request_fingerprint("hunter", "domain_search", {"domain": domain})
+
+
 def find_domain_emails(domain: str) -> list[dict]:
-    if not is_enabled() or not domain:
+    if not (is_enabled() or email_gap_fill_enabled()) or not domain:
         return runtime.provider_result([], state="NOT_ENABLED", reason="provider_disabled")
     if not runtime.paid_access_allowed("hunter"):
         return runtime.provider_result([], state="NOT_ENABLED", reason="paid_not_authorized")
     try:
-        reservation = runtime.reserve_api("hunter", operation="domain_search", request_fingerprint=runtime.request_fingerprint("hunter", "domain_search", {"domain": domain}))
+        reservation = runtime.reserve_api(
+            "hunter", operation="domain_search",
+            request_fingerprint=domain_search_request_fingerprint(domain),
+        )
         if not reservation:
             LOGGER.warning("Hunter run budget exhausted")
             return runtime.rejected_provider_result(reservation)

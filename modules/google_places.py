@@ -24,6 +24,14 @@ def is_enabled() -> bool:
     return config.ENABLE_GOOGLE_PLACES and bool(config.GOOGLE_PLACES_API_KEY)
 
 
+def text_search_request_fingerprint(company: str) -> str:
+    variants = scorer.search_name_variants(company)
+    query_name = (variants[0] if variants else company).strip()[:100]
+    return runtime.request_fingerprint(
+        "google_places", "text_search", {"query": query_name, "region": "TR"},
+    )
+
+
 def search_company(company: str) -> list[dict]:
     """Return Google-maintained business records without making them trusted candidates yet."""
     global _BUDGET_LATCHED
@@ -50,7 +58,10 @@ def search_company(company: str) -> list[dict]:
         runtime.record("api.google_places.budget_latched")
         return runtime.provider_result([], state="BLOCKED_BUDGET", reason="budget_latched")
     try:
-        reservation = runtime.reserve_api("google_places", operation="text_search", request_fingerprint=runtime.request_fingerprint("google_places", "text_search", {"query": query_name, "region": "TR"}))
+        reservation = runtime.reserve_api(
+            "google_places", operation="text_search",
+            request_fingerprint=text_search_request_fingerprint(company),
+        )
         if not reservation:
             if reservation.reason in {"budget_exhausted", "budget_disabled"} and not _BUDGET_LATCHED:
                 LOGGER.warning("Google Places run budget exhausted; disabling remaining calls")

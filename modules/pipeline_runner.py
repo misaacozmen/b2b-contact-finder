@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -25,7 +26,9 @@ from modules import (
     discovery_coverage,
     entity_resolution,
     excel,
+    field_merge,
     google_places,
+    hunter,
     linkedin_company,
     output_artifacts,
     replay_snapshot,
@@ -221,20 +224,31 @@ def paid_attempt_result(row: dict | None = None, *, exception: BaseException | N
     return "UNKNOWN"
 
 
-def classify_scheduler_states(row: dict, *, attempt_number: int, publication_gate: bool | None = None) -> dict[str, object]:
+def paid_fillable_gaps(row: dict, paid_settings: dict[str, Any]) -> set[str]:
+    gaps = field_merge.field_gaps(row)
+    website_ok = field_merge.field_confidence(row, "website") in field_merge.CONFIDENT
+    fillable: set[str] = set()
+    if "website" in gaps and paid_settings["search_provider"] == "brightdata" and int(paid_settings["brightdata_budget"]) > 0:
+        fillable.add("website")
+    if "phone" in gaps and paid_settings["google_places"] and int(paid_settings["google_places_budget"]) > 0 \
+            and (website_ok or "website" in fillable):
+        fillable.add("phone")
+    if "email" in gaps and paid_settings["hunter_domain"] and int(paid_settings["hunter_budget"]) > 0 \
+            and (website_ok or "website" in fillable):
+        fillable.add("email")
+    return fillable
+
+
+def classify_scheduler_states(row: dict, *, attempt_number: int, paid_gaps: set[str] | None = None) -> dict[str, object]:
     """Produce the three scheduler fields from one durable-free outcome."""
     status = str(row.get("status", "")).upper()
     if status in FREE_FAILURE_STATUSES:
         if int(attempt_number) < 2:
             return {"free_state": "PENDING", "paid_state": "NOT_REQUIRED", "paid_required": False}
         return {"free_state": "FAILED", "paid_state": "PENDING", "paid_required": True}
-    if publication_gate is None:
-        publication_gate = row.get("publication_eligible") is True
-    if status in report.OK_STATUSES and not publication_gate:
-        return {"free_state": "DONE", "paid_state": "PENDING", "paid_required": True}
-    if status in report.OK_STATUSES and publication_gate:
-        return {"free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False}
-    if needs_paid_escalation(row):
+    if paid_gaps is None:
+        paid_gaps = set()
+    if paid_gaps:
         return {"free_state": "DONE", "paid_state": "PENDING", "paid_required": True}
     return {"free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False}
 
@@ -281,13 +295,18 @@ def _inherited_paid_result(row: dict) -> tuple[str, str]:
 
 
 def _prepare_provider_work_items(
-    *, run_id: str, company_records: list[dict], item_indexes: list[int],
+    *, run_id: str, company_records: list[dict], results_by_index: dict[int, dict],
+    item_indexes: list[int],
     paid_settings: dict[str, Any],
 ) -> None:
     """Materialize only provider jobs whose request identity is known now."""
     for idx in item_indexes:
         try:
             record = company_records[idx]
+            row = results_by_index.get(idx)
+            if not isinstance(row, dict):
+                continue
+            gaps = paid_fillable_gaps(row, paid_settings)
             def ensure_work(**kwargs):
                 work = checkpoint.ensure_provider_work_item(**kwargs)
                 if work.get("query_fingerprint"):
@@ -296,7 +315,7 @@ def _prepare_provider_work_items(
                     )
                 return work
             # Primary Bright Data work is frozen by the durable query plan.
-            if paid_settings["search_provider"] == "brightdata":
+            if "website" in gaps and paid_settings["search_provider"] == "brightdata":
                 # Only the next query has a concrete dispatch identity before the
                 # production search path runs. Later planned queries become jobs
                 # when the real query executor prepares them; pre-materializing
@@ -323,6 +342,25 @@ def _prepare_provider_work_items(
                         plan_version=1, need_class="website",
                         state=state, terminal_reason=terminal_reason,
                     )
+            website_ok = field_merge.field_confidence(row, "website") in field_merge.CONFIDENT
+            if website_ok and "phone" in gaps and paid_settings["google_places"] and int(paid_settings["google_places_budget"]) > 0:
+                ensure_work(
+                    run_id=run_id, item_index=idx,
+                    source_record_id=str(record.get("source_record_id", "")),
+                    provider="google_places", operation="text_search",
+                    request_fingerprint=google_places.text_search_request_fingerprint(str(record.get("company", ""))),
+                    plan_version=1, need_class="contact",
+                )
+            if website_ok and "email" in gaps and paid_settings["hunter_domain"] and int(paid_settings["hunter_budget"]) > 0:
+                domain = scorer.normalize_domain(str(row.get("website", "")))
+                if domain:
+                    ensure_work(
+                        run_id=run_id, item_index=idx,
+                        source_record_id=str(record.get("source_record_id", "")),
+                        provider="hunter", operation="domain_search",
+                        request_fingerprint=hunter.domain_search_request_fingerprint(domain),
+                        plan_version=1, need_class="identity",
+                    )
         except (checkpoint.EvidenceInvariant, checkpoint.StateTransitionInvariant, checkpoint.LedgerInvariant, checkpoint.OutcomeInvariant) as exc:
             logging.getLogger(__name__).exception("provider work preparation invariant isolated item=%s", idx)
             checkpoint.mark_item_invariant_failure(run_id=run_id, item_index=idx, error=exc)
@@ -341,22 +379,24 @@ def _materialize_observed_search_jobs(
             if not isinstance(trace, (list, tuple)):
                 trace = ()
             queries: list[tuple[str, str]] = []
-            primary_plan = set(checkpoint.load_paid_query_plan(run_id, idx))
-            for entry in trace:
-                if not isinstance(entry, dict):
-                    continue
-                if str(entry.get("source", "")).casefold() == "brightdata":
-                    query = str(entry.get("query", "")).strip()
-                    if query in primary_plan:
-                        phase = str(entry.get("phase", "primary"))
-                        queries.append((query, "website" if phase == "primary" else "website_discovery"))
-            for query_kind in ("adaptive", "targeted", "fallback"):
-                entries = checkpoint.load_paid_query_plan_entries(
-                    run_id, idx, query_kind=query_kind,
-                )
-                queries.extend(
-                    (entry["query"], "website_discovery") for entry in entries
-                )
+            website_gap = "website" in field_merge.field_gaps(row)
+            if website_gap:
+                primary_plan = set(checkpoint.load_paid_query_plan(run_id, idx))
+                for entry in trace:
+                    if not isinstance(entry, dict):
+                        continue
+                    if str(entry.get("source", "")).casefold() == "brightdata":
+                        query = str(entry.get("query", "")).strip()
+                        if query in primary_plan:
+                            phase = str(entry.get("phase", "primary"))
+                            queries.append((query, "website" if phase == "primary" else "website_discovery"))
+                for query_kind in ("adaptive", "targeted", "fallback"):
+                    entries = checkpoint.load_paid_query_plan_entries(
+                        run_id, idx, query_kind=query_kind,
+                    )
+                    queries.extend(
+                        (entry["query"], "website_discovery") for entry in entries
+                    )
             # A frozen targeted plan is not itself an executed provider job. Only
             # queries the production executor actually attempted (including a
             # durable dispatch deferral) may enter the work ledger here. A query
@@ -407,6 +447,18 @@ def _materialize_observed_search_jobs(
                 checkpoint.reconcile_provider_work_item_to_flight(
                     run_id=run_id, job_fingerprint=work["job_fingerprint"],
                 )
+            if not website_gap:
+                # A successful paid site result makes deferred search queries
+                # obsolete. Leaving those jobs READY keeps a completed contact
+                # fill alive and causes the scheduler to stall on phantom work.
+                for work in checkpoint.load_provider_work_items(
+                    run_id, provider="brightdata", item_index=idx,
+                    states={"READY"},
+                ):
+                    checkpoint.transition_provider_work_item(
+                        run_id=run_id, job_fingerprint=work["job_fingerprint"],
+                        state="NOT_REQUIRED", terminal_reason="website_gap_filled",
+                    )
             pending_providers = checkpoint.mark_item_paid_pending_for_work(
                 run_id=run_id, item_index=idx,
             )
@@ -984,6 +1036,28 @@ def _run_pipeline_impl_body(
             or paid_settings["llm_enabled"]
         )
     )
+    # Keep the pending-approval queue based on the run's recorded planned
+    # budgets. RunConfig deliberately zeros effective budgets until approval,
+    # but those zeros must not erase the gaps that the approval handoff reports.
+    scheduler_paid_settings = dict(paid_settings)
+    if not allow_paid:
+        for provider in ("brightdata", "google_places", "hunter"):
+            detail = budget_details.get(provider, {}) if isinstance(budget_details, dict) else {}
+            if not isinstance(detail, dict):
+                continue
+            explicit_cap = detail.get("explicit_cap")
+            ratio = detail.get("ratio")
+            population = detail.get("population_count", len(company_records))
+            if ratio is not None:
+                planned_budget = math.ceil(max(0, int(population)) * max(0.0, float(ratio)))
+            elif explicit_cap is not None:
+                planned_budget = max(0, int(explicit_cap))
+            else:
+                planned_budget = max(0, int(detail.get("effective_budget", 0) or 0))
+            if explicit_cap is not None:
+                planned_budget = min(planned_budget, max(0, int(explicit_cap)))
+            key = f"{provider}_budget"
+            scheduler_paid_settings[key] = max(int(scheduler_paid_settings.get(key, 0) or 0), planned_budget)
 
     run_signature = json.dumps(
         {
@@ -1277,9 +1351,7 @@ def _run_pipeline_impl_body(
                 provider for provider, enabled, budget in (
                     ("brightdata", paid_settings["search_provider"] == "brightdata", paid_settings["brightdata_budget"]),
                     ("google_places", paid_settings["google_places"], paid_settings["google_places_budget"]),
-                    ("brandfetch", paid_settings["brandfetch"], paid_settings["brandfetch_budget"]),
                     ("hunter", paid_settings["hunter_domain"], paid_settings["hunter_budget"]),
-                    ("linkedin", paid_settings["linkedin_enabled"], paid_settings["linkedin_budget"]),
                     ("llm", paid_settings["llm_enabled"], paid_settings["llm_budget"]),
                 ) if enabled and int(budget) > 0
             ]
@@ -1324,13 +1396,11 @@ def _run_pipeline_impl_body(
             runtime.set_item_context(idx, phase_name.lower())
             runtime.set_source_record_id(record.get("source_record_id", ""))
             if paid_phase:
-                gaps = record.get("field_gaps", record.get("missing_fields", ""))
-                if isinstance(gaps, (list, tuple, set)):
-                    gaps = ",".join(sorted(str(value) for value in gaps))
-                if not gaps:
-                    prior_row = results_by_index.get(idx) or {}
-                    gaps = ",".join(field for field in ("website", "email", "phone") if not prior_row.get(field))
+                prior_row = dict(results_by_index.get(idx) or {})
+                gaps = ",".join(sorted(field_merge.field_gaps(prior_row)))
                 logger.info("[ÜCRETLİ] Processing %s: %s — eksik: %s", idx + 1, record.get("company", ""), gaps)
+                record = dict(record)
+                record["_prior_row"] = prior_row
             if paid_phase and int(item_states.get(idx, {}).get("paid_attempts", 0)) > 0:
                 prior = results_by_index.get(idx) or {}
                 prior_trace = prior.get("__search_trace", ())
@@ -1349,8 +1419,8 @@ def _run_pipeline_impl_body(
                     record = dict(record)
                     record["_paid_resume_queries"] = resume_queries
             if supports_execution_phase:
-                return process_company_fn(idx, record["company"], logger, record.get("website", ""), record, execution_phase=phase_name)
-            return process_company_fn(idx, record["company"], logger, record.get("website", ""), record)
+                return process_company_fn(idx, record["company"], logger, "" if paid_phase else record.get("website", ""), record, execution_phase=phase_name)
+            return process_company_fn(idx, record["company"], logger, "" if paid_phase else record.get("website", ""), record)
         def run_one(idx: int, record: dict):
             runtime.reset_item_stop_state(idx)
             if paid_phase:
@@ -1622,19 +1692,8 @@ def _run_pipeline_impl_body(
                             typed_reason=str(attempt_reason or "local_processing_failure"),
                         )
                 if paid_phase and idx in results_by_index:
-                    previous = results_by_index[idx]
-                    if result_quality_key(previous) > result_quality_key(row):
-                        paid_audit = {key: row.get(key) for key in ("provider_results", "dispatch_pending_providers", "paid_attempt_result", "paid_attempt_reason", "paid_evidence_ref", "paid_result_ref", "call_id", "request_fingerprint") if key in row}
-                        previous_trace = previous.get("__search_trace", [])
-                        current_trace = row.get("__search_trace", [])
-                        row = previous
-                        if isinstance(previous_trace, list) and isinstance(current_trace, list):
-                            seen_trace = {json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) for value in previous_trace}
-                            row["__search_trace"] = previous_trace + [
-                                value for value in current_trace
-                                if json.dumps(value, ensure_ascii=False, sort_keys=True, default=str) not in seen_trace
-                            ]
-                        row.update(paid_audit)
+                    row = field_merge.merge(results_by_index[idx], row)
+                    field_merge.annotate(row, company_records[idx])
                 if existing_item.get("quarantine_state") and not (
                     paid_phase and str(existing_item.get("quarantine_state")) == "HANDOFF_PENDING"
                 ):
@@ -1661,7 +1720,10 @@ def _run_pipeline_impl_body(
                     )
                     scheduler_states = {"free_state": free_state, "paid_state": paid_state, "paid_required": True}
                 else:
-                    scheduler_states = classify_scheduler_states(row, attempt_number=int(row.get("attempt_number", 1)), publication_gate=content_decision_ready(row))
+                    scheduler_states = classify_scheduler_states(
+                        row, attempt_number=int(row.get("attempt_number", 1)),
+                        paid_gaps=paid_fillable_gaps(row, scheduler_paid_settings),
+                    )
                     free_state = str(scheduler_states["free_state"])
                     paid_state = str(scheduler_states["paid_state"])
                 try:
@@ -1785,6 +1847,7 @@ def _run_pipeline_impl_body(
                     )
             _prepare_provider_work_items(
                 run_id=context.run_id, company_records=company_records,
+                results_by_index=results_by_index,
                 item_indexes=paid_indexes, paid_settings=paid_settings,
             )
         query_plan_receipt = checkpoint.paid_query_plan_receipt(context.run_id)
@@ -1933,6 +1996,12 @@ def _run_pipeline_impl_body(
                 _materialize_observed_search_jobs(
                     run_id=context.run_id, company_records=company_records,
                     results_by_index=results_by_index,
+                )
+                _prepare_provider_work_items(
+                    run_id=context.run_id, company_records=company_records,
+                    results_by_index=results_by_index,
+                    item_indexes=[idx for idx, _record in escalation],
+                    paid_settings=paid_settings,
                 )
                 dependency_report = checkpoint.resolve_provider_work_dependencies(context.run_id)
                 for item in checkpoint.load_run_items(context.run_id):

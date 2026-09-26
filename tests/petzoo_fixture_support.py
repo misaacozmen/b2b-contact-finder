@@ -453,10 +453,22 @@ class ReplayPaidTransport:
                         "name": record.get("company", ""),
                     }])
                 elif provider == "hunter":
-                    response = FakeResponse(200, {"data": [{
-                        "domain": urlparse(self._website(record)).hostname or "",
-                        "organization": record.get("company", ""),
-                    }]})
+                    domain = urlparse(self._website(record)).hostname or ""
+                    email_request_shape = {
+                        "method": "GET",
+                        "params": {"domain": domain, "limit": 10},
+                    }
+                    email_request_shape_sha256 = hashlib.sha256(json.dumps(
+                        email_request_shape, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")).hexdigest()
+                    if str(getattr(envelope, "request_shape_sha256", "")) == email_request_shape_sha256:
+                        response = FakeResponse(200, {"data": {"emails": []}})
+                    else:
+                        response = FakeResponse(200, {"data": [{
+                            "domain": domain,
+                            "organization": record.get("company", ""),
+                        }]})
                 elif provider == "linkedin":
                     if operation == "scrape":
                         response = FakeResponse(200, [{

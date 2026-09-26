@@ -135,7 +135,7 @@ def test_advisory_flag_cannot_stop_insufficient_content() -> None:
     }
     ready = __import__("modules.pipeline_runner", fromlist=["content_decision_ready"]).content_decision_ready(row)
     states = __import__("modules.pipeline_runner", fromlist=["classify_scheduler_states"]).classify_scheduler_states(
-        row, attempt_number=1, publication_gate=ready,
+        row, attempt_number=1, paid_gaps={"website"},
     )
     assert not ready
     assert states["paid_required"] is True

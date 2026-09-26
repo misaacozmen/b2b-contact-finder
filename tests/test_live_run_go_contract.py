@@ -90,8 +90,8 @@ def test_provider_fold_reserved_completed_empty_retry_success_and_duplicate_inhe
 def test_free_scheduler_classifier_retries_once_and_never_promotes_failures():
     assert pipeline_runner.classify_scheduler_states({"status": "SEARCH_FAILED"}, attempt_number=1) == {"free_state": "PENDING", "paid_state": "NOT_REQUIRED", "paid_required": False}
     assert pipeline_runner.classify_scheduler_states({"status": "PROCESSING_FAILED"}, attempt_number=2) == {"free_state": "FAILED", "paid_state": "PENDING", "paid_required": True}
-    assert pipeline_runner.classify_scheduler_states({"status": "OK_HIGH_CONFIDENCE", "publication_eligible": False}, attempt_number=1) == {"free_state": "DONE", "paid_state": "PENDING", "paid_required": True}
-    assert pipeline_runner.classify_scheduler_states({"status": "OK_HIGH_CONFIDENCE", "publication_eligible": True}, attempt_number=2) == {"free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False}
+    assert pipeline_runner.classify_scheduler_states({"status": "OK_HIGH_CONFIDENCE", "publication_eligible": False}, attempt_number=1, paid_gaps={"email"}) == {"free_state": "DONE", "paid_state": "PENDING", "paid_required": True}
+    assert pipeline_runner.classify_scheduler_states({"status": "OK_HIGH_CONFIDENCE", "publication_eligible": True}, attempt_number=2, paid_gaps=set()) == {"free_state": "DONE", "paid_state": "NOT_REQUIRED", "paid_required": False}
 
 
 def test_free_query_quota_is_scoped_to_run_and_item(tmp_path: Path):

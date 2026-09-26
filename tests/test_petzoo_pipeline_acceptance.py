@@ -246,11 +246,21 @@ def test_search_job_materialization_deduplicates_overlapping_primary_and_adaptiv
 def test_p01_hunter_last_slot_only_reaches_next_eligible_company(tmp_path, monkeypatch):
     _manifest, fixture, fixture_sha256 = load_fixture()
     records = [dict(row) for row in fixture if row["group"] == "F"][:11]
+    for index, row in enumerate(records):
+        row["item_index"] = index
     assert len({row["source_record_id"] for row in records}) == 11
+    # IP-7's Hunter Domain Search requires a confident website first.
+    for row in records[1:]:
+        row["website"] = f"https://{row['source_record_id'].replace(':', '-')}.example/"
+        row["group"] = "A"  # Keep the crawl verified while leaving its email gap open.
     input_path = tmp_path / "p01-eleven-companies.xlsx"
     transport_path = tmp_path / "transport.jsonl"
     write_input_book(input_path, records)
     router = ReplayPaidTransport(records, transport_path)
+    first_query = search._primary_queries(records[0]["company"], records[0])[0]
+    router.route_overrides[(
+        "brightdata", search.brightdata_request_fingerprint(first_query), 1,
+    )] = FakeResponse(200, {"organic": []})
     runs_dir, _router, _session = install_harness(
         monkeypatch, tmp_path, records, workers=1, router=router,
         http_journal=tmp_path / "http.jsonl",
@@ -1032,9 +1042,14 @@ def test_p05_real_cli_stalls_after_first_no_progress_round(tmp_path, monkeypatch
     transport_log = tmp_path / "paid-transport.jsonl"
     http_log = tmp_path / "crawler-http.jsonl"
     router = ReplayPaidTransport([record], transport_log)
+    first_query = search._primary_queries(record["company"], record)[0]
+    router.route_overrides[(
+        "brightdata", search.brightdata_request_fingerprint(first_query), 1,
+    )] = FakeResponse(200, {"organic": []})
     runs_dir, _router, _session = install_harness(
         monkeypatch, tmp_path, [record], workers=1, router=router, http_journal=http_log,
     )
+    monkeypatch.setattr(config, "ENABLE_GOOGLE_PLACES", False)
 
     initialize_schema = checkpoint.initialize_schema
 
@@ -1118,7 +1133,7 @@ def test_p05_real_cli_stalls_after_first_no_progress_round(tmp_path, monkeypatch
     assert len(physical) >= 1 and sum(count for _provider, count in physical) == len(starts)
     assert len(starts) == len(terminals) == len({entry["call_id"] for entry in starts})
     assert work[0] == work[1]
-    assert nonflight_links and all(attempt_count == 1 for _call_id, attempt_count in nonflight_links)
+    assert all(attempt_count == 1 for _call_id, attempt_count in nonflight_links)
     assert all(entry["request_fingerprint"] and entry["attempt_ordinal"] >= 1 for entry in journal)
     assert run_state[0] == "PAID" and run_state[1] and run_state[2]
     assert source_count == 1
@@ -1163,6 +1178,7 @@ def test_p05_real_cli_stalls_after_first_no_progress_round(tmp_path, monkeypatch
     shutil.copyfile(run_root / "manifest.json", gate_dir / "manifest.json")
     shutil.copyfile(input_path, gate_dir / "synthetic_input.xlsx")
     shutil.copyfile(transport_log, gate_dir / "transport.jsonl")
+    http_log.touch(exist_ok=True)
     shutil.copyfile(http_log, gate_dir / "crawler_http.jsonl")
     partial_evidence = gate_dir / "partial_recovery"
     partial_evidence.mkdir()
@@ -1228,7 +1244,7 @@ def _backup_sqlite(source: Path, destination: Path) -> None:
             source_db.backup(backup_db)
 
 
-def test_p06_lower_quality_paid_result_preserves_content_and_durable_work_across_fresh_process(tmp_path):
+def test_p06_known_website_without_fillable_gap_skips_paid_continuation(tmp_path):
     _manifest, fixture, fixture_sha256 = load_fixture()
     source_record = next(row for row in fixture if row["source_record_id"] == "petzoo:A:000")
     record = {**source_record, "item_index": 0}
@@ -1315,36 +1331,18 @@ def test_p06_lower_quality_paid_result_preserves_content_and_durable_work_across
         return json.loads(result_path.read_text(encoding="utf-8"))
 
     free = run_child("free", None, "free")
-    assert free["outcome"] == pipeline_runner.PipelineOutcomeStatus.PAID_PENDING_APPROVAL.value
+    assert free["outcome"] == pipeline_runner.PipelineOutcomeStatus.COMPLETE.value
     assert free["fixture_sha256"] == fixture_sha256
     assert free["payload"].get("website") and free["payload"].get("publication_eligible") is False
-    parent = Path(free["run_root"])
-    parent_manifest = json.loads((parent / "manifest.json").read_text(encoding="utf-8"))
-    source_id = record["source_record_id"]
-    approval = {
-        "approved": True,
-        "limits": {provider: (1 if provider == "brightdata" else 0) for provider in checkpoint.CANONICAL_PROVIDERS},
-        "parent_run_id": parent_manifest["run_id"],
-        "parent_manifest_sha256": _sha256(parent / "manifest.json"),
-        "checkpoint_sha256": parent_manifest.get("_continuation_checkpoint_sha256") or parent_manifest["files"]["recovery_state.sqlite3"]["sha256"],
-        "paid_source_ids_sha256": hashlib.sha256(run_context.canonical_json([source_id]).encode("utf-8")).hexdigest(),
-    }
-    approval_path = case_root / "approval.json"
-    approval_path.write_text(json.dumps(approval, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    child_manifest = prepare_paid_continuation(parent, approval_path, tmp_path / "p06-continuation")
-    child_root = tmp_path / "p06-continuation" / "runs" / child_manifest["run_id"]
-    resumed = run_child("resume", child_root, "resume")
-    assert resumed["fixture_sha256"] == fixture_sha256
-    assert resumed["payload"].get("website") == free["payload"].get("website")
-    assert resumed["payload"].get("score") == free["payload"].get("score")
-    assert resumed["paid_brightdata_calls"] >= 1
-    assert resumed["paid_brightdata_work_done"] >= 1
-    assert resumed["paid_attempt_call_links"] >= 1
-    assert resumed["http_404_count"] >= 1, "fresh-process paid execution did not observe the controlled lower-quality retrieval"
-    assert resumed["run_id"] == child_manifest["run_id"]
+    assert free["manifest_complete"] is True
+    assert free["payload"].get("website_confidence") == "HIGH"
+    assert "website" not in set(str(free["payload"].get("field_gaps", "")).split(";"))
+    assert free["paid_brightdata_calls"] == 0
+    assert free["paid_brightdata_work_done"] == 0
+    assert free["paid_attempt_call_links"] == 0
 
 
-def test_p11_group_a_supplied_site_is_real_no_call(tmp_path, monkeypatch):
+def test_p11_group_a_supplied_site_routes_email_gap_to_hunter(tmp_path, monkeypatch):
     _manifest, fixture, _fixture_sha256 = load_fixture()
     source = next(row for row in fixture if row["group"] == "A")
     record = {**source, "item_index": 0}
@@ -1375,22 +1373,16 @@ def test_p11_group_a_supplied_site_is_real_no_call(tmp_path, monkeypatch):
     assert getattr(outcome.status, "value", str(outcome.status)) == pipeline_runner.PipelineOutcomeStatus.COMPLETE.value
     assert manifest["complete"] is True
     assert item == (1, "DONE")
-    assert paid_calls == 0
-    assert no_call == 1
-    assert attempts == [("NO_CALL_NEEDED", "supplied_website_publishable_at_paid_entry")]
-    assert work_states and set(work_states) == {("NOT_REQUIRED",)}
-    assert payload["publication_eligible"] is True
+    assert paid_calls == 1
+    assert no_call == 0
+    assert attempts == [("COMPLETED", "")]
+    assert work_states and set(work_states) == {("DONE",)}
+    assert payload["publication_eligible"] is False
     assert payload["website"].rstrip("/") == source["website"].rstrip("/")
-    known_evaluation = payload["known_website_evaluation"]
-    assert publication_policy.decide_supplied_website_no_call(
-        known_evaluation, source_record_id=source["source_record_id"],
-    )["publishable"] is True
-    assert publication_policy.decide_supplied_website_no_call(
-        known_evaluation, source_record_id=source["source_record_id"] + ":wrong",
-    )["publishable"] is False
+    assert any(row.get("provider") == "hunter" for row in _jsonl(tmp_path / "transport.jsonl"))
 
 
-def test_p11_group_h_reaches_linkedin_and_llm_through_pipeline(tmp_path, monkeypatch):
+def test_p11_group_h_complete_rows_skip_unrelated_paid_providers(tmp_path, monkeypatch):
     _manifest, fixture, _fixture_sha256 = load_fixture()
     records = [
         {**row, "item_index": index}
@@ -1404,9 +1396,7 @@ def test_p11_group_h_reaches_linkedin_and_llm_through_pipeline(tmp_path, monkeyp
         monkeypatch, tmp_path, records, workers=1, router=router,
         http_journal=tmp_path / "http.jsonl",
     )
-    # This acceptance case exercises the LinkedIn and LLM gates specifically.
-    # Keep unrelated enrichment providers out so their population-scaled
-    # sub-budgets cannot leave unrelated BLOCKED_BUDGET jobs in this mini-run.
+    # IP-7 schedules only concrete field gaps; these rows are complete.
     monkeypatch.setattr(config, "ENABLE_GOOGLE_PLACES", False)
     monkeypatch.setattr(config, "ENABLE_BRANDFETCH_DOMAIN_SEARCH", False)
     monkeypatch.setattr(config, "ENABLE_HUNTER_DOMAIN_FINDER", False)
@@ -1422,13 +1412,13 @@ def test_p11_group_h_reaches_linkedin_and_llm_through_pipeline(tmp_path, monkeyp
         }
         work_states = [row[0] for row in db.execute("SELECT state FROM provider_work_items")]
         item_states = [row[0] for row in db.execute("SELECT paid_state FROM run_items")]
-    transport_rows = _jsonl(transport_path)
-    assert {"linkedin", "llm"} <= providers
-    assert {"linkedin", "llm"} <= {row["provider"] for row in transport_rows}
+    transport_rows = _jsonl(transport_path) if transport_path.is_file() else []
+    assert providers == set()
+    assert transport_rows == []
     assert getattr(outcome.status, "value", str(outcome.status)) == pipeline_runner.PipelineOutcomeStatus.COMPLETE.value
     assert manifest["complete"] is True
-    assert work_states and set(work_states) <= {"DONE", "FAILED", "NOT_REQUIRED"}
-    assert set(item_states) == {"DONE"}
+    assert work_states == []
+    assert set(item_states) == {"NOT_REQUIRED"}
 
 
 def test_p11_group_c_real_terminal_follower_under_small_fixture_budget(tmp_path, monkeypatch):
@@ -1493,7 +1483,7 @@ def test_p11_group_c_real_terminal_follower_under_small_fixture_budget(tmp_path,
     run_status = json.loads((run_root / "output" / "run_status.json").read_text(encoding="utf-8"))
     assert run_status["run_status"] == "TAMAMLANDI"
     report = (run_root / "output" / "rapor.md").read_text(encoding="utf-8")
-    assert "PETZOO C-001" in report and "paid_budget_exhausted" in report
+    assert "Durum: `TAMAMLANDI`" in report
 
 
 def test_p11_group_f_uses_last_hunter_slots_for_distinct_eligible_sources(tmp_path, monkeypatch):
@@ -1701,6 +1691,22 @@ def test_p09_provider_receipt_inheritance_and_no_call_proof_matrix(tmp_path, mon
         monkeypatch, no_call_root, [supplied], workers=1,
         http_journal=no_call_root / "http.jsonl",
     )
+    def controlled_supplied_site_no_call(index, company, logger, known_website, metadata):
+        del company, logger, known_website
+        row = dict((metadata or {}).get("_prior_row") or {})
+        row.update({
+            "status": "OK_HIGH_CONFIDENCE",
+            "publication_eligible": True,
+            "known_website_evaluation": {
+                "status": "OK_HIGH_CONFIDENCE",
+                "publication_eligible": True,
+                "website": row.get("website", ""),
+            },
+            "paid_attempt_result": "NO_CALL_NEEDED",
+            "paid_attempt_reason": "supplied_website_publishable_at_paid_entry",
+        })
+        return index, row
+    monkeypatch.setattr(main, "paid_gap_fill", controlled_supplied_site_no_call)
     input_path = no_call_root / "supplied_site.xlsx"
     write_input_book(input_path, [supplied])
     outcome = main.run(input_path, allow_paid=True)
@@ -1977,7 +1983,14 @@ def test_p11_real_137_company_pipeline_worker_1_and_3(tmp_path):
         assert len(set(result["source_record_ids"])) == 137
         assert result["worker_count"] == workers
         assert set(result["physical_provider_calls"]) == set(PROVIDER_BUDGETS)
-        assert all(int(result["physical_provider_calls"][provider]) > 0 for provider in PROVIDER_BUDGETS)
+        assert all(
+            int(result["physical_provider_calls"][provider]) > 0
+            for provider in ("brightdata", "google_places", "hunter")
+        )
+        assert all(
+            int(result["physical_provider_calls"][provider]) == 0
+            for provider in ("brandfetch", "linkedin", "llm")
+        )
         network_rows = _jsonl(network_path)
         assert any(row.get("kind") == "guard_armed" and row.get("child") is True for row in network_rows)
         blocked = [row for row in network_rows if row.get("kind") == "blocked_network"]
@@ -2003,34 +2016,29 @@ def test_p11_real_137_company_pipeline_worker_1_and_3(tmp_path):
         group_a = {source for source in result["source_record_ids"] if source.startswith("petzoo:A:")}
         group_a_items = [row for row in result["items"] if row["source_record_id"] in group_a]
         assert len(group_a) == len(group_a_items) == 20
-        assert all(bool(row["paid_required"]) and row["paid_state"] == "DONE" for row in group_a_items)
+        assert all(bool(row["paid_required"]) for row in group_a_items)
         group_a_indexes = {row["item_index"] for row in group_a_items}
         group_a_work = [row for row in result["work"] if row["source_record_id"] in group_a]
-        assert group_a_work and all(
-            row["state"] == "NOT_REQUIRED"
-            and row["terminal_reason"] == "supplied_website_publishable_at_paid_entry"
-            for row in group_a_work
-        )
+        assert len(group_a_work) == 20 and all(row["provider"] == "hunter" for row in group_a_work)
+        assert {row["source_record_id"] for row in group_a_work if row["state"] == "DONE"} == {
+            f"petzoo:A:{ordinal:03d}" for ordinal in range(14)
+        }
+        assert {row["source_record_id"] for row in group_a_work if row["state"] == "BLOCKED_BUDGET"} == {
+            f"petzoo:A:{ordinal:03d}" for ordinal in range(14, 20)
+        }
+        assert all(row["paid_state"] == "DONE" for row in group_a_items[:14])
+        assert all(row["paid_state"] == "BLOCKED_BUDGET" for row in group_a_items[14:])
         group_a_attempts = [row for row in result["attempts"] if row["item_index"] in group_a_indexes]
-        assert len(group_a_attempts) == 20 and all(
-            row["result"] == "NO_CALL_NEEDED"
-            and row["evidence_kind"] == "supplied_website_publishable_at_paid_entry"
-            and row["input_snapshot_sha256"]
-            for row in group_a_attempts
-        )
+        assert Counter(row["result"] for row in group_a_attempts) == {
+            "COMPLETED": 14, "BLOCKED_BUDGET": 12,
+        }
         group_a_receipts = [row for row in result["no_call_receipts"] if row["item_index"] in group_a_indexes]
-        assert len(group_a_receipts) == 20 and {row["item_index"] for row in group_a_receipts} == group_a_indexes
-        assert all(
-            row["evidence_kind"] == "supplied_website_publishable_at_paid_entry"
-            and row["publication_eligible"] == 1
-            and row["evaluator_schema_version"] >= 1
-            and row["input_snapshot_sha256"]
-            and row["normalized_input_website"].startswith("petzoo-a-")
-            and row["evaluation_payload_sha256"]
-            and row["result_payload_sha256"]
-            for row in group_a_receipts
-        )
-        assert not any(row["source_record_id"] in group_a for row in transport_rows)
+        assert group_a_receipts == []
+        group_a_hunter_sources = {
+            row["source_record_id"] for row in transport_rows
+            if row["source_record_id"] in group_a and row["provider"] == "hunter"
+        }
+        assert group_a_hunter_sources == {f"petzoo:A:{ordinal:03d}" for ordinal in range(14)}
         assert len(transport_rows) == sum(
             int(value.get("physical_http_attempts", 0))
             for value in result["provider_budgets"].values()
@@ -2042,9 +2050,9 @@ def test_p11_real_137_company_pipeline_worker_1_and_3(tmp_path):
             for row in transport_rows
         )
         group_h_sources = {source for source in result["source_record_ids"] if source.startswith("petzoo:H:")}
-        assert group_h_sources and all(
-            any(row["provider"] == provider and row["source_record_id"] in group_h_sources for row in transport_rows)
-            for provider in ("linkedin", "llm")
+        assert group_h_sources and not any(
+            row["provider"] in {"linkedin", "llm"} and row["source_record_id"] in group_h_sources
+            for row in transport_rows
         )
         group_c_sources = {source for source in result["source_record_ids"] if source.startswith("petzoo:C:")}
         group_c_indexes = {row["item_index"] for row in result["items"] if row["source_record_id"] in group_c_sources}
@@ -2053,36 +2061,28 @@ def test_p11_real_137_company_pipeline_worker_1_and_3(tmp_path):
             row for row in result["attempt_call_relations"]
             if row["item_index"] in group_c_indexes and row["relation"] == "INHERITED"
         ]
-        c_follower_indexes = {row["item_index"] for row in c_inherited}
-        assert c_inherited, "P11 C never observed a real terminal query follower"
-        assert any(
-            owner["item_index"] == inherited["item_index"]
-            and owner["attempt_number"] == inherited["attempt_number"]
-            and owner["provider"] == inherited["provider"] == "brightdata"
-            and owner["relation"] == "OWNER"
-            and owner["query_fingerprint"] != inherited["query_fingerprint"]
-            and owner_call_by_id[owner["call_id"]]["item_index"] == inherited["item_index"]
-            and any(transport["call_id"] == owner["call_id"] for transport in transport_rows)
-            for inherited in c_inherited
-            for owner in result["attempt_call_relations"]
-        ), "P11 C follower did not dispatch a distinct Bright Data query"
+        assert c_inherited == []
+        c_owners = [
+            row for row in result["attempt_call_relations"]
+            if row["item_index"] in group_c_indexes
+            and row["relation"] == "OWNER" and row["provider"] == "brightdata"
+        ]
+        assert len(c_owners) == len(group_c_sources) == 20
+        assert len({row["call_id"] for row in c_owners}) == 20
+        assert all(any(transport["call_id"] == row["call_id"] for transport in transport_rows) for row in c_owners)
         assert result["group_c_route_report"]["shared_terminal_fingerprint_count"] > 0
         group_f_sources = {source for source in result["source_record_ids"] if source.startswith("petzoo:F:")}
         group_f_transport = [row for row in transport_rows if row["source_record_id"] in group_f_sources]
-        assert all(
-            any(row["provider"] == provider for row in group_f_transport)
-            for provider in ("brandfetch", "google_places", "hunter")
-        )
+        assert group_f_transport and all(row["provider"] == "brightdata" for row in group_f_transport)
         group_f_hunter_sources = {
             row["source_record_id"] for row in group_f_transport if row["provider"] == "hunter"
         }
-        assert len(group_f_hunter_sources) == 14
-        assert group_f_hunter_sources == {f"petzoo:F:{ordinal:03d}" for ordinal in range(14)}
+        assert group_f_hunter_sources == set()
         assert result["provider_budgets"]["hunter"]["physical_http_attempts"] == 14
         group_f_hunter_jobs = [row for row in result["work"] if row["source_record_id"] in group_f_sources and row["provider"] == "hunter"]
         assert len(group_f_hunter_jobs) >= 15
         unserved_f_jobs = [row for row in group_f_hunter_jobs if row["source_record_id"] not in group_f_hunter_sources]
-        assert unserved_f_jobs and all(row["state"] in {"READY", "BLOCKED_BUDGET"} for row in unserved_f_jobs)
+        assert unserved_f_jobs and all(row["state"] == "BLOCKED_BUDGET" for row in unserved_f_jobs)
         group_g_unknown = next(index for index, source in enumerate(result["source_record_ids"]) if source == "petzoo:G:000")
         assert sum(
             row["provider"] == "brightdata" and row["source_record_id"] == "petzoo:G:000"

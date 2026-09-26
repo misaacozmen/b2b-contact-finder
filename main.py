@@ -30,6 +30,8 @@ from modules import (
     excel,
     extractor,
     field_merge,
+    google_places,
+    hunter,
     identity,
     linkedin_company,
     llm_arbiter,
@@ -2710,7 +2712,7 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
             if isinstance(ev, dict)
         )
     }
-    if config.ENABLE_BRANDFETCH_DOMAIN_SEARCH or config.ENABLE_HUNTER_DOMAIN_FINDER:
+    if execution_phase != "PAID" and (config.ENABLE_BRANDFETCH_DOMAIN_SEARCH or config.ENABLE_HUNTER_DOMAIN_FINDER):
         conditional_resolver_rows = company_resolvers.resolve_company_domains(
             company,
             brandfetch_results=resolver_rows,
@@ -2969,12 +2971,13 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
                 resolution,
             )
         )
-    if resolution.status == "unresolved" and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
+    if execution_phase != "PAID" and resolution.status == "unresolved" and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION:
         resolution = _try_linkedin_company_corroboration(
             company, metadata, ranked_evaluations, resolution,
         )
     if (
-        runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
+        execution_phase != "PAID"
+        and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
         and not _linkedin_dispatch_pending_for_current_item()
     ):
         resolution = _try_llm_arbitration(
@@ -2988,7 +2991,8 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
             company, ranked_evaluations, metadata,
         )
         if (
-            runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
+            execution_phase != "PAID"
+            and runtime.item_stop_state().scope != runtime.StopScope.MANUAL_AUTHORIZATION
             and not _linkedin_dispatch_pending_for_current_item()
         ):
             resolution = _try_llm_arbitration(
@@ -3093,13 +3097,97 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
     return finish(row, candidates)
 
 
+def _provider_result_entry(provider: str, result) -> dict:
+    return {
+        "provider": provider,
+        "result_state": getattr(result, "result_state", "UNKNOWN"),
+        "call_ids": list(getattr(result, "call_ids", ())),
+    }
+
+
+def _provider_results_of(row: dict) -> list[dict]:
+    values = row.get("provider_results")
+    return values if isinstance(values, list) else []
+
+
+def _best_hunter_email(result, website: str) -> str:
+    preferred_local_parts = (
+        "info", "iletisim", "contact", "satis", "sales", "bilgi",
+        "office", "export", "ihracat",
+    )
+    preferred_order = {local_part: index for index, local_part in enumerate(preferred_local_parts)}
+    candidates: list[tuple[int, int, str]] = []
+    for item in result if isinstance(result, (list, tuple)) else ():
+        if not isinstance(item, dict):
+            continue
+        email = str(item.get("email", item.get("value", "")) or "").strip().lower()
+        if "@" not in email:
+            continue
+        domain = email.rsplit("@", 1)[-1]
+        if not scorer.same_registrable_domain(domain, website):
+            continue
+        try:
+            confidence = int(item.get("confidence", 0) or 0)
+        except (TypeError, ValueError):
+            confidence = 0
+        local_part = email.split("@", 1)[0]
+        candidates.append((preferred_order.get(local_part, len(preferred_order)), -confidence, email))
+    return min(candidates)[2] if candidates else ""
+
+
+def paid_gap_fill(index: int, company: str, logger, known_website: str, metadata: dict | None) -> tuple[int, dict]:
+    prior = dict((metadata or {}).get("_prior_row") or {})
+    core_metadata = reference_inputs.strip_references(
+        {key: value for key, value in (metadata or {}).items() if key != "_prior_row"}
+    )
+    gaps = field_merge.field_gaps(prior) if prior else {"website", "email", "phone"}
+    logger.info("[ÜCRETLİ] Processing %s: %s — eksik: %s", index + 1, company, ",".join(sorted(gaps)))
+    row = dict(prior)
+    provider_results: list[dict] = []
+    if "website" in gaps:
+        _, searched = _process_company_core(
+            index, company, logger, "", core_metadata, execution_phase="PAID",
+        )
+        provider_results.extend(_provider_results_of(searched))
+        if searched.get("status") in report.OK_STATUSES and searched.get("website"):
+            searched["website_source"] = "PAID_BRIGHTDATA"
+        row = field_merge.merge(row, field_merge.annotate(searched, metadata)) if row else field_merge.annotate(searched, metadata)
+        gaps = field_merge.field_gaps(row)
+    website = row.get("website") if field_merge.field_confidence(row, "website") in field_merge.CONFIDENT else ""
+    if website and "phone" in gaps and google_places.is_enabled():
+        result = google_places.search_company(company)
+        provider_results.append(_provider_result_entry("google_places", result))
+        phone_value = next((
+            place["phone"] for place in result
+            if isinstance(place, dict)
+            and scorer.same_registrable_domain(place.get("website", ""), website)
+            and place.get("phone")
+        ), "")
+        if phone_value:
+            row = field_merge.merge(row, {
+                "phone": phone.normalize_phone(phone_value),
+                "phone_source_tier": "PAID_GOOGLE_PLACES",
+            })
+    if website and "email" in gaps and hunter.email_gap_fill_enabled():
+        result = hunter.find_domain_emails(scorer.normalize_domain(website))
+        provider_results.append(_provider_result_entry("hunter", result))
+        email_value = _best_hunter_email(result, website)
+        if email_value:
+            row = field_merge.merge(row, {
+                "email": email_value, "email_source_tier": "PAID_HUNTER",
+            })
+    field_merge.annotate(row, metadata)
+    row["provider_results"] = provider_results
+    if not provider_results:
+        row["paid_attempt_result"] = "NO_CALL_NEEDED"
+        row["paid_attempt_reason"] = "no_fillable_gap"
+    return index, row
+
+
 def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
     execution_phase = str(execution_phase).upper()
     if execution_phase == "PAID":
-        return _process_company_core(
-            index, company, logger, known_website, metadata,
-            execution_phase="PAID",
-        )
+        return paid_gap_fill(index, company, logger, known_website, metadata)
     blind_metadata = reference_inputs.strip_references(metadata)
     _, stage_a_row = _process_company_core(
         index, company, logger, "", blind_metadata, execution_phase="FREE",

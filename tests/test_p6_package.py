@@ -138,6 +138,7 @@ class DiverseQueryBudgetTests(unittest.TestCase):
             ("PAID NEEDED", "ddgs", False),
             ("FREE OK", "brightdata", True),
             ("PAID NEEDED", "brightdata", True),
+            ("FREE OK", "brightdata", True),
         ])
 
 

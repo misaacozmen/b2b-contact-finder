@@ -3431,6 +3431,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         not manual_authorization_stopped
         and
         _discovery_needs_expansion(company_name, candidates_by_domain, metadata)
+        and runtime.phase() != "PAID"
         and (
             config.ENABLE_BRANDFETCH_DOMAIN_SEARCH
             or config.ENABLE_HUNTER_DOMAIN_FINDER
@@ -3439,7 +3440,7 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         _add_resolver_candidates(candidates_by_domain, company_name, trace)
         best = _best_candidate(candidates_by_domain)
 
-    if config.ENABLE_GOOGLE_PLACES and not manual_authorization_stopped:
+    if config.ENABLE_GOOGLE_PLACES and not manual_authorization_stopped and runtime.phase() != "PAID":
         _add_google_places_results(candidates_by_domain, company_name)
         remove_mirror_candidates()
         trace.append({
