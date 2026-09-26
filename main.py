@@ -2,6 +2,7 @@ import argparse
 import getpass
 import hashlib
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -3424,11 +3425,13 @@ def cli(argv=None) -> int:
         else:
             configure_apis_interactively()
         outcome = run(args.input, None, selected_companies or None, selected_statuses or None, allow_paid=args.allow_paid, finalize_without_paid=finalize_without_paid, run_dir=args.run_dir, resume_run=args.resume_run, from_run_manifest=args.from_run_manifest)
-    except checkpoint.SchedulerInvariantError:
-        print("SCHEDULER_INVARIANT_VIOLATION")
+    except checkpoint.SchedulerInvariantError as exc:
+        logging.getLogger(__name__).exception("scheduler invariant violation")
+        print(f"SCHEDULER_INVARIANT_VIOLATION:{type(exc).__name__}:{str(exc)[:300]}")
         return 22
     except Exception as exc:
-        print(f"UNEXPECTED_ERROR:{type(exc).__name__}")
+        logging.getLogger(__name__).exception("unexpected pipeline error")
+        print(f"UNEXPECTED_ERROR:{type(exc).__name__}:{str(exc)[:300]}")
         return 1
     if not isinstance(outcome, pipeline_runner.PipelineOutcome):
         print("INVALID_PIPELINE_OUTCOME")

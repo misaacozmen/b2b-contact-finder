@@ -3248,7 +3248,21 @@ def reconcile_provider_work_item_to_flight(*, run_id: str, job_fingerprint: str)
         ):
             connection.commit()
             return False
-        call_id = str(terminal_call_id or next((value for value in call_ids if str(value)), ""))
+        call_ids = [str(value) for value in call_ids if str(value)]
+        if terminal_call_id:
+            call_id = str(terminal_call_id)
+        elif call_ids:
+            # FAILED/UNKNOWN terminals carry no winning call. The latest
+            # attempt is the canonical link; retries append to call_ids.
+            placeholders = ",".join("?" * len(call_ids))
+            latest = connection.execute(
+                f"SELECT call_id FROM provider_calls WHERE run_id=? AND call_id IN ({placeholders}) "
+                "ORDER BY attempt_ordinal DESC, created_at DESC LIMIT 1",
+                (str(run_id), *call_ids),
+            ).fetchone()
+            call_id = str(latest[0]) if latest else call_ids[-1]
+        else:
+            call_id = ""
         if call_id:
             call = connection.execute(
                 "SELECT provider FROM provider_calls WHERE run_id=? AND call_id=?",
@@ -3293,8 +3307,13 @@ def reconcile_provider_work_item_to_flight(*, run_id: str, job_fingerprint: str)
                 connection.rollback()
                 raise StateTransitionInvariant("provider work and terminal flight states conflict")
         if old_call_id and call_id and str(old_call_id) != call_id:
-            connection.rollback()
-            raise EvidenceInvariant("provider work call link conflicts with terminal flight")
+            if str(old_call_id) in call_ids:
+                # The work item is already bound to one attempt of this exact
+                # flight; any attempt of the same flight is a valid link.
+                call_id = str(old_call_id)
+            else:
+                connection.rollback()
+                raise EvidenceInvariant("provider work call link conflicts with terminal flight")
         if int(old_generation or 0) not in {0, int(generation)}:
             connection.rollback()
             raise EvidenceInvariant("provider work execution generation conflicts with terminal flight")
