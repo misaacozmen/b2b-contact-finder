@@ -29,6 +29,7 @@ from modules import (
     evidence_ledger,
     excel,
     extractor,
+    field_merge,
     identity,
     linkedin_company,
     llm_arbiter,
@@ -40,6 +41,8 @@ from modules import (
     relationship_graph,
     replay_snapshot,
     report,
+    reference_inputs,
+    reference_resolution,
     resolution_orchestrator,
     result_factory,
     run_budget,
@@ -2514,7 +2517,7 @@ def _finalize_selected_evaluation(
     return row
 
 
-def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
+def _process_company_core(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
     execution_phase = str(execution_phase).upper()
     if execution_phase not in {"FREE", "PAID"}:
         raise ValueError(f"invalid execution phase: {execution_phase}")
@@ -3088,6 +3091,27 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     row = _finalize_selected_evaluation(company, best_eval, metadata)
     random_delay()
     return finish(row, candidates)
+
+
+def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
+    execution_phase = str(execution_phase).upper()
+    if execution_phase == "PAID":
+        return _process_company_core(
+            index, company, logger, known_website, metadata,
+            execution_phase="PAID",
+        )
+    blind_metadata = reference_inputs.strip_references(metadata)
+    _, stage_a_row = _process_company_core(
+        index, company, logger, "", blind_metadata, execution_phase="FREE",
+    )
+    row = reference_resolution.complete_with_reference(
+        index, company, logger, stage_a_row, metadata,
+        evaluate_fn=_evaluate_candidate_with_stage,
+    )
+    row["stage_a"] = field_merge.stage_snapshot(stage_a_row)
+    field_merge.annotate(row, metadata)
+    row["stage_ab"] = field_merge.stage_snapshot(row)
+    return index, row
 
 
 def _write_outputs(rows: list[dict], elapsed_seconds: float, *, telemetry_snapshot: dict | None = None) -> str:
