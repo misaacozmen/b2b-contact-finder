@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sqlite3
 import shutil
 import sys
@@ -675,6 +676,14 @@ def _write_run_report(
             logger.exception("run telemetry could not be loaded for report run_id=%s", run_id)
             telemetry = runtime.snapshot()
     try:
+        manifest = json.loads((output_root.parent / "manifest.json").read_text(encoding="utf-8"))
+        canary = manifest.get("free_search_canary")
+        if isinstance(canary, dict):
+            telemetry = dict(telemetry or {})
+            telemetry["free_search_canary"] = canary
+    except (OSError, json.JSONDecodeError):
+        pass
+    try:
         return run_report.write_run_report(
             rows, output_root=output_root, run_status=run_status,
             status_detail=status_detail, elapsed_seconds=elapsed_seconds,
@@ -685,6 +694,23 @@ def _write_run_report(
         # outcomes even if a future implementation violates that contract.
         logger.exception("run report writer failed unexpectedly run_id=%s", run_id)
         return {"run_report": "unexpected_writer_exception"}
+
+
+def _paid_plan_queries(queries: list[str], company_name: str) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        value = " ".join(str(query or "").split())
+        if not value or re.match(r'^"?https?://', value):
+            continue
+        key = value.casefold()
+        if key not in seen:
+            seen.add(key)
+            filtered.append(value)
+    if filtered:
+        return filtered
+    core = scorer.search_display_core(company_name)
+    return [core] if core else []
 
 
 def _drain_memory_outbox(run_id: str, *, replay: bool) -> None:
@@ -1703,6 +1729,22 @@ def _run_pipeline_impl_body(
         config.HUNTER_REQUEST_BUDGET = 0
         config.LINKEDIN_COMPANY_REQUEST_BUDGET = 0
         config.LLM_ARBITER_BUDGET = 0
+        if pending and resume_phase not in {"PAID", "FINALIZING", "COMPLETE"}:
+            free_search_canary_result = (resume_manifest or {}).get("free_search_canary")
+            if (
+                not isinstance(free_search_canary_result, dict)
+                or free_search_canary_result.get("status") == "skipped_offline"
+            ):
+                free_search_canary_result = search.free_search_canary()
+            if isinstance(free_search_canary_result, dict):
+                if free_search_canary_result.get("status") in {"ok", "unavailable"}:
+                    runtime.set_free_backend_alive(free_search_canary_result.get("alive", []))
+                else:
+                    runtime.set_free_backend_alive(None)
+                run_context.write_manifest(
+                    manifest_path, context, run_config, complete=False,
+                    extra={"free_search_canary": free_search_canary_result},
+                )
         runtime.record("pipeline.free_pass_companies", len(pending))
         logger.info("=== AŞAMA 1/3: ÜCRETSİZ ARAMA — %s firma ===", len(pending))
         if resume_phase not in {"PAID", "FINALIZING", "COMPLETE"}:
@@ -1732,10 +1774,14 @@ def _run_pipeline_impl_body(
             for item_index in paid_indexes:
                 existing_plan = checkpoint.load_paid_query_plan(context.run_id, item_index)
                 if not existing_plan:
+                    company_name = company_records[item_index]["company"]
                     checkpoint.freeze_paid_query_plan(
                         run_id=context.run_id,
                         item_index=item_index,
-                        queries=search._primary_queries(company_records[item_index]["company"], company_records[item_index])[:paid_query_limit],
+                        queries=_paid_plan_queries(
+                            search._primary_queries(company_name, company_records[item_index]),
+                            company_name,
+                        )[:paid_query_limit],
                     )
             _prepare_provider_work_items(
                 run_id=context.run_id, company_records=company_records,

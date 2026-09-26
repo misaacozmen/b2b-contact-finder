@@ -100,7 +100,9 @@ SEARCH_HTTP_REQUEST_BUDGET = int(os.getenv("SEARCH_HTTP_REQUEST_BUDGET", "0"))
 DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY = max(
     1, int(os.getenv("DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY", "10"))
 )
-FREE_SEARCH_PHYSICAL_MULTIPLIER = 2
+FREE_SEARCH_PHYSICAL_MULTIPLIER = 3
+FREE_SEARCH_MAX_BACKENDS_PER_QUERY = 3
+FREE_SEARCH_CANARY_QUERY = "Türkiye Büyük Millet Meclisi"
 def _optional_request_cap(name: str, default: int | None = None) -> int | None:
     raw = os.getenv(name)
     return default if raw is None else max(0, int(raw))
@@ -149,7 +151,8 @@ TARGET_COUNTRY = "TR"
 TARGET_COUNTRY_QUERY_TERMS = ["Turkiye"]
 LOCALE = os.getenv("B2B_LOCALE", "tr-TR")
 SEARCH_COUNTRY_QUERY_TEMPLATES = [
-    "{company} {country} official website",
+    "{company} {country} resmi web sitesi" if TARGET_COUNTRY == "TR"
+    else "{company} {country} official website",
 ]
 SEARCH_RESULTS_PER_QUERY = 8
 MAX_SEARCH_QUERIES_PER_COMPANY = int(os.getenv("MAX_SEARCH_QUERIES_PER_COMPANY", "0"))
@@ -528,6 +531,13 @@ LEGAL_COMPANY_WORDS = [
     "sirketi",
     "ve",
     "and",
+]
+
+QUERY_ABBREVIATION_STOPWORDS = [
+    "san", "tic", "ltd", "sti", "as", "a.s", "ve", "ith", "ihr", "iml", "imal", "paz",
+    "muh", "ins", "insaat", "taah", "tur", "turz", "nak", "hiz", "mak", "sis", "sist",
+    "urt", "mlz", "malz", "end", "elk", "otom", "dis", "ic", "gida", "kuy", "hayv",
+    "sanayi", "ticaret", "limited", "sirketi", "sirket", "anonim", "tic.", "san.",
 ]
 
 SECTOR_GENERIC_WORDS = [

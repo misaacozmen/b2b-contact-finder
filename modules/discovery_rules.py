@@ -13,6 +13,10 @@ DISCOVERY_ONLY_ROLES = {
 }
 
 
+def _official_website_phrase() -> str:
+    return "resmi web sitesi" if config.TARGET_COUNTRY == "TR" else "official website"
+
+
 def metadata_query_terms(metadata: dict | None) -> list[str]:
     return [config.METADATA_CONTEXTS[context]["query_term"] for context in scorer.metadata_contexts(metadata)[:2]]
 
@@ -23,7 +27,7 @@ def query_priority(query: str) -> int:
         term in normalized for term in (scorer.normalize_text(value) for value in config.TARGET_COUNTRY_QUERY_TERMS)
     ):
         return 3
-    if "official website" in normalized or "resmi sitesi" in normalized:
+    if "official website" in normalized or "resmi sitesi" in normalized or "resmi web sitesi" in normalized:
         return 2
     if normalized.endswith(" contact") or normalized.endswith(" iletisim"):
         return 0
@@ -214,17 +218,27 @@ def primary_queries(
             seen_queries.add(key)
             queries.append(query)
 
-    # Source-provided routes are evidence inputs, not authority; keeping them
-    # first makes the acquisition order explicit and deterministic.
-    for value in (metadata.get("listed_website"), metadata.get("website"), metadata.get("profile_url")):
-        if str(value or "").strip():
-            add(f'"{str(value).strip()}"')
+    city = str(identity.get("city") or metadata.get("city", "") or "").strip()
+    if not city:
+        address = str(metadata.get("listed_address", "") or "")
+        city = re.split(r"[,;/\n]+", address)[-1].strip()
+    core = scorer.search_display_core(legal_name or full_name)
+    brand = " ".join(scorer.primary_brand_tokens(legal_name or full_name, limit=1))
+    if core:
+        add(core)
+        add(f"{core} iletişim")
+    if brand and brand != core:
+        sector = next((scorer.tr_lower(token) for token in core.split()[1:2]), "")
+        add(f'"{brand}" {sector}'.strip())
+    if core and city:
+        add(f"{core} {scorer.tr_lower(city)}")
+    official_phrase = _official_website_phrase()
     if query_name:
-        add(f'"{query_name}" {country} official website')
+        add(f'"{query_name}" {country} {official_phrase}')
         add(f'"{query_name}" {country} resmi sitesi')
         add(f'"{query_name}" contact')
         for term in metadata_query_terms_fn(metadata):
-            add(f'{query_name.casefold()} {term}')
+            add(f'{scorer.tr_lower(query_name)} {term}')
 
     query_inputs = [*brand_values]
     if not multi_brand_without_legal:
@@ -235,15 +249,11 @@ def primary_queries(
     for query_input in dict.fromkeys(value for value in query_inputs if value):
         if query_input.casefold() == full_name.casefold() and legal_name and legal_name.casefold() == full_name.casefold():
             continue
-        add(f'"{query_input}" {country} official website')
+        add(f'"{query_input}" {country} {official_phrase}')
         for term in metadata_query_terms_fn(metadata):
             add(f'"{query_input}" {term} {country}')
             if query_input.casefold() == full_name.casefold():
-                add(f'{full_name.casefold()} {term}')
-    city = str(identity.get("city") or metadata.get("city", "") or "").strip()
-    if not city:
-        address = str(metadata.get("listed_address", "") or "")
-        city = re.split(r"[,;/\n]+", address)[-1].strip()
+                add(f'{scorer.tr_lower(full_name)} {term}')
     if city:
         for name in ([query_name] if query_name else brand_values):
             add(f'"{name}" "{city}"')
@@ -279,7 +289,7 @@ def fallback_queries(
     contexts = metadata_query_terms_fn(metadata)
     queries = [
         f"{quoted_name} {contexts[0]} resmi sitesi" if contexts else "",
-        f"{quoted_name} Turkiye official website",
+        f"{quoted_name} Turkiye {_official_website_phrase()}",
         f"{quoted_name} iletisim",
     ]
     unique = list(dict.fromkeys(query for query in queries if query))

@@ -61,7 +61,7 @@ def test_free_search_trace_replays_logical_and_physical_reservations(tmp_path, m
     assert replayed.result_state == live.result_state
     assert list(replayed) == list(live)
     assert capacity.logical_used == 1
-    assert capacity.physical_used == 2
+    assert capacity.physical_used == 3
     assert discovery_coverage.payload()["replay_miss_count"] == 0
 
 
@@ -91,7 +91,7 @@ def test_failed_backend_order_and_safe_error_class_replay(tmp_path, monkeypatch)
     with gzip.open(snapshot, "rt", encoding="utf-8") as handle:
         raw = handle.read()
     assert "secret-token-must-not-be-recorded" not in raw
-    assert calls == ["duckduckgo", "google"]
+    assert calls == ["bing", "yandex", "brave"]
 
     class ForbiddenDDGS:
         def __enter__(self):
@@ -109,7 +109,7 @@ def test_failed_backend_order_and_safe_error_class_replay(tmp_path, monkeypatch)
     replayed = search._search_text("Retry Query")
     assert replayed.result_state == "FAILED"
     capacity = runtime.free_search_capacity("discovery")
-    assert capacity.physical_used == 2
+    assert capacity.physical_used == 3
 
 
 def test_dns_true_and_false_results_replay_without_socket(tmp_path, monkeypatch):

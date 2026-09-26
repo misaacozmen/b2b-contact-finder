@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+import config
 from modules import scorer
 
 
@@ -52,9 +53,9 @@ def query_intent(query: str) -> str:
         return "legal_identity"
     if any(term in normalized for term in ("contact", "iletisim")):
         return "contact"
-    if "official website" in normalized and "turkiye" in normalized:
+    if ("official website" in normalized or "resmi web sitesi" in normalized) and "turkiye" in normalized:
         return "country_official"
-    if any(term in normalized for term in ("official website", "resmi sitesi", "web sitesi")):
+    if any(term in normalized for term in ("official website", "resmi sitesi", "resmi web sitesi", "web sitesi")):
         return "official"
     return "context"
 
@@ -117,6 +118,7 @@ def adaptive_queries(
     representations = _split_hints(metadata.get("representations"))
     city = _city_hint(metadata.get("listed_address"))
     related = [*_split_hints(";".join(related_name_hints or []), limit=4)]
+    official_phrase = "resmi web sitesi" if config.TARGET_COUNTRY == "TR" else "official website"
     gaps = evidence_gaps if evidence_gaps is not None else {
         "no_candidates", "ambiguous_candidates", "missing_intrinsic_domain",
         "missing_legal_name", "missing_local_signal", "relationship_hint",
@@ -126,7 +128,7 @@ def adaptive_queries(
     # and snippet hints remain discovery-only regardless of which gap selected
     # them.
     planned = [
-        *(f'"{hint}" Turkiye official website' for hint in related if "relationship_hint" in gaps),
+        *(f'"{hint}" Turkiye {official_phrase}' for hint in related if "relationship_hint" in gaps),
         f'"{brand}" Turkiye resmi sitesi' if gaps & {
             "no_candidates", "ambiguous_candidates", "missing_intrinsic_domain",
         } else "",

@@ -39,6 +39,8 @@ _CURRENT_SOURCE_RECORD_ID: ContextVar[str] = ContextVar("current_source_record_i
 _CURRENT_PROVIDER_OUTCOMES: ContextVar[tuple[dict, ...] | None] = ContextVar("current_provider_outcomes", default=None)
 _FREE_QUERY_COUNTS: dict[tuple[str, int, str], int] = {}
 _FREE_PROVIDER_ATTEMPTS: dict[str, dict] = {}
+_FREE_BACKEND_HEALTH: dict[str, dict[str, int]] = {}
+_FREE_BACKEND_ALIVE: list[str] | None = None
 _CURRENT_SEARCH_BUCKET: ContextVar[str] = ContextVar("current_search_bucket", default="")
 _CURRENT_PROVIDER_DISPATCH_ROUNDS: ContextVar[dict[str, int]] = ContextVar("current_provider_dispatch_rounds", default={})
 _CURRENT_PROVIDER_DISPATCH_PHYSICAL: ContextVar[dict[str, bool]] = ContextVar("current_provider_dispatch_physical", default={})
@@ -402,6 +404,8 @@ def reset() -> None:
         _UNIQUE_TELEMETRY = {}
         _FREE_QUERY_COUNTS = {}
         _FREE_PROVIDER_ATTEMPTS = {}
+        _FREE_BACKEND_HEALTH.clear()
+        set_free_backend_alive(None)
         _DURABLE_TELEMETRY = {}
     _CURRENT_ITEM_INDEX.set(-1)
     _CURRENT_OPERATION.set("")
@@ -410,6 +414,38 @@ def reset() -> None:
     _CURRENT_PROVIDER_DISPATCH_ROUNDS.set({})
     _CURRENT_PROVIDER_OUTCOMES.set(None)
     _CURRENT_ITEM_STOP.set(PaidStopState())
+
+
+def record_free_backend(backend: str, outcome: str) -> None:
+    with _LOCK:
+        stats = _FREE_BACKEND_HEALTH.setdefault(
+            str(backend), {"ok": 0, "empty": 0, "error": 0},
+        )
+        stats[outcome] = stats.get(outcome, 0) + 1
+
+
+def set_free_backend_alive(backends: list[str] | None) -> None:
+    global _FREE_BACKEND_ALIVE
+    with _LOCK:
+        _FREE_BACKEND_ALIVE = list(backends) if backends is not None else None
+
+
+def free_backend_order(preferred: list[str]) -> list[str]:
+    """Keep preference order but demote backends that never return results."""
+    with _LOCK:
+        alive = _FREE_BACKEND_ALIVE
+        health = {name: dict(values) for name, values in _FREE_BACKEND_HEALTH.items()}
+    ordered = [name for name in preferred if alive is None or name in alive]
+    ordered += [name for name in preferred if name not in ordered]
+
+    def dead(name: str) -> bool:
+        stats = health.get(name, {})
+        attempts = stats.get("ok", 0) + stats.get("empty", 0) + stats.get("error", 0)
+        return attempts >= 6 and stats.get("ok", 0) == 0
+
+    return [name for name in ordered if not dead(name)] + [
+        name for name in ordered if dead(name)
+    ]
 
 
 def configure_durable_run(

@@ -313,19 +313,22 @@ def test_p01_hunter_last_slot_only_reaches_next_eligible_company(tmp_path, monke
     assert len(physical) == 2
     assert len({row["source_record_id"] for row in physical}) == 2
     assert all(row["state"] == "DONE" for row in physical)
-    assert len(hunter_jobs) == 11
+    hunter_sources = {row["source_record_id"] for row in hunter_jobs}
+    assert len(hunter_jobs) == 10
+    assert hunter_sources == {row["source_record_id"] for row in records[1:]}
     completed_job_ids = {row["job_fingerprint"] for row in hunter_jobs if row["state"] == "DONE"}
     assert len(completed_job_ids) == 2
     allocated_jobs = [row["job_fingerprint"] for row in hunter_allocations if row["job_fingerprint"]]
     assert len(allocated_jobs) == len(set(allocated_jobs)) == 2
     assert set(allocated_jobs) == completed_job_ids
     allocated_sources = {row["source_record_id"] for row in physical}
-    assert len(allocated_sources & {row["source_record_id"] for row in records[1:]}) >= 1
+    assert allocated_sources == {row["source_record_id"] for row in records[1:3]}
     brightdata_pending_sources = {
         row["source_record_id"] for row in brightdata_jobs
         if row["state"] in {"READY", "ALLOCATED", "WAITING_DEPENDENCY"}
     }
-    assert allocated_sources & brightdata_pending_sources
+    assert brightdata_pending_sources == {records[0]["source_record_id"]}
+    assert allocated_sources.isdisjoint(brightdata_pending_sources)
     assert str(getattr(getattr(outcome, "status", None), "value", str(outcome))).startswith("SCHEDULER_STALLED")
 
     evidence_dir = DELIVERY / "evidence" / "P01" / f"hunter_last_slot_verified_{_evidence_stamp()}"
@@ -1431,14 +1434,16 @@ def test_p11_group_h_reaches_linkedin_and_llm_through_pipeline(tmp_path, monkeyp
 def test_p11_group_c_real_terminal_follower_under_small_fixture_budget(tmp_path, monkeypatch):
     _manifest, fixture, _fixture_sha256 = load_fixture()
     records = [
-        {**row, "item_index": index}
+        {**row, "item_index": index, "legal_name": "PETZOO C"}
         for index, row in enumerate(sorted(
             (row for row in fixture if row["group"] == "C" and row["source_record_id"] in {"petzoo:C:000", "petzoo:C:001"}),
             key=lambda row: row["source_record_id"],
         ))
     ]
     queries = [search._primary_queries(record["company"], record) for record in records]
-    assert queries[0][0] == queries[1][0] and queries[0][1] != queries[1][1]
+    assert queries[0][0] == queries[1][0] == "petzoo c"
+    assert queries[0][1] == queries[1][1]
+    assert queries[0] != queries[1]
     input_path = tmp_path / "group-c.xlsx"
     transport_path = tmp_path / "transport.jsonl"
     write_input_book(input_path, records)
@@ -1789,10 +1794,11 @@ def test_p10_real_brightdata_header_parser_retains_captcha_provider_stop(tmp_pat
     source = next(row for row in fixture if row["source_record_id"] == "petzoo:G:001")
     _outcome, _manifest, calls, work, _items, transport, flights = _run_single_fixture_source(tmp_path, monkeypatch, source)
     starts = [row for row in transport if row.get("kind") == "paid_transport" and row["provider"] == "brightdata"]
-    assert len(starts) == 1
+    assert len(starts) == config.MAX_RETRIES + 1
     brightdata_calls = [row for row in calls if row[0] == "brightdata"]
-    assert len(brightdata_calls) == 1 and brightdata_calls[0][1] == "FAILED" and brightdata_calls[0][2]
-    assert "brightdata_header:CAPTCHA:captcha challenge" in brightdata_calls[0][3]
+    assert len(brightdata_calls) == config.MAX_RETRIES + 1
+    assert all(row[1] == "FAILED" and row[2] for row in brightdata_calls)
+    assert all("brightdata_header:CAPTCHA:captcha challenge" in row[3] for row in brightdata_calls)
     assert any(row[0] == "brightdata" and row[1] == "FAILED" and "captcha" in row[2].casefold() for row in work)
     brightdata_flights = [row for row in flights if row[0] == "brightdata"]
     captcha_flights = [
@@ -1806,7 +1812,7 @@ def test_p10_real_brightdata_header_parser_retains_captcha_provider_stop(tmp_pat
         for row in brightdata_flights if row not in captcha_flights
     )
     terminals = [row for row in transport if row.get("kind") == "paid_transport_terminal"]
-    assert len([row for row in terminals if row["provider"] == "brightdata"]) == 1
+    assert len([row for row in terminals if row["provider"] == "brightdata"]) == config.MAX_RETRIES + 1
     assert all(row["outcome"] == "response" for row in terminals if row["provider"] == "brightdata")
 
 

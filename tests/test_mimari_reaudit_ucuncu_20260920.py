@@ -279,7 +279,7 @@ def test_e07_durable_free_replay_uses_source_id_and_snapshot(tmp_path: Path, mon
     replay_snapshot.configure_run_store(replay_database, run_id)
     search._record_free_search_execution(
         source_record_id="source:free", bucket="discovery", query_fingerprint=query_fingerprint,
-        logical={"accepted": True, "reason": "", "logical_used": 1, "logical_limit": 10, "physical_used": 0, "physical_limit": 20},
+        logical={"accepted": True, "reason": "", "logical_used": 1, "logical_limit": 10, "physical_used": 0, "physical_limit": 30},
         backend_attempts=[{"backend": "ddgs", "result": "ACCEPTED", "transport_outcome": "DONE", "attempt_ordinal": 1, "error_class": ""}],
         results=results,
     )

@@ -217,6 +217,14 @@ def _build_report(
         lines.append("- Sağlayıcı bütçe ve çağrı verisi: ölçülmedi")
 
     lines.extend(["", "## Ücretsiz arama canary ve motor sağlığı", ""])
+    canary = (telemetry or {}).get("free_search_canary") if isinstance(telemetry, dict) else None
+    if isinstance(canary, dict):
+        alive = ", ".join(str(value) for value in canary.get("alive", [])) or "yok"
+        dead = ", ".join(str(value) for value in canary.get("dead", [])) or "yok"
+        lines.append(f"- Canary durumu: {canary.get('status', 'bilinmiyor')}; yanıt veren: {alive}; yanıt vermeyen: {dead}")
+    else:
+        lines.append("- Canary durumu: ölçülmedi")
+    lines.append("")
     health = {
         key: value for key, value in ((telemetry or {}).get("counters", {}) if isinstance(telemetry, dict) else {}).items()
         if "canary" in str(key).casefold() or "engine" in str(key).casefold()

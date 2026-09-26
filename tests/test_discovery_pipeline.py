@@ -468,12 +468,14 @@ class DiscoveryPipelineTests(unittest.TestCase):
     def test_primary_queries_run_country_official_before_contact_queries(self) -> None:
         queries = search._primary_queries("Example Brand", None)
         first_contact = next(index for index, query in enumerate(queries) if query.endswith(" contact"))
-        country_official = next(index for index, query in enumerate(queries) if "Turkiye official website" in query)
+        country_official = next(index for index, query in enumerate(queries) if "Turkiye resmi web sitesi" in query)
         self.assertLess(country_official, first_contact)
 
     def test_fallback_queries_run_country_official_before_iletisim(self) -> None:
         queries = search._fallback_queries("Example Brand", {"sector": "Packaging", "description": ""})
-        self.assertIn("Turkiye official website", queries[0])
+        country_official = next(index for index, query in enumerate(queries) if "Turkiye resmi web sitesi" in query)
+        first_contact = next(index for index, query in enumerate(queries) if query.endswith(" iletisim"))
+        self.assertLess(country_official, first_contact)
         self.assertTrue(queries[-1].endswith(" iletisim"))
 
     def test_ambiguous_non_exact_domain_does_not_stop_official_search_early(self) -> None:

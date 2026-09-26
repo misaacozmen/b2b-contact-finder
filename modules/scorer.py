@@ -38,6 +38,33 @@ def normalize_text(value: str) -> str:
     return (value or "").translate(TRANSLATION_TABLE).lower()
 
 
+def tr_lower(value: str) -> str:
+    """Turkish-aware lowercase that never emits combining dots."""
+    return str(value or "").replace("I", "ı").replace("İ", "i").lower()
+
+
+def search_display_core(company_name: str, max_tokens: int = 4) -> str:
+    """Readable search name: legal boilerplate and abbreviations removed, Turkish letters kept."""
+    stop = {
+        normalize_text(word).strip(".")
+        for word in (*config.LEGAL_COMPANY_WORDS, *config.QUERY_ABBREVIATION_STOPWORDS)
+    }
+    kept: list[str] = []
+    for raw in re.split(r"[\s,;/()]+", str(company_name or "")):
+        token = raw.strip(".-'\"&")
+        if not token:
+            continue
+        key = normalize_text(token).replace(".", "")
+        if key in stop or (raw.endswith(".") and len(key) <= 4):
+            continue
+        if not re.search(r"[0-9A-Za-zÇĞİÖŞÜçğıöşü]", token):
+            continue
+        kept.append(tr_lower(token))
+        if len(kept) >= max_tokens:
+            break
+    return " ".join(kept)
+
+
 def normalize_domain(url_or_domain: str) -> str:
     value = (url_or_domain or "").strip()
     if not value:

@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 from ddgs import DDGS
+from ddgs.ddgs import ENGINES as _DDGS_ENGINES
 from ddgs.exceptions import DDGSException
 
 import config
@@ -43,8 +44,10 @@ DISCOVERY_ONLY_ROLES = discovery_rules.DISCOVERY_ONLY_ROLES
 
 
 LOGGER = logging.getLogger("contact_finder")
-PREFERRED_BACKENDS = ["duckduckgo", "google", "brave", "yahoo", "yandex"]
-FALLBACK_BACKENDS = ["mojeek", "grokipedia"]
+_DEFAULT_DDGS = DDGS
+_DDGS_TEXT_BACKENDS = frozenset(_DDGS_ENGINES.get("text", {}))
+PREFERRED_BACKENDS = ["bing", "yandex", "brave", "yahoo"]
+FALLBACK_BACKENDS = ["duckduckgo", "mojeek"]
 FREE_SEARCH_EXECUTION_NAMESPACE = "free_search_execution_v2"
 FREE_SEARCH_EXECUTION_SCHEMA_VERSION = 2
 SERP_NORMALIZATION_VERSION = int(getattr(config, "SERP_NORMALIZATION_VERSION", 1))
@@ -80,6 +83,37 @@ class BrightDataProviderRejected(BrightDataSearchError):
     def __init__(self, provider_result):
         self.provider_result = provider_result
         super().__init__(provider_result.result_reason or provider_result.result_state)
+
+
+def _ddgs_backend_available(backend: str) -> bool:
+    # Test doubles own their backend surface. The real DDGS client falls back
+    # to "auto" for unknown names, which can unexpectedly issue other queries.
+    return DDGS is not _DEFAULT_DDGS or backend in _DDGS_TEXT_BACKENDS
+
+
+def free_search_canary() -> dict:
+    """Probe every configured free backend without consuming search budgets."""
+    if os.getenv("B2B_TEST_OFFLINE") == "1" or config.SEARCH_CACHE_MODE == "replay":
+        return {"status": "skipped_offline"}
+    alive: list[str] = []
+    backends = list(dict.fromkeys((*PREFERRED_BACKENDS, *FALLBACK_BACKENDS)))
+    for backend in backends:
+        if not _ddgs_backend_available(backend):
+            continue
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(
+                    config.FREE_SEARCH_CANARY_QUERY, max_results=3, backend=backend,
+                ))
+            if results:
+                alive.append(backend)
+        except Exception as exc:
+            LOGGER.debug("free search canary backend '%s' failed: %s", backend, exc)
+    dead = [backend for backend in backends if backend not in alive]
+    runtime.set_free_backend_alive(alive)
+    if not alive:
+        LOGGER.error("FREE_SEARCH_UNAVAILABLE: hiçbir ücretsiz arama motoru sonuç vermiyor")
+    return {"status": "ok" if alive else "unavailable", "alive": alive, "dead": dead}
 
 
 class SearchBudgetExhausted(BrightDataSearchError):
@@ -876,7 +910,23 @@ def _ddgs_text(query: str) -> SearchResults:
     opaque_results: list[dict] = []
     last_hard_error: Exception | None = None
 
-    backends = list(dict.fromkeys((*PREFERRED_BACKENDS, *FALLBACK_BACKENDS)))[:2]
+    if os.getenv("B2B_TEST_OFFLINE") == "1" and DDGS is _DEFAULT_DDGS:
+        final = SearchResults(
+            [], "offline", "ddgs", result_state="SEARCH_EXHAUSTED",
+            reason="offline_test_guard",
+        )
+        _record_free_search_execution(
+            source_record_id=source_record_id, bucket=bucket,
+            query_fingerprint=fingerprint, logical=logical.__dict__,
+            backend_attempts=backend_attempts, results=final,
+        )
+        return final
+
+    backends = runtime.free_backend_order(
+        list(dict.fromkeys((*PREFERRED_BACKENDS, *FALLBACK_BACKENDS)))
+    )
+    backends = [backend for backend in backends if _ddgs_backend_available(backend)]
+    backends = backends[: config.FREE_SEARCH_MAX_BACKENDS_PER_QUERY]
     for backend in backends:
         physical = runtime.reserve_free_physical_attempt(bucket, fingerprint, backend)
         attempt = {
@@ -909,6 +959,7 @@ def _ddgs_text(query: str) -> SearchResults:
             runtime.wait_for_request_slot()
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
+            runtime.record_free_backend(backend, "ok" if results else "empty")
             runtime.complete_free_physical_attempt(physical.attempt_id, True)
             attempt["transport_outcome"] = "DONE"
             had_non_error_response = True
@@ -937,6 +988,7 @@ def _ddgs_text(query: str) -> SearchResults:
         except DDGSException as exc:
             message = str(exc).lower()
             if "no results" in message:
+                runtime.record_free_backend(backend, "empty")
                 runtime.complete_free_physical_attempt(physical.attempt_id, True)
                 attempt["transport_outcome"] = "DONE"
                 attempt["result_state"] = "SEARCH_EXHAUSTED"
@@ -944,6 +996,7 @@ def _ddgs_text(query: str) -> SearchResults:
                 LOGGER.debug("DDGS backend '%s' no results for '%s'", backend, query)
                 continue
             error_class = _safe_error_class(type(exc).__name__)
+            runtime.record_free_backend(backend, "error")
             runtime.complete_free_physical_attempt(physical.attempt_id, False, error_class)
             attempt["transport_outcome"] = "FAILED"
             attempt["result_state"] = "FAILED"
@@ -954,6 +1007,7 @@ def _ddgs_text(query: str) -> SearchResults:
             if isinstance(exc, checkpoint.SchedulerInvariantError):
                 raise
             error_class = _safe_error_class(type(exc).__name__)
+            runtime.record_free_backend(backend, "error")
             runtime.complete_free_physical_attempt(physical.attempt_id, False, error_class)
             attempt["transport_outcome"] = "FAILED"
             attempt["result_state"] = "FAILED"
@@ -1017,7 +1071,7 @@ def _brightdata_header_error(response: requests.Response) -> tuple[bool, str, st
     safe_code = re.sub(r"[^A-Za-z0-9_.:-]", "_", code)[:80]
     safe_message = re.sub(r"[\r\n\t]+", " ", message or proxy_status).strip()[:300]
     combined = f"{safe_code} {safe_message}".casefold()
-    retryable = int(response.status_code) == 429 or int(response.status_code) >= 500 or any(token in combined for token in ("rate", "timeout", "tempor", "unavailable", "capacity"))
+    retryable = int(response.status_code) == 429 or int(response.status_code) >= 500 or any(token in combined for token in ("rate", "timeout", "tempor", "unavailable", "capacity", "captcha", "expect_element", "navigation_timeout"))
     return has_error, safe_code, safe_message, retryable
 
 
@@ -3325,8 +3379,9 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             results = run_query(query, "adaptive", gaps)
             if "discovery" in blocked_buckets or paid_provider_stopped or manual_authorization_stopped:
                 break
+            official_phrase = "resmi web sitesi" if config.TARGET_COUNTRY == "TR" else "official website"
             hint_queries = {
-                f'"{hint}" Turkiye official website': hint
+                f'"{hint}" Turkiye {official_phrase}': hint
                 for hint in related_name_hints if hint
             }
             if query in hint_queries:

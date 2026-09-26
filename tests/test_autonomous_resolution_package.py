@@ -226,13 +226,13 @@ class CandidateTournamentTests(unittest.TestCase):
 
 
 class DiscoveryAndMemoryTests(unittest.TestCase):
-    def test_full_legal_name_is_first_primary_query(self):
+    def test_display_core_is_first_primary_query(self):
         queries = search._primary_queries(
             "ORNEK METAL SANAYI LIMITED SIRKETI", {},
         )
         self.assertEqual(
             queries[0],
-            '"ORNEK METAL SANAYI LIMITED SIRKETI" Turkiye official website',
+            "ornek metal",
         )
         self.assertTrue(search._query_covers_full_identity(
             "ORNEK METAL SANAYI LIMITED SIRKETI",

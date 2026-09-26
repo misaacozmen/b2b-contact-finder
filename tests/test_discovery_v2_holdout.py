@@ -283,7 +283,7 @@ class DiscoveryV2HoldoutTests(unittest.TestCase):
         )
         self.assertEqual(hints, ["novatek tibbi gerecler"])
         queries = search._adaptive_queries(company, None, related_name_hints=hints)
-        self.assertEqual(queries[0], '"novatek tibbi gerecler" Turkiye official website')
+        self.assertEqual(queries[0], '"novatek tibbi gerecler" Turkiye resmi web sitesi')
 
     def test_related_name_result_is_discovery_only_candidate(self):
         candidates = {}

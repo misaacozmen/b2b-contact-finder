@@ -30,7 +30,7 @@ class AdaptiveQueryPlannerTests(unittest.TestCase):
         queries = query_planner.adaptive_queries(
             "ORBITA TEKNOLOJI", None, related_name_hints=["Nova Sistem"], limit=1,
         )
-        self.assertEqual(queries, ['"Nova Sistem" Turkiye official website'])
+        self.assertEqual(queries, ['"Nova Sistem" Turkiye resmi web sitesi'])
 
 
 class FirstPartyIdentityEngineTests(unittest.TestCase):
