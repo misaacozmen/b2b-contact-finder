@@ -251,11 +251,46 @@ def init_run(path: Path, count=1, budget=20):
     runtime.set_phase("PAID")
 
 
+def _prepare_test_dispatch(item_index: int, operation: str, request_fingerprint: str,
+                           query_fingerprint: str = "", *, provider: str = "brightdata",
+                           round_ordinal: int = 0, need_class: str | None = None):
+    source_record_id = checkpoint.load_run_items("run")[item_index]["source_record_id"]
+    runtime.set_item_context(item_index, operation)
+    runtime.set_source_record_id(source_record_id)
+    need_class = need_class or {
+        "brightdata": "website", "google_places": "contact", "brandfetch": "identity",
+        "hunter": "identity", "linkedin": "identity", "llm": "identity",
+    }[provider]
+    job = checkpoint.ensure_provider_work_item(
+        run_id="run", item_index=item_index, source_record_id=source_record_id,
+        provider=provider, operation=operation,
+        request_fingerprint=request_fingerprint,
+        query_fingerprint=query_fingerprint, need_class=need_class,
+    )
+    candidates = [{
+        "item_index": item_index, "source_record_id": source_record_id,
+        "need_class": need_class, "job_fingerprint": job["job_fingerprint"],
+        "operation": operation, "request_fingerprint": request_fingerprint,
+        "query_fingerprint": query_fingerprint, "plan_version": job["plan_version"],
+    }]
+    selected = checkpoint.reserve_provider_dispatch_round(
+        run_id="run", provider=provider, round_ordinal=round_ordinal,
+        candidates=candidates, cap=1,
+    )
+    assert selected
+    runtime.set_provider_dispatch_rounds({provider: round_ordinal})
+    if provider == "brightdata":
+        search.reset_run_state()
+        search.begin_brightdata_dispatch_round("run", round_ordinal)
+    return job
+
+
 @pytest.fixture
 def durable(tmp_path, monkeypatch):
     path = tmp_path / "progress.sqlite3"
     init_run(path)
     runtime.set_item_context(0, "paid")
+    runtime.set_source_record_id("s0")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     monkeypatch.setattr(config, "BRIGHTDATA_API_KEY", "fake")
     monkeypatch.setattr(config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 0)
@@ -380,6 +415,7 @@ def test_ddgs_every_physical_reservation_is_completed_exactly_once(tmp_path, mon
 
 
 def test_brightdata_never_touches_free_attempt_ledger(durable, monkeypatch):
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("q"), search._brightdata_flight_fingerprint("q"))
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: Response(200, {"organic": []}))
     search._brightdata_text("q")
     with sqlite3.connect(durable) as db:
@@ -387,11 +423,13 @@ def test_brightdata_never_touches_free_attempt_ledger(durable, monkeypatch):
 
 
 def test_brightdata_200_error_header_overrides_valid_organic_body(durable, monkeypatch):
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("q"), search._brightdata_flight_fingerprint("q"))
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: Response(200, {"organic": [{"link": "https://x"}]}, {"X-Brd-Err-Code": "denied", "Proxy-Status": "proxy; error=denied"}))
     assert search._brightdata_text("q").result_state == "FAILED"
 
 
 def test_request_slot_wait_occurs_before_every_brightdata_post(durable, monkeypatch):
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("q"), search._brightdata_flight_fingerprint("q"))
     events = []
     monkeypatch.setattr(runtime, "wait_for_request_slot", lambda **_kwargs: events.append("wait"))
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: (events.append("post") or Response(200, {"organic": []})))
@@ -472,8 +510,10 @@ def test_heartbeat_covers_throttle_http_decode_and_retry_backoff(tmp_path, monke
 def test_expired_potentially_charged_flight_becomes_unknown_without_reclaim(tmp_path):
     init_run(tmp_path / "db.sqlite3")
     runtime.set_item_context(0, "paid")
+    runtime.set_source_record_id("s0")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="old", lease_seconds=1)
+    _prepare_test_dispatch(0, "search.attempt_1", "x")
     reservation = runtime.reserve_api("brightdata", operation="search.attempt_1", request_fingerprint="x")
     checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="old", provider_call_id=reservation.call_id)
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db:
@@ -608,6 +648,7 @@ def test_cli_non_help_requires_safe_runtime_before_configuration(monkeypatch):
 
 
 def test_provider_and_free_ledger_equations_gate_finalization(durable, monkeypatch):
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("q"), search._brightdata_flight_fingerprint("q"))
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: Response(200, {"organic": []}))
     result = search._brightdata_text("q")
     checkpoint.record_paid_attempt(run_id="run", item_index=0, attempt_number=1, result="COMPLETED", call_ids=list(result.call_ids))
@@ -681,6 +722,7 @@ def test_protected_manifest_detects_same_size_same_mtime_content_change(tmp_path
 
 def test_unknown_from_primary_blocks_targeted_and_every_later_paid_resolver(durable, monkeypatch):
     runtime.reset_item_stop_state(0)
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("primary"), search._brightdata_flight_fingerprint("primary"))
     calls = []
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: (calls.append("brightdata") or (_ for _ in ()).throw(requests.ReadTimeout("post-send"))))
     result = search._brightdata_text("primary")
@@ -798,6 +840,8 @@ def test_expired_no_call_or_all_failed_flight_is_safely_reclaimed(tmp_path):
         db.execute("UPDATE provider_query_flights SET lease_expires_at='2000-01-01T00:00:00+00:00'"); db.commit()
     assert checkpoint.resolve_expired_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="none", owner_token="new")["leader"]
     runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    runtime.set_source_record_id("s0")
+    _prepare_test_dispatch(0, "x", "failed-call")
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="failed", owner_token="old", lease_seconds=1)
     reservation = runtime.reserve_api("brightdata", operation="x", request_fingerprint="failed-call")
     checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="failed", owner_token="old", provider_call_id=reservation.call_id)
@@ -812,6 +856,7 @@ def test_retry_budget_rejection_preserves_prior_failed_call_ids(durable, monkeyp
     runtime._DURABLE_BUDGETS["brightdata"] = 1
     with sqlite3.connect(durable) as db:
         db.execute("UPDATE provider_usage SET configured_limit=1,effective_limit=1 WHERE provider='brightdata'"); db.commit()
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("retry"), search._brightdata_flight_fingerprint("retry"))
     monkeypatch.setattr(search.requests, "post", lambda *_a, **_k: Response(500, {"error": "retry"}))
     monkeypatch.setattr(search.time, "sleep", lambda *_: None)
     result = search._brightdata_text("retry")
@@ -824,12 +869,15 @@ def test_retry_budget_rejection_preserves_prior_failed_call_ids(durable, monkeyp
 def test_same_run_cache_duplicate_writes_typed_inherited_consumer(tmp_path):
     init_run(tmp_path / "consumer.sqlite3", count=2, budget=2)
     runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    runtime.set_source_record_id("s0")
+    _prepare_test_dispatch(0, "x", "owner")
     claim = checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner")
     reservation = runtime.reserve_api("brightdata", operation="x", request_fingerprint="owner")
     runtime.start_api(reservation); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=reservation.call_id)
     runtime.mark_api_http_started(reservation, 1, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=reservation.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64)
     checkpoint.complete_provider_call_and_flight_success(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=reservation.call_id, result={"__search_result_state": "COMPLETED", "values": []}, call_ids=[reservation.call_id])
     runtime.set_item_context(1, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=1, attempt_number=1)
+    runtime.set_source_record_id("s1")
     checkpoint.record_paid_attempt(run_id="run", item_index=1, attempt_number=1, result="COMPLETED", call_ids=[reservation.call_id], call_relations={reservation.call_id: "INHERITED"})
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db:
         assert db.execute("SELECT relation,item_index FROM provider_query_flight_consumers WHERE paid_attempt_id=(SELECT paid_attempt_id FROM paid_attempts WHERE item_index=1)").fetchone() == ("INHERITED", 1)
@@ -845,8 +893,11 @@ def test_cross_run_cache_cannot_satisfy_paid_attempt(durable):
 def test_unrelated_same_run_cross_item_done_call_is_rejected(tmp_path):
     init_run(tmp_path / "cross.sqlite3", count=2, budget=2)
     runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    runtime.set_source_record_id("s0")
+    _prepare_test_dispatch(0, "x", "x")
     reservation = runtime.reserve_api("brightdata", operation="x", request_fingerprint="x"); runtime.start_api(reservation); runtime.complete_api(reservation, "DONE")
     runtime.set_item_context(1, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=1, attempt_number=1)
+    runtime.set_source_record_id("s1")
     with pytest.raises(checkpoint.EvidenceInvariant): checkpoint.record_paid_attempt(run_id="run", item_index=1, attempt_number=1, result="COMPLETED", call_ids=[reservation.call_id])
 
 
@@ -857,8 +908,9 @@ def test_owner_relation_requires_provider_call_item_match(tmp_path):
 def test_inherited_relation_requires_matching_terminal_flight_fingerprint(tmp_path):
     init_run(tmp_path / "bad-fp.sqlite3", count=2, budget=2)
     runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    _prepare_test_dispatch(0, "x", "x")
     reservation = runtime.reserve_api("brightdata", operation="x", request_fingerprint="x"); runtime.start_api(reservation); runtime.complete_api(reservation, "DONE")
-    runtime.set_item_context(1, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=1, attempt_number=1)
+    runtime.set_item_context(1, "paid"); runtime.set_source_record_id("s1"); checkpoint.begin_paid_attempt(run_id="run", item_index=1, attempt_number=1)
     with pytest.raises(checkpoint.EvidenceInvariant): checkpoint.record_paid_attempt(run_id="run", item_index=1, attempt_number=1, result="COMPLETED", call_ids=[reservation.call_id], call_relations={reservation.call_id: "INHERITED"})
 
 
@@ -959,11 +1011,13 @@ def test_provider_usage_corruption_in_each_aggregate_column_blocks_finalization(
 
 
 def test_reservation_without_http_start_is_not_physical_attempt(durable):
+    _prepare_test_dispatch(0, "reserve", "reserve")
     reservation = runtime.reserve_api("brightdata", operation="reserve", request_fingerprint="reserve")
     assert reservation and checkpoint.derive_telemetry("run")["provider_budgets"]["brightdata"]["physical_http_attempts"] == 0
 
 
 def test_http_start_marker_is_exactly_once(durable):
+    _prepare_test_dispatch(0, "start", "start")
     reservation = runtime.reserve_api("brightdata", operation="start", request_fingerprint="start"); runtime.start_api(reservation); runtime.mark_api_http_started(reservation, 1, "fp")
     with pytest.raises(checkpoint.LedgerInvariant): runtime.mark_api_http_started(reservation, 1, "fp")
     with pytest.raises(checkpoint.LedgerInvariant, match="SHA-256"):
@@ -976,12 +1030,14 @@ def test_http_start_marker_is_exactly_once(durable):
 
 
 def test_retry_count_uses_attempt_ordinal_not_operation_string(durable):
+    _prepare_test_dispatch(0, "no_retry_word", "ordinal")
     reservation = runtime.reserve_api("brightdata", operation="no_retry_word", request_fingerprint="ordinal"); runtime.start_api(reservation); runtime.mark_api_http_started(reservation, 2, "fp")
     telemetry = checkpoint.derive_telemetry("run")["provider_budgets"]["brightdata"]
     assert telemetry["retry_attempts"] == 1
 
 
 def test_report_manifest_and_checkpoint_use_identical_provider_values(durable):
+    _prepare_test_dispatch(0, "report", "report")
     reservation = runtime.reserve_api("brightdata", operation="report", request_fingerprint="report"); runtime.start_api(reservation); runtime.mark_api_http_started(reservation, 1, "fp"); runtime.complete_api(reservation, "DONE")
     telemetry = checkpoint.derive_telemetry("run"); text = report.build_report([], 0, runtime_snapshot={"durable_scheduler": telemetry})
     values = telemetry["provider_budgets"]["brightdata"]
@@ -1064,6 +1120,7 @@ def test_runtime_unknown_terminalization_is_canonical_for_every_provider(tmp_pat
         runtime.configure_durable_run("run", {name: (1 if name == provider else 0) for name in checkpoint.CANONICAL_PROVIDERS})
         runtime.set_item_context(0, "paid")
         checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+        _prepare_test_dispatch(0, "unknown", f"{provider}:unknown", provider=provider)
         reservation = runtime.reserve_api(provider, operation="unknown", request_fingerprint=f"{provider}:unknown")
         runtime.start_api(reservation); runtime.mark_api_http_started(reservation, 1); runtime.complete_api(reservation, "UNKNOWN", "post_send")
         stop = runtime.item_stop_state()
@@ -1079,16 +1136,28 @@ def test_unknown_each_paid_adapter_stops_all_later_paid_calls(tmp_path, monkeypa
     recorder = RecordingPaidTransport([requests.ReadTimeout("post-send")]); runtime.set_paid_transport(recorder)
     monkeypatch.setattr(config, "SEARCH_CACHE_MODE", "off"); monkeypatch.setattr(config, "SEARCH_PROVIDER", "brightdata")
     monkeypatch.setattr(config, "BRIGHTDATA_API_KEY", "fake"); monkeypatch.setattr(config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 0); monkeypatch.setattr(config, "GLOBAL_REQUESTS_PER_SECOND", 0); monkeypatch.setattr(config, "MAX_RETRIES", 0)
-    if provider == "brightdata": result = search._brightdata_text("ACME")
+    if provider == "brightdata":
+        _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint("ACME"), search._brightdata_flight_fingerprint("ACME"), provider=provider)
+        result = search._brightdata_text("ACME")
     elif provider == "google_places":
-        monkeypatch.setattr(config, "ENABLE_GOOGLE_PLACES", True); monkeypatch.setattr(config, "GOOGLE_PLACES_API_KEY", "fake"); result = google_places.search_company("ACME")
+        monkeypatch.setattr(config, "ENABLE_GOOGLE_PLACES", True); monkeypatch.setattr(config, "GOOGLE_PLACES_API_KEY", "fake")
+        query_name = google_places.scorer.search_name_variants("ACME")[0]
+        _prepare_test_dispatch(0, "text_search", runtime.request_fingerprint("google_places", "text_search", {"query": query_name, "region": "TR"}), provider=provider)
+        result = google_places.search_company("ACME")
     elif provider == "brandfetch":
-        monkeypatch.setattr(config, "ENABLE_BRANDFETCH_DOMAIN_SEARCH", True); monkeypatch.setattr(config, "BRANDFETCH_CLIENT_ID", "fake"); result = company_resolvers.brandfetch_domains("ACME")
+        monkeypatch.setattr(config, "ENABLE_BRANDFETCH_DOMAIN_SEARCH", True); monkeypatch.setattr(config, "BRANDFETCH_CLIENT_ID", "fake")
+        _prepare_test_dispatch(0, "domain_search", runtime.request_fingerprint("brandfetch", "domain_search", {"company": "ACME"}), provider=provider)
+        result = company_resolvers.brandfetch_domains("ACME")
     elif provider == "hunter":
-        monkeypatch.setattr(config, "ENABLE_HUNTER_FALLBACK", True); monkeypatch.setattr(config, "HUNTER_API_KEY", "fake"); result = hunter.find_domain_emails("acme.example")
+        monkeypatch.setattr(config, "ENABLE_HUNTER_FALLBACK", True); monkeypatch.setattr(config, "HUNTER_API_KEY", "fake")
+        _prepare_test_dispatch(0, "domain_search", runtime.request_fingerprint("hunter", "domain_search", {"domain": "acme.example"}), provider=provider, need_class="contact")
+        result = hunter.find_domain_emails("acme.example")
     elif provider == "linkedin":
-        monkeypatch.setattr(config, "LINKEDIN_COMPANY_DATASET_ID", "fake"); result = linkedin_company._scrape("https://linkedin.com/company/acme")
+        monkeypatch.setattr(config, "LINKEDIN_COMPANY_DATASET_ID", "fake")
+        _prepare_test_dispatch(0, "scrape", runtime.request_fingerprint("linkedin", "scrape", {"url": "https://linkedin.com/company/acme"}), provider=provider)
+        result = linkedin_company._scrape("https://linkedin.com/company/acme")
     else:
+        _prepare_test_dispatch(0, "arbiter", runtime.request_fingerprint("llm", "arbiter", {"prompt": "prompt", "schema": {}}), provider=provider)
         try: llm_arbiter.OpenRouterClient("fake", "model", 2).generate("prompt", {})
         except requests.ReadTimeout: pass
         result = runtime.provider_result([], state="UNKNOWN", provider="llm", call_ids=runtime.item_stop_state().call_ids)
@@ -1114,6 +1183,11 @@ def test_llm_scheduler_invariant_is_never_converted_to_failed_dict(durable, erro
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db:
         db.execute("UPDATE provider_usage SET configured_limit=1,effective_limit=1 WHERE run_id='run' AND provider='llm'")
     runtime.configure_durable_run("run", {"brightdata": 20, "llm": 1})
+    persistent_key = "ACME||sector|acme.example|a sufficiently descriptive page summary"
+    _prepare_test_dispatch(
+        0, "arbiter", runtime.request_fingerprint("llm", "arbiter", {"key": persistent_key}),
+        provider="llm",
+    )
     class Client:
         def generate(self, *_args):
             raise error_type("typed-invariant")
@@ -1193,6 +1267,7 @@ def test_relation_tables_reject_orphan_and_cross_scope_rows_with_foreign_keys(du
         return
     runtime.set_item_context(0, "paid")
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="scope-fp", owner_token="scope")
+    _prepare_test_dispatch(0, "scope", "scope-call")
     call = runtime.reserve_api("brightdata", operation="scope", request_fingerprint="scope-call")
     runtime.start_api(call); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="scope-fp", owner_token="scope", provider_call_id=call.call_id)
     runtime.mark_api_http_started(call, 1, "scope-fp"); runtime.complete_api(call, "FAILED")
@@ -1218,7 +1293,8 @@ def test_relation_tables_reject_orphan_and_cross_scope_rows_with_foreign_keys(du
 def _mixed_paid_evidence(path: Path, final_result: str, paid_state: str):
     init_run(path, budget=2); runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     calls = []
-    for state in ("DONE", "UNKNOWN"):
+    for round_ordinal, state in enumerate(("DONE", "UNKNOWN")):
+        _prepare_test_dispatch(0, state, state, round_ordinal=round_ordinal)
         reservation = runtime.reserve_api("brightdata", operation=state, request_fingerprint=state)
         runtime.start_api(reservation); runtime.mark_api_http_started(reservation, 1); runtime.complete_api(reservation, state)
         calls.append(reservation.call_id)
@@ -1239,6 +1315,7 @@ def test_paid_attempt_accepts_mixed_done_and_failed_flights_when_aggregate_compl
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     calls = []
     for fingerprint, state in (("done-flight", "DONE"), ("failed-flight", "FAILED")):
+        _prepare_test_dispatch(0, fingerprint, fingerprint, fingerprint, round_ordinal=len(calls))
         owner = fingerprint + "-owner"
         checkpoint.claim_provider_query_flight(
             run_id="run", provider="brightdata", query_fingerprint=fingerprint, owner_token=owner,
@@ -1280,6 +1357,7 @@ def test_paid_attempt_accepts_mixed_done_and_failed_flights_when_aggregate_compl
 
 def test_paid_evidence_done_rejects_blocked_budget_outcome(tmp_path):
     init_run(tmp_path / "done-block.sqlite3"); runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    _prepare_test_dispatch(0, "done", "done")
     reservation = runtime.reserve_api("brightdata", operation="done", request_fingerprint="done"); runtime.start_api(reservation); runtime.complete_api(reservation, "DONE")
     checkpoint.record_paid_attempt(run_id="run", item_index=0, attempt_number=1, result="BLOCKED_BUDGET", call_ids=[reservation.call_id])
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db: db.execute("UPDATE run_items SET paid_state='BLOCKED_BUDGET'"); db.commit()
@@ -1289,6 +1367,7 @@ def test_paid_evidence_done_rejects_blocked_budget_outcome(tmp_path):
 def test_paid_no_call_evidence_requires_exact_zero_call_or_inherited_receipt(tmp_path):
     path = tmp_path / "no-call.sqlite3"; init_run(path); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    _prepare_test_dispatch(0, "physical", "physical")
     reservation = runtime.reserve_api("brightdata", operation="physical", request_fingerprint="physical")
     runtime.start_api(reservation); runtime.mark_api_http_started(reservation, 1); runtime.complete_api(reservation, "DONE")
     snapshot = checkpoint.immutable_input_snapshot_sha256("run", 0)
@@ -1301,8 +1380,9 @@ def test_paid_no_call_evidence_requires_exact_zero_call_or_inherited_receipt(tmp
 def test_expired_flight_failed_then_done_receipt_reconciles_done(tmp_path):
     init_run(tmp_path / "mixed-flight.sqlite3", budget=2); runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner")
-    failed = runtime.reserve_api("brightdata", operation="first", request_fingerprint="first"); runtime.start_api(failed); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=failed.call_id); runtime.complete_api(failed, "FAILED")
-    done = runtime.reserve_api("brightdata", operation="second", request_fingerprint="second"); runtime.start_api(done); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=done.call_id); runtime.mark_api_http_started(done, 2, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=done.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64)
+    _prepare_test_dispatch(0, "query", "same-request", "fp")
+    failed = runtime.reserve_api("brightdata", operation="query", request_fingerprint="same-request", flight_fingerprint="fp", execution_generation=1); runtime.start_api(failed); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=failed.call_id); runtime.complete_api(failed, "FAILED")
+    done = runtime.reserve_api("brightdata", operation="query", request_fingerprint="same-request", flight_fingerprint="fp", execution_generation=1); runtime.start_api(done); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=done.call_id); runtime.mark_api_http_started(done, 2, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=done.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64)
     checkpoint.complete_provider_call_and_flight_success(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=done.call_id, result={"values": []}, call_ids=[failed.call_id, done.call_id])
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db: db.execute("UPDATE provider_query_flights SET state='RUNNING',lease_expires_at='2000-01-01T00:00:00+00:00'"); db.commit()
     reconciled = checkpoint.resolve_expired_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="new")
@@ -1312,12 +1392,13 @@ def test_expired_flight_failed_then_done_receipt_reconciles_done(tmp_path):
 def test_reclaimed_flight_preserves_all_prior_call_ids_append_only(tmp_path):
     init_run(tmp_path / "append.sqlite3", budget=3); runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     first = checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="same", owner_token="old", lease_seconds=.1)
-    old = runtime.reserve_api("brightdata", operation="old", request_fingerprint="old"); runtime.start_api(old)
+    _prepare_test_dispatch(0, "query", "same-request", "same")
+    old = runtime.reserve_api("brightdata", operation="query", request_fingerprint="same-request", flight_fingerprint="same", execution_generation=1); runtime.start_api(old)
     checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="same", owner_token="old", provider_call_id=old.call_id); runtime.complete_api(old, "FAILED")
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db: db.execute("UPDATE provider_query_flights SET lease_expires_at='2000-01-01T00:00:00+00:00'"); db.commit()
     reclaimed = checkpoint.resolve_expired_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="same", owner_token="new")
     assert reclaimed["leader"] and reclaimed["execution_generation"] == first["execution_generation"] and reclaimed["call_ids"] == [old.call_id]
-    new = runtime.reserve_api("brightdata", operation="new", request_fingerprint="new"); runtime.start_api(new)
+    new = runtime.reserve_api("brightdata", operation="query", request_fingerprint="same-request", flight_fingerprint="same", execution_generation=1); runtime.start_api(new)
     checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="same", owner_token="new", provider_call_id=new.call_id); runtime.complete_api(new, "FAILED")
     with pytest.raises(checkpoint.EvidenceInvariant):
         checkpoint.finish_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="same", owner_token="new", state="FAILED", result={}, call_ids=[new.call_id])
@@ -1330,6 +1411,7 @@ def test_provider_query_execution_generation_is_monotonic_and_relational(tmp_pat
     path = tmp_path / "generation.sqlite3"; init_run(path, budget=2); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     first = checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one")
+    _prepare_test_dispatch(0, "first-generation", "same-request", "fp")
     call = runtime.reserve_api("brightdata", operation="first-generation", request_fingerprint="same-request", flight_fingerprint="fp", execution_generation=1)
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT flight_fingerprint FROM provider_calls WHERE call_id=?", (call.call_id,)).fetchone() == ("fp",)
@@ -1338,6 +1420,7 @@ def test_provider_query_execution_generation_is_monotonic_and_relational(tmp_pat
     checkpoint.finish_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one", state="FAILED", result={}, call_ids=[call.call_id])
     second = checkpoint.start_new_provider_query_execution(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="two")
     assert first["execution_generation"] == 1 and second["execution_generation"] == 2 and second["call_ids"] == []
+    _prepare_test_dispatch(0, "second-generation", "same-request", "fp", round_ordinal=1)
     call_two = runtime.reserve_api("brightdata", operation="second-generation", request_fingerprint="same-request", flight_fingerprint="fp", execution_generation=2)
     assert call_two.accepted
     runtime.start_api(call_two); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="two", provider_call_id=call_two.call_id); runtime.mark_api_http_started(call_two, 1, "fp"); runtime.complete_api(call_two, "FAILED")
@@ -1367,6 +1450,7 @@ def test_new_provider_query_generation_accepts_reconciled_done_receipt(tmp_path)
     path = tmp_path / "generation-done.sqlite3"; init_run(path, budget=2); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one")
+    _prepare_test_dispatch(0, "done-generation", "one")
     call = runtime.reserve_api("brightdata", operation="done-generation", request_fingerprint="one")
     runtime.start_api(call); runtime.mark_api_http_started(call, 1, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=call.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one", provider_call_id=call.call_id)
     checkpoint.complete_provider_call_and_flight_success(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one", provider_call_id=call.call_id, result={"values": []}, call_ids=[call.call_id])
@@ -1378,6 +1462,7 @@ def test_non_atomic_flight_finish_rejects_done(tmp_path):
     path = tmp_path / "non-atomic-done.sqlite3"; init_run(path, budget=1); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner")
+    _prepare_test_dispatch(0, "legacy-done", "request")
     call = runtime.reserve_api("brightdata", operation="legacy-done", request_fingerprint="request")
     runtime.start_api(call); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=call.call_id)
     runtime.mark_api_http_started(call, 1, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=call.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64)
@@ -1397,6 +1482,7 @@ def test_generation_receipts_reject_cross_generation_mutation(tmp_path, receipt_
     path = tmp_path / f"generation-{receipt_table}.sqlite3"; init_run(path, budget=2); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one")
+    _prepare_test_dispatch(0, "generation-bound", "request")
     call = runtime.reserve_api("brightdata", operation="generation-bound", request_fingerprint="request")
     runtime.start_api(call); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one", provider_call_id=call.call_id); runtime.mark_api_http_started(call, 1, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=call.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64)
     checkpoint.complete_provider_call_and_flight_success(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="one", provider_call_id=call.call_id, result={"values": []}, call_ids=[call.call_id])
@@ -1415,6 +1501,7 @@ def test_atomic_flight_success_rejects_unbound_provider_call(tmp_path):
     path = tmp_path / "unbound-flight.sqlite3"; init_run(path, budget=1); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner")
+    _prepare_test_dispatch(0, "unbound", "request")
     call = runtime.reserve_api("brightdata", operation="unbound", request_fingerprint="request")
     runtime.start_api(call); runtime.mark_api_http_started(call, 1, "fp"); checkpoint.bind_provider_call_transport_receipt(call_id=call.call_id, endpoint_sha256="a" * 64, request_shape_sha256="b" * 64)
     with pytest.raises(checkpoint.StateTransitionInvariant, match="bound current-generation"):
@@ -1520,8 +1607,12 @@ def test_evidence_capture_rejects_missing_journal_manifest_or_artifact(tmp_path,
 def test_recording_transport_uses_production_attempt_and_fingerprints(durable, monkeypatch):
     runtime.set_item_context(0, "paid"); monkeypatch.setattr(config, "MAX_RETRIES", 1); monkeypatch.setattr(search, "_retry_delay", lambda *_: 0)
     recorder = RecordingPaidTransport([Response(200, {"organic": []}), Response(500, {"error": "retry"}), Response(200, {"organic": []})]); runtime.set_paid_transport(recorder)
-    assert search._brightdata_text("first independent query").result_state == "EMPTY"
-    assert search._brightdata_text("second independent query").result_state == "EMPTY"
+    query = "first independent query"
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint(query), search._brightdata_flight_fingerprint(query))
+    assert search._brightdata_text(query).result_state == "EMPTY"
+    query = "second independent query"
+    _prepare_test_dispatch(0, "search", search.brightdata_request_fingerprint(query), search._brightdata_flight_fingerprint(query), round_ordinal=1)
+    assert search._brightdata_text(query).result_state == "EMPTY"
     with sqlite3.connect(durable) as db:
         calls = db.execute("SELECT run_id,call_id,provider,item_index,request_fingerprint,attempt_ordinal,flight_fingerprint,state,endpoint_sha256,request_shape_sha256 FROM provider_calls ORDER BY rowid").fetchall()
         attempt_id = db.execute("SELECT paid_attempt_id FROM paid_attempts").fetchone()[0]
@@ -1535,11 +1626,13 @@ def test_recording_transport_uses_production_attempt_and_fingerprints(durable, m
 
 
 def _init_provider_run(path: Path, provider: str):
+    from modules import google_places
+
     init_run(path, budget=1)
     with sqlite3.connect(path) as db:
         db.execute("UPDATE provider_usage SET configured_limit=0,effective_limit=0 WHERE run_id='run'")
         db.execute("UPDATE provider_usage SET configured_limit=1,effective_limit=1 WHERE run_id='run' AND provider=?", (provider,)); db.commit()
-    runtime.reset(); runtime.configure_durable_run("run", {name: (1 if name == provider else 0) for name in checkpoint.CANONICAL_PROVIDERS}); runtime.set_phase("PAID"); runtime.set_item_context(0, "paid"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
+    runtime.reset(); google_places.reset(); runtime.configure_durable_run("run", {name: (1 if name == provider else 0) for name in checkpoint.CANONICAL_PROVIDERS}); runtime.set_phase("PAID"); runtime.set_item_context(0, "paid"); runtime.set_source_record_id("s0"); checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
 
 
 @pytest.mark.parametrize(("surface", "payload", "expected"), [
@@ -1560,6 +1653,24 @@ def test_paid_adapters_do_not_mark_done_before_semantic_validation(tmp_path, mon
     recorder = RecordingPaidTransport([Response(200, payload)])
     monkeypatch.setattr(runtime, "_PAID_TRANSPORT", recorder)
     monkeypatch.setattr(config, "SEARCH_CACHE_MODE", "off")
+    if surface == "brightdata":
+        request = search.brightdata_request_fingerprint("ACME"); query = search._brightdata_flight_fingerprint("ACME")
+        _prepare_test_dispatch(0, "search", request, query, provider=provider)
+    elif surface == "google_places":
+        query_name = google_places.scorer.search_name_variants("ACME")[0]
+        _prepare_test_dispatch(0, "text_search", runtime.request_fingerprint(provider, "text_search", {"query": query_name, "region": "TR"}), provider=provider)
+    elif surface in {"hunter_email", "hunter_finder"}:
+        request_data = {"domain": "acme.example"} if surface == "hunter_email" else {"company": "ACME"}
+        _prepare_test_dispatch(0, "domain_search", runtime.request_fingerprint(provider, "domain_search", request_data), provider=provider, need_class="contact" if surface == "hunter_email" else "identity")
+    elif surface == "brandfetch":
+        _prepare_test_dispatch(0, "domain_search", runtime.request_fingerprint(provider, "domain_search", {"company": "ACME"}), provider=provider)
+    elif surface == "linkedin_serp":
+        query = 'site:linkedin.com/company "ACME"'
+        _prepare_test_dispatch(0, "serp", runtime.request_fingerprint(provider, "serp", {"query": query}), provider=provider)
+    elif surface == "linkedin_scrape":
+        _prepare_test_dispatch(0, "scrape", runtime.request_fingerprint(provider, "scrape", {"url": "https://linkedin.com/company/acme"}), provider=provider)
+    else:
+        _prepare_test_dispatch(0, "arbiter", runtime.request_fingerprint(provider, "arbiter", {"prompt": "prompt", "schema": {}}), provider=provider)
     if surface == "brightdata":
         monkeypatch.setattr(config, "BRIGHTDATA_API_KEY", "fake"); monkeypatch.setattr(config, "BRIGHTDATA_REQUESTS_PER_MINUTE", 0); monkeypatch.setattr(config, "GLOBAL_REQUESTS_PER_SECOND", 0); monkeypatch.setattr(config, "MAX_RETRIES", 0)
         result = search._brightdata_text("ACME")
@@ -1607,6 +1718,10 @@ def test_openrouter_invalid_structured_verdict_is_failed_not_done(tmp_path, monk
     _init_provider_run(tmp_path / "invalid-llm.sqlite3", "llm")
     recorder = RecordingPaidTransport([Response(200, {"choices": [{"message": {"content": content}}], "usage": usage})])
     monkeypatch.setattr(runtime, "_PAID_TRANSPORT", recorder)
+    _prepare_test_dispatch(
+        0, "arbiter", runtime.request_fingerprint("llm", "arbiter", {"prompt": "prompt", "schema": {}}),
+        provider="llm",
+    )
     client = llm_arbiter.OpenRouterClient("fake", "model", 2)
     with pytest.raises(ValueError): client.generate("prompt", {})
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db:
@@ -1623,21 +1738,30 @@ def test_paid_adapter_cache_write_failure_does_not_change_terminal_result(tmp_pa
         recorder = RecordingPaidTransport([Response(200, {"places": []})]); runtime.set_paid_transport(recorder)
         monkeypatch.setattr(config, "ENABLE_GOOGLE_PLACES", True); monkeypatch.setattr(config, "GOOGLE_PLACES_API_KEY", "fake")
         monkeypatch.setattr(cache_store, "save", lambda *_a, **_k: (_ for _ in ()).throw(OSError("cache")))
+        query_name = google_places.scorer.search_name_variants("ACME")[0]
+        _prepare_test_dispatch(0, "text_search", runtime.request_fingerprint(provider, "text_search", {"query": query_name, "region": "TR"}), provider=provider)
         result = google_places.search_company("ACME"); counter = "api.google_places.cache_write_error"
     elif surface in {"brandfetch", "hunter_finder"}:
         recorder = RecordingPaidTransport([Response(200, [] if surface == "brandfetch" else {"data": []})]); runtime.set_paid_transport(recorder)
         monkeypatch.setattr(company_resolvers, "_save", lambda *_a, **_k: (_ for _ in ()).throw(OSError("cache")))
         if surface == "brandfetch":
             monkeypatch.setattr(config, "ENABLE_BRANDFETCH_DOMAIN_SEARCH", True); monkeypatch.setattr(config, "BRANDFETCH_CLIENT_ID", "fake")
+            _prepare_test_dispatch(0, "domain_search", runtime.request_fingerprint(provider, "domain_search", {"company": "ACME"}), provider=provider)
             result = company_resolvers.brandfetch_domains("ACME"); counter = "resolver.brandfetch.cache_write_error"
         else:
             monkeypatch.setattr(config, "ENABLE_HUNTER_DOMAIN_FINDER", True); monkeypatch.setattr(config, "HUNTER_API_KEY", "fake")
+            _prepare_test_dispatch(0, "domain_search", runtime.request_fingerprint(provider, "domain_search", {"company": "ACME"}), provider=provider)
             result = company_resolvers.hunter_domains("ACME"); counter = "resolver.hunter.cache_write_error"
     else:
         valid = '{"verdict":"match","reason":"a sufficiently detailed concrete reason","detected_sector":"metal","expected_sector":"metal"}'
         recorder = RecordingPaidTransport([Response(200, {"choices": [{"message": {"content": valid}}], "usage": {}})]); runtime.set_paid_transport(recorder)
         monkeypatch.setattr(config, "ENABLE_LLM_ARBITER", True); monkeypatch.setattr(config, "OPENROUTER_API_KEY", "fake")
         monkeypatch.setattr(cache_store, "save", lambda *_a, **_k: (_ for _ in ()).throw(OSError("cache")))
+        prompt = llm_arbiter._prompt("ACME", "", "metal", "acme.example", "ACME manufactures metal machinery and industrial equipment")
+        _prepare_test_dispatch(
+            0, "arbiter", runtime.request_fingerprint("llm", "arbiter", {"prompt": prompt, "schema": llm_arbiter._RESPONSE_SCHEMA}),
+            provider="llm",
+        )
         result = llm_arbiter.arbitrate("ACME", "", "metal", "acme.example", "ACME manufactures metal machinery and industrial equipment"); counter = "api.llm_arbiter.cache_write_error"
     with sqlite3.connect(config.PROGRESS_DB_FILE) as db: states = db.execute("SELECT state FROM provider_calls").fetchall()
     state = result.get("provider_result") if isinstance(result, dict) else result.result_state
@@ -1818,6 +1942,7 @@ def _valid_paid_audit_scenario(root: Path):
     root.mkdir(); db_path = root / "sanitized_progress.sqlite3"; init_run(db_path, budget=1); runtime.set_item_context(0, "paid")
     checkpoint.begin_paid_attempt(run_id="run", item_index=0, attempt_number=1)
     checkpoint.claim_provider_query_flight(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner")
+    _prepare_test_dispatch(0, "scenario", "request")
     call = runtime.reserve_api("brightdata", operation="scenario", request_fingerprint="request")
     runtime.start_api(call); checkpoint.bind_provider_query_flight_call(run_id="run", provider="brightdata", query_fingerprint="fp", owner_token="owner", provider_call_id=call.call_id); runtime.mark_api_http_started(call, 1, "fp")
     envelope = runtime.transport_envelope(call, endpoint="https://api.brightdata.com/request", attempt_ordinal=1, flight_fingerprint="fp", request_shape={"method": "POST", "json": {"query": "ACME"}}, timeout=2)

@@ -86,7 +86,7 @@ def _route_delivery(items) -> None:
         filename = getattr(module, "__file__", None) if module is not None else None
         if filename and Path(filename).resolve() == DELIVERY_MODULE:
             matches[id(module)] = module
-    if not matches and PHASE == "preflight":
+    if not matches and PHASE in {"preflight", "long_h01", "long_k09"}:
         return
     if len(matches) != 1:
         raise pytest.UsageError(
@@ -115,7 +115,7 @@ def pytest_collection_finish(session):
     nodeids = [item.nodeid for item in session.items]
     if PHASE == "preflight":
         return
-    if not _DELIVERY_ROUTED:
+    if not _DELIVERY_ROUTED and PHASE not in {"long_h01", "long_k09"}:
         raise pytest.UsageError("PETZOO DELIVERY output routing was not applied after collection")
     if PHASE == "collect":
         payload = {

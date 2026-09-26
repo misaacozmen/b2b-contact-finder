@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  normal-regression:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     env:
       B2B_TEST_OFFLINE: "1"
     steps:
@@ -27,11 +27,104 @@ jobs:
       - run: python -m pip install --requirement requirements-dev.txt
       - run: python -c "from pathlib import Path; assert not Path('input/firms.xlsx').exists(), 'input/firms.xlsx must not exist'; assert not Path('data/benchmark_seen_company_hashes.json').exists(), 'public seen hashes fixture must not exist'; assert not Path('build_benchmark_seen_hashes.py').exists(), 'hash build tool must not exist'"
       - run: python -m compileall -q main.py config.py setup_company_resolvers.py modules tests
-      - run: python -m pytest -q -p no:cacheprovider
+      - name: Verify full collection and run normal offline partition
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requiredLong = @(
+            'tests/test_mimari_reaudit_altinci_20260921.py::test_h01_default_pipeline_100_firms_three_workers_has_one_call_per_primary_query',
+            'tests/test_mimari_reaudit_altinci_20260921.py::test_k09_budget_100_gives_each_firm_only_first_primary_right',
+            'tests/test_petzoo_pipeline_acceptance.py::test_p11_real_137_company_pipeline_worker_1_and_3'
+          )
+          $collected = python -m pytest --collect-only -q -p no:cacheprovider --color=no
+          if ($LASTEXITCODE -ne 0) { throw "pytest collection failed: $LASTEXITCODE" }
+          $nodeids = @($collected | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^tests/.+::' })
+          if ($nodeids.Count -lt 1105) { throw "collected fewer than the frozen 1105 baseline nodes: $($nodeids.Count)" }
+          if (@($nodeids | Sort-Object -Unique).Count -ne $nodeids.Count) { throw 'pytest collection contains duplicate node IDs' }
+          foreach ($nodeid in $requiredLong) { if (@($nodeids | Where-Object { $_ -ceq $nodeid }).Count -ne 1) { throw "required long node missing/duplicated: $nodeid" } }
+          $normalCount = @($nodeids | Where-Object { $_ -cnotin $requiredLong }).Count
+          if ($normalCount + $requiredLong.Count -ne $nodeids.Count) { throw 'normal/long partition does not reconcile to the full collection' }
+          Write-Host "COLLECTED=$($nodeids.Count) NORMAL=$normalCount LONG=$($requiredLong.Count)"
+          $pytestArgs = @('-m', 'pytest', '-q', '-p', 'no:cacheprovider')
+          foreach ($nodeid in $requiredLong) { $pytestArgs += "--deselect=$nodeid" }
+          & python @pytestArgs 2>&1 | ForEach-Object { Write-Host $_ }
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) { throw "normal offline regression failed: $testExit" }
       - run: python validate_benchmark_suite.py
       - run: python -m pip check
       - run: python main.py --help
       - run: python setup_company_resolvers.py --help
+
+  scheduler-budget-regression:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      B2B_TEST_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install --requirement requirements-dev.txt
+      - name: Verify collection and run required scheduler budget nodes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requiredLong = @(
+            'tests/test_mimari_reaudit_altinci_20260921.py::test_h01_default_pipeline_100_firms_three_workers_has_one_call_per_primary_query',
+            'tests/test_mimari_reaudit_altinci_20260921.py::test_k09_budget_100_gives_each_firm_only_first_primary_right',
+            'tests/test_petzoo_pipeline_acceptance.py::test_p11_real_137_company_pipeline_worker_1_and_3'
+          )
+          $collected = python -m pytest --collect-only -q -p no:cacheprovider --color=no
+          if ($LASTEXITCODE -ne 0) { throw "pytest collection failed: $LASTEXITCODE" }
+          $nodeids = @($collected | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^tests/.+::' })
+          if ($nodeids.Count -lt 1105 -or @($nodeids | Sort-Object -Unique).Count -ne $nodeids.Count) { throw "collection baseline/uniqueness failed: $($nodeids.Count)" }
+          foreach ($nodeid in $requiredLong) { if (@($nodeids | Where-Object { $_ -ceq $nodeid }).Count -ne 1) { throw "required long node missing/duplicated: $nodeid" } }
+          Write-Host "COLLECTED=$($nodeids.Count) NORMAL=$(@($nodeids | Where-Object { $_ -cnotin $requiredLong }).Count) LONG=$($requiredLong.Count)"
+          $exitCodes = @()
+          foreach ($nodeid in $requiredLong[0..1]) {
+            & python -m pytest -q -p no:cacheprovider $nodeid 2>&1 | ForEach-Object { Write-Host $_ }
+            $exitCodes += $LASTEXITCODE
+          }
+          if (@($exitCodes | Where-Object { $_ -ne 0 }).Count) { throw "one or more H01/K09 offline tests failed: $($exitCodes -join ',')" }
+
+  p11-worker-regression:
+    runs-on: windows-latest
+    timeout-minutes: 70
+    env:
+      B2B_TEST_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: python -m pip install --requirement requirements-dev.txt
+      - name: Verify collection and run P11 workers 1 and 3 acceptance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requiredLong = @(
+            'tests/test_mimari_reaudit_altinci_20260921.py::test_h01_default_pipeline_100_firms_three_workers_has_one_call_per_primary_query',
+            'tests/test_mimari_reaudit_altinci_20260921.py::test_k09_budget_100_gives_each_firm_only_first_primary_right',
+            'tests/test_petzoo_pipeline_acceptance.py::test_p11_real_137_company_pipeline_worker_1_and_3'
+          )
+          $collected = python -m pytest --collect-only -q -p no:cacheprovider --color=no
+          if ($LASTEXITCODE -ne 0) { throw "pytest collection failed: $LASTEXITCODE" }
+          $nodeids = @($collected | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^tests/.+::' })
+          if ($nodeids.Count -lt 1105 -or @($nodeids | Sort-Object -Unique).Count -ne $nodeids.Count) { throw "collection baseline/uniqueness failed: $($nodeids.Count)" }
+          foreach ($nodeid in $requiredLong) { if (@($nodeids | Where-Object { $_ -ceq $nodeid }).Count -ne 1) { throw "required long node missing/duplicated: $nodeid" } }
+          Write-Host "COLLECTED=$($nodeids.Count) NORMAL=$(@($nodeids | Where-Object { $_ -cnotin $requiredLong }).Count) LONG=$($requiredLong.Count)"
+          & python -m pytest -q -p no:cacheprovider $requiredLong[2] 2>&1 | ForEach-Object { Write-Host $_ }
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) { throw "P11 worker-1/worker-3 offline acceptance failed: $testExit" }
 
   browser-smoke:
     runs-on: ubuntu-latest

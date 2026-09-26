@@ -4422,7 +4422,16 @@ def finish_provider_query_flight(*, run_id: str, provider: str, query_fingerprin
                 "AND query_fingerprint=? AND state IN ('ALLOCATED','READY')",
                 (run_id, provider, query_fingerprint),
             ).fetchall()
+            completed_rounds: set[int] = set()
             for (job_fingerprint,) in work_rows:
+                completed_rounds.update(
+                    int(round_row[0]) for round_row in connection.execute(
+                        "SELECT round_ordinal FROM provider_dispatch_allocations "
+                        "WHERE run_id=? AND provider=? AND job_fingerprint=? "
+                        "AND state IN ('CONSUMED','RESERVED')",
+                        (run_id, provider, str(job_fingerprint)),
+                    ).fetchall()
+                )
                 connection.execute(
                     "UPDATE provider_work_items SET state=?,terminal_reason=?,updated_at=? "
                     "WHERE run_id=? AND job_fingerprint=? AND state IN ('ALLOCATED','READY')",
@@ -4432,6 +4441,11 @@ def finish_provider_query_flight(*, run_id: str, provider: str, query_fingerprin
                     "UPDATE provider_dispatch_allocations SET state=?,terminal_state=?,terminal_at=? "
                     "WHERE run_id=? AND job_fingerprint=? AND state IN ('CONSUMED','RESERVED')",
                     (state, state, terminal_at, run_id, str(job_fingerprint)),
+                )
+            for round_ordinal in sorted(completed_rounds):
+                _refresh_provider_dispatch_round_state(
+                    connection, run_id=str(run_id), provider=str(provider),
+                    round_ordinal=round_ordinal, now=terminal_at,
                 )
         connection.commit()
 

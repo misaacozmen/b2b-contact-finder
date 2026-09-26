@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVIDENCE = ROOT / "outputs" / "petzoo_offline_kapanis_20260925"
 EVIDENCE = Path(os.environ.get("PETZOO_EVIDENCE_DIR", DEFAULT_EVIDENCE)).expanduser().resolve()
+EVIDENCE_ROOT = EVIDENCE.parent
+ALLOWED_OUTPUT_ROOT = (ROOT / "outputs").resolve()
+DEADLINE_FILE = Path(os.environ.get("PETZOO_DEADLINE_FILE", "")).expanduser()
+TASK_DEADLINE_QPC = 0
+TASK_DEADLINE_FREQUENCY = 0
+TASK_START_UTC = ""
 TEST_ROOT = EVIDENCE / "source_snapshot"
 SNAPSHOT_OUTPUTS = TEST_ROOT / "outputs"
 PREVIOUS_EVIDENCE = Path(os.environ.get(
@@ -28,13 +34,15 @@ SCOPE_MANIFEST = Path(os.environ.get(
 )).expanduser().resolve()
 RUNTIME = Path(os.environ.get("PETZOO_PYTHON", sys.executable)).expanduser().resolve()
 DEPENDENCY_CACHE_DIR = EVIDENCE / "dependency_cache" / "tldextract"
-EXPECTED_RUNTIME_SHA256 = "ac7cea155eead34c4d462492a34348f40f98d8212e27ed741be7fe27c4144b2c"
+INITIAL_RUNTIME_SHA256 = "ac7cea155eead34c4d462492a34348f40f98d8212e27ed741be7fe27c4144b2c"
+EXPECTED_RUNTIME_SHA256 = "d63e5f982d680fb12db2935efebafb4c860b4fa58694448a6fe5cc22ff9750e2"
 DEFERRED = [
     "tests/test_mimari_reaudit_altinci_20260921.py::test_h01_default_pipeline_100_firms_three_workers_has_one_call_per_primary_query",
     "tests/test_mimari_reaudit_altinci_20260921.py::test_k09_budget_100_gives_each_firm_only_first_primary_right",
     "tests/test_petzoo_pipeline_acceptance.py::test_p11_real_137_company_pipeline_worker_1_and_3",
 ]
 COMMIT_SCOPE_PATHS = [
+    ".github/workflows/tests.yml",
     "config.py", "main.py",
     "modules/checkpoint.py", "modules/company_resolvers.py", "modules/contact_publication.py",
     "modules/crawler.py", "modules/discovery_coverage.py", "modules/discovery_rules.py",
@@ -70,15 +78,17 @@ COMMIT_SCOPE_PURPOSE = (
     "synthetic PETZOO fixture and child helpers, reproducible offline harness, and the concise test-status record."
 )
 PROTECTED_ROOTS = ("input", "state", "data", "runs", "outputs")
-TOTAL_BUDGET_SECONDS = 40 * 60
+TOTAL_BUDGET_SECONDS = 6 * 60 * 60
 COLLECTION_LIMIT_SECONDS = 60
-RUN_LIMIT_SECONDS = 20 * 60
+RUN_LIMIT_SECONDS = 30 * 60
 NODE_LIMIT_SECONDS = 180
 END_MARGIN_SECONDS = 90
 
 
 def configure_paths() -> dict:
-    global EVIDENCE, TEST_ROOT, SNAPSHOT_OUTPUTS, PREVIOUS_EVIDENCE, SCOPE_MANIFEST, RUNTIME, DEPENDENCY_CACHE_DIR
+    global EVIDENCE, EVIDENCE_ROOT, ALLOWED_OUTPUT_ROOT, DEADLINE_FILE
+    global TASK_DEADLINE_QPC, TASK_DEADLINE_FREQUENCY, TASK_START_UTC
+    global TEST_ROOT, SNAPSHOT_OUTPUTS, PREVIOUS_EVIDENCE, SCOPE_MANIFEST, RUNTIME, DEPENDENCY_CACHE_DIR
     parser = argparse.ArgumentParser(description="Run the bounded PETZOO offline regression in an isolated snapshot.")
     parser.add_argument("--evidence-dir", default=os.environ.get("PETZOO_EVIDENCE_DIR", str(DEFAULT_EVIDENCE)))
     parser.add_argument("--scope-manifest", default=os.environ.get(
@@ -88,15 +98,35 @@ def configure_paths() -> dict:
         "PETZOO_PREVIOUS_EVIDENCE", str(ROOT / "outputs" / "petzoo_offline_regresyon_bolum1_r2_20260925"),
     ))
     parser.add_argument("--python", dest="python_path", default=os.environ.get("PETZOO_PYTHON", sys.executable))
+    parser.add_argument("--allowed-output-root", default=os.environ.get("PETZOO_ALLOWED_OUTPUT_ROOT", str(ROOT / "outputs")))
+    parser.add_argument("--task-evidence-root", default=os.environ.get("PETZOO_TASK_EVIDENCE_ROOT", ""))
+    parser.add_argument("--deadline-file", default=os.environ.get("PETZOO_DEADLINE_FILE", ""))
     args = parser.parse_args()
 
-    outputs_root = (ROOT / "outputs").resolve()
-    outputs_item = ROOT / "outputs"
-    if not outputs_item.is_dir() or outputs_item.is_symlink() or getattr(outputs_item.stat(), "st_file_attributes", 0) & 0x400:
-        raise RuntimeError("repository outputs root must be a real directory, not a link/reparse point")
+    outputs_root = Path(args.allowed_output_root).expanduser().resolve()
+    outputs_item = Path(args.allowed_output_root).expanduser()
+    if not outputs_item.is_dir() or outputs_item.is_symlink() or getattr(outputs_item.lstat(), "st_file_attributes", 0) & 0x400:
+        raise RuntimeError("allowed outputs root must be a real directory, not a link/reparse point")
+    ALLOWED_OUTPUT_ROOT = outputs_root
     EVIDENCE = Path(args.evidence_dir).expanduser().resolve()
     if EVIDENCE == outputs_root or not EVIDENCE.is_relative_to(outputs_root):
-        raise RuntimeError(f"evidence-dir must be a child of the repository outputs directory: {EVIDENCE}")
+        raise RuntimeError(f"evidence-dir must be a child of the explicitly allowed outputs directory: {EVIDENCE}")
+    EVIDENCE_ROOT = Path(args.task_evidence_root).expanduser().resolve() if args.task_evidence_root else EVIDENCE.parent
+    if EVIDENCE_ROOT != outputs_root and not EVIDENCE_ROOT.is_relative_to(outputs_root):
+        raise RuntimeError(f"task evidence root must be under the allowed outputs directory: {EVIDENCE_ROOT}")
+    if EVIDENCE != EVIDENCE_ROOT and not EVIDENCE.is_relative_to(EVIDENCE_ROOT):
+        raise RuntimeError(f"attempt evidence directory must be inside the task evidence root: {EVIDENCE}")
+    if not args.deadline_file:
+        raise RuntimeError("a persistent six-hour --deadline-file is required")
+    DEADLINE_FILE = Path(args.deadline_file).expanduser().resolve()
+    if not DEADLINE_FILE.is_file() or not DEADLINE_FILE.is_relative_to(EVIDENCE_ROOT):
+        raise RuntimeError("deadline file must exist inside the persistent task evidence root")
+    deadline = json.loads(DEADLINE_FILE.read_text(encoding="utf-8-sig"))
+    TASK_DEADLINE_QPC = int(deadline["deadline_qpc"])
+    TASK_DEADLINE_FREQUENCY = int(deadline["qpc_frequency"])
+    TASK_START_UTC = str(deadline["start_utc"])
+    if TASK_DEADLINE_FREQUENCY <= 0 or not TASK_START_UTC:
+        raise RuntimeError("persistent deadline record is incomplete")
     TEST_ROOT = EVIDENCE / "source_snapshot"
     SNAPSHOT_OUTPUTS = TEST_ROOT / "outputs"
     DEPENDENCY_CACHE_DIR = EVIDENCE / "dependency_cache" / "tldextract"
@@ -120,11 +150,37 @@ def configure_paths() -> dict:
         "previous_evidence": str(PREVIOUS_EVIDENCE),
         "python": str(RUNTIME),
         "repository_outputs_root": str(outputs_root),
+        "task_evidence_root": str(EVIDENCE_ROOT),
+        "deadline_file": str(DEADLINE_FILE),
+        "deadline_qpc": TASK_DEADLINE_QPC,
+        "deadline_qpc_frequency": TASK_DEADLINE_FREQUENCY,
     }
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def monotonic_qpc() -> tuple[int, int]:
+    if os.name != "nt":
+        return time.monotonic_ns(), 1_000_000_000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    counter = ctypes.c_longlong()
+    frequency = ctypes.c_longlong()
+    if not kernel32.QueryPerformanceCounter(ctypes.byref(counter)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not kernel32.QueryPerformanceFrequency(ctypes.byref(frequency)) or frequency.value <= 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(counter.value), int(frequency.value)
+
+
+def remaining_task_seconds() -> float:
+    if not TASK_DEADLINE_QPC or not TASK_DEADLINE_FREQUENCY:
+        return 0.0
+    now, frequency = monotonic_qpc()
+    if frequency != TASK_DEADLINE_FREQUENCY:
+        return 0.0
+    return max(0.0, (TASK_DEADLINE_QPC - now) / frequency)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -149,14 +205,15 @@ def write_commit_scope_manifest(state: dict) -> dict:
 
     head = git("rev-parse", "HEAD")
     branch = git("branch", "--show-current")
+    target_branch = str(baseline.get("target_branch", "codex/release-hardening"))
+    expected_worktree_branch = str(baseline.get("worktree_branch", baseline.get("branch", target_branch)))
     index_tree = git("write-tree")
     staged = git("diff", "--cached", "--name-status")
     remotes = git("remote", "-v").splitlines()
     expected_remote = "https://github.com/misaacozmen/b2b-contact-finder.git"
     if (
         head != baseline.get("head")
-        or branch != "codex/release-hardening"
-        or branch != baseline.get("branch")
+        or branch != expected_worktree_branch
         or index_tree != baseline.get("index_tree")
         or staged
         or not any(line.startswith(f"origin\t{expected_remote} (fetch)") for line in remotes)
@@ -185,6 +242,7 @@ def write_commit_scope_manifest(state: dict) -> dict:
         "purpose": COMMIT_SCOPE_PURPOSE,
         "head_before_test": head,
         "branch": branch,
+        "target_branch": target_branch,
         "origin": expected_remote,
         "index_tree_before_test": index_tree,
         "staged_paths_before_test": [],
@@ -275,6 +333,14 @@ def file_sha256(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def r2_harness_hashes() -> dict[str, str]:
+    names = ("run_offline_regression.py", "petzoo_offline_plugin.py", "sitecustomize.py")
+    return {
+        name: file_sha256(EVIDENCE / name) if (EVIDENCE / name).is_file() else "NOT_RUN"
+        for name in names
+    }
 
 
 def runtime_sources() -> list[Path]:
@@ -715,6 +781,15 @@ def supervise(stage: str, argv: list[str], timeout_seconds: float, env: dict[str
         "stderr_path": str(stderr_path),
         "process_tree_containment": "windows_job_object_kill_on_close",
     }
+    task_remaining = remaining_task_seconds()
+    if task_remaining <= 0:
+        record.update({"started": False, "exit_code": None, "timed_out": True, "termination_reason": "global_deadline"})
+        write_json(EVIDENCE / f"{stage}_process.json", record)
+        return record
+    if timeout_seconds > task_remaining:
+        record["global_deadline_limited_timeout_seconds"] = task_remaining
+        timeout_seconds = task_remaining
+        record["timeout_seconds"] = timeout_seconds
     try:
         job = ProcessJob()
     except OSError as exc:
@@ -749,13 +824,18 @@ def supervise(stage: str, argv: list[str], timeout_seconds: float, env: dict[str
         while process.poll() is None:
             offset = read_node_events(node_events, offset, state)
             now = time.monotonic()
+            if remaining_task_seconds() <= 0:
+                reason = "global_deadline"
             if now - stage_started >= timeout_seconds:
-                reason = "stage_wall_timeout"
-            if stage == "run" and state.get("active_node"):
+                reason = reason or "stage_wall_timeout"
+            if state.get("active_node") and (stage == "run" or stage.startswith("long_")):
+                active_node = str(state["active_node"])
+                node_wall_limit = NODE_LIMIT_SECONDS if stage == "run" else LONG_NODE_WALL_LIMITS.get(active_node, timeout_seconds)
                 node_elapsed = now - float(state.get("active_node_started_monotonic", now))
-                if node_elapsed >= NODE_LIMIT_SECONDS:
+                if node_elapsed >= node_wall_limit:
                     reason = "node_wall_timeout"
                     state["active_node_elapsed_seconds"] = round(node_elapsed, 3)
+                    state["active_node_wall_limit_seconds"] = node_wall_limit
             try:
                 last_job_count = job.active_count()
             except OSError as exc:
@@ -1259,7 +1339,13 @@ ACCURACY_NODEIDS = [
 ]
 P07_NODEID = "tests/test_petzoo_pipeline_acceptance.py::test_p07_negative_http_receipt_survives_a_fresh_process"
 PREVIOUS_R3_FAILURE_NODE = P07_NODEID
-TASK_LIMIT_SECONDS = 40 * 60
+LONG_TESTS = [
+    ("h01", "tests/test_mimari_reaudit_altinci_20260921.py::test_h01_default_pipeline_100_firms_three_workers_has_one_call_per_primary_query", 25 * 60),
+    ("k09", "tests/test_mimari_reaudit_altinci_20260921.py::test_k09_budget_100_gives_each_firm_only_first_primary_right", 10 * 60),
+    ("p11", "tests/test_petzoo_pipeline_acceptance.py::test_p11_real_137_company_pipeline_worker_1_and_3", 65 * 60),
+]
+LONG_NODE_WALL_LIMITS = {nodeid: limit for _name, nodeid, limit in LONG_TESTS}
+TASK_LIMIT_SECONDS = 6 * 60 * 60
 PREFLIGHT_LIMIT_SECONDS = 90
 GUARD_PROBE_LIMIT_SECONDS = 4
 R2_COLLECTION_LIMIT_SECONDS = 60
@@ -1489,7 +1575,11 @@ def r2_child_env(phase: str, *, probe_id: str = "") -> tuple[dict[str, str], lis
         if name in env:
             removed.append(name)
             env.pop(name, None)
-    temp_root = EVIDENCE / "temp"
+    # Keep tempfile outputs under this attempt, while pytest owns a disposable
+    # child basetemp. Pytest clears basetemp between sessions; session fixtures
+    # created by conftest must not live inside that directory. tmp_path remains
+    # nested under tempfile.gettempdir() for artifact-boundary validation.
+    temp_root = EVIDENCE
     temp_root.mkdir(parents=True, exist_ok=True)
     env.update({
         "B2B_TEST_OFFLINE": "1",
@@ -1502,7 +1592,7 @@ def r2_child_env(phase: str, *, probe_id: str = "") -> tuple[dict[str, str], lis
         "PETZOO_SOURCE_SNAPSHOT": str(TEST_ROOT.resolve()),
         "PETZOO_SNAPSHOT_OUTPUTS": str(SNAPSHOT_OUTPUTS.resolve()),
         "PETZOO_DELIVERY_MODULE": str(TEST_ROOT / "tests" / "test_petzoo_pipeline_acceptance.py"),
-        "PETZOO_DEFERRED_NODEIDS": json.dumps(DEFERRED),
+        "PETZOO_DEFERRED_NODEIDS": json.dumps(DEFERRED if phase == "run" else []),
         "PETZOO_NETWORK_GUARD": "1",
         "PETZOO_FILESYSTEM_GUARD": "1",
         "PETZOO_NETWORK_GUARD_LOG": str(EVIDENCE / "network_guard.jsonl"),
@@ -1981,32 +2071,108 @@ raise SystemExit("socket.connect was not blocked by the audit hook")
     return record
 
 
+def _is_reparse_junction(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    is_junction = getattr(path, "is_junction", None)
+    return bool(getattr(metadata, "st_file_attributes", 0) & 0x400) and bool(is_junction and is_junction())
+
+
 def r4_snapshot_outputs_probe(gate_started: float, task_started: float, state: dict) -> dict:
     junction = SNAPSHOT_OUTPUTS / "guard_escape_junction"
-    if junction.exists() or junction.is_symlink():
-        raise RuntimeError(f"refusing pre-existing output-boundary junction path: {junction}")
-    command_line = f'mklink /J "{junction}" "{TEST_ROOT.resolve()}"'
-    junction_process = subprocess.run(
-        ["cmd.exe", "/d", "/c", command_line], capture_output=True,
-        text=True, encoding="utf-8", errors="replace", timeout=10, check=False,
-    )
-    junction_created = junction.is_dir() and (
-        getattr(junction.stat(), "st_file_attributes", 0) & 0x400
-    ) and junction.resolve() == TEST_ROOT.resolve()
+    snapshot_real = TEST_ROOT.resolve(strict=True)
+    outputs_real = SNAPSHOT_OUTPUTS.resolve(strict=True)
     record = {
         "probe_id": "snapshot_output_boundary",
-        "junction_command_exit_code": junction_process.returncode,
-        "junction_stdout": junction_process.stdout,
-        "junction_stderr": junction_process.stderr,
-        "junction_created_and_resolves_to_snapshot": junction_created,
+        "status": "NOT_RUN",
+        "command_argv": [],
+        "command_exit_code": None,
+        "command_timeout_seconds": 15,
+        "command_stdout": "",
+        "command_stderr": "",
         "process_tree_closed": True,
+        "junction_created_and_resolves_to_snapshot": False,
+        "junction_removed": False,
         "passed": False,
     }
     process_result = None
+    own_path_was_absent = False
+    junction_created = False
+    config_source = snapshot_real / "config.py"
+    config_sha256_before = file_sha256(config_source)
     try:
-        if not junction_created:
-            raise RuntimeError("could not create a temporary in-snapshot junction for escape-path validation")
+        if outputs_real.parent != snapshot_real or not outputs_real.is_relative_to(snapshot_real):
+            raise RuntimeError("snapshot outputs is not the direct physical outputs child of the isolated snapshot")
+        if junction.parent.resolve(strict=True) != outputs_real or not outputs_real.is_relative_to(EVIDENCE.resolve(strict=True)):
+            raise RuntimeError("junction path is outside the new snapshot-output temporary area")
+        if not snapshot_real.is_relative_to(EVIDENCE.resolve(strict=True)):
+            raise RuntimeError("junction target is outside the new evidence snapshot")
+        if os.path.lexists(junction):
+            raise RuntimeError(f"refusing pre-existing output-boundary junction path: {junction}")
+        own_path_was_absent = True
+        ps_script = (
+            "$ErrorActionPreference = 'Stop'; "
+            "New-Item -ItemType Junction -Path $env:PETZOO_PROBE_LINK "
+            "-Target $env:PETZOO_PROBE_TARGET | Out-Null"
+        )
+        command_argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script]
         env, _removed = r2_child_env("snapshot-output-boundary", probe_id="snapshot_output_boundary")
+        env["PETZOO_PROBE_LINK"] = str(junction)
+        env["PETZOO_PROBE_TARGET"] = str(snapshot_real)
+        record.update({
+            "status": "RUNNING",
+            "command_argv": command_argv,
+            "command_env_paths": {"PETZOO_PROBE_LINK": str(junction), "PETZOO_PROBE_TARGET": str(snapshot_real)},
+            "command_cwd": str(TEST_ROOT),
+            "config_source_sha256_before": config_sha256_before,
+            "allowed_temporary_path": str(outputs_real),
+            "target_resolved_path": str(snapshot_real),
+        })
+        command_timeout = min(15.0, remaining_task_seconds(), r3_gate_remaining(gate_started))
+        if command_timeout <= 0:
+            raise RuntimeError("six-hour deadline or 180-second short gate expired before junction creation")
+        record["command_timeout_seconds"] = command_timeout
+        command_started = time.monotonic()
+        try:
+            junction_process = subprocess.run(
+                command_argv, cwd=TEST_ROOT, env=env, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=command_timeout,
+                check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            record.update({
+                "command_exit_code": junction_process.returncode,
+                "command_stdout": junction_process.stdout,
+                "command_stderr": junction_process.stderr,
+                "command_process_wait_completed": True,
+            })
+        except subprocess.TimeoutExpired as exc:
+            def decode_output(value: str | bytes | None) -> str:
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                return value or ""
+            record.update({
+                "command_exit_code": None,
+                "command_stdout": decode_output(exc.stdout),
+                "command_stderr": decode_output(exc.stderr),
+                "command_timed_out": True,
+                "command_process_wait_completed": True,
+            })
+            raise RuntimeError("PowerShell junction command exceeded its bounded timeout") from exc
+        record["command_elapsed_seconds"] = round(time.monotonic() - command_started, 3)
+        link_is_junction = _is_reparse_junction(junction)
+        target_matches = link_is_junction and junction.resolve(strict=True) == snapshot_real
+        junction_created = bool(
+            junction_process.returncode == 0 and junction.is_dir()
+            and link_is_junction and target_matches
+        )
+        record["junction_lstat_attributes"] = getattr(junction.lstat(), "st_file_attributes", 0) if os.path.lexists(junction) else None
+        record["junction_is_reparse_point"] = link_is_junction
+        record["junction_target_matches_snapshot"] = target_matches
+        record["junction_created_and_resolves_to_snapshot"] = junction_created
+        if not junction_created:
+            raise RuntimeError("PowerShell returned without creating the verified snapshot junction")
         code = r'''import hashlib, json, os
 from pathlib import Path
 out = Path(os.environ["PETZOO_SNAPSHOT_OUTPUTS"])
@@ -2078,20 +2244,48 @@ print(json.dumps({"pid": os.getpid(), "allowed_output_sha256": hashlib.sha256(al
             "process": process_result,
         })
         state["expected_snapshot_output_escape_blocks"] = denials
+    except Exception as exc:
+        record["probe_error"] = f"{type(exc).__name__}: {exc}"
+        if record.get("command_timed_out"):
+            record["status"] = "TIMEOUT"
+        elif process_result is not None:
+            record["status"] = "PASS" if record.get("passed") else "FAIL"
+        else:
+            record["status"] = "NOT_RUN"
     finally:
-        if junction.is_dir() and (getattr(junction.stat(), "st_file_attributes", 0) & 0x400):
-            if junction.resolve() != TEST_ROOT.resolve():
-                record["junction_cleanup_error"] = "refusing to remove junction after its target changed"
-            else:
-                os.rmdir(junction)
-                record["junction_removed"] = not junction.exists()
-        elif junction.exists() or junction.is_symlink():
-            record["junction_cleanup_error"] = "temporary junction path changed type; retained for evidence"
+        if os.path.lexists(junction):
+            try:
+                cleanup_is_ours = (
+                    own_path_was_absent and _is_reparse_junction(junction)
+                    and junction.resolve(strict=True) == snapshot_real
+                )
+                if cleanup_is_ours:
+                    os.rmdir(junction)
+                    record["junction_removed"] = not os.path.lexists(junction)
+                else:
+                    record["junction_removed"] = False
+                    record["junction_cleanup_error"] = "retained: link identity/type/target was not the verified temporary junction"
+            except OSError as exc:
+                record["junction_removed"] = False
+                record["junction_cleanup_error"] = repr(exc)
         else:
             record["junction_removed"] = True
+        try:
+            config_sha256_after = file_sha256(config_source)
+            record["config_source_sha256_after"] = config_sha256_after
+            record["config_source_sha256_unchanged"] = config_sha256_after == config_sha256_before
+        except OSError as exc:
+            record["config_source_sha256_after_error"] = repr(exc)
+            record["config_source_sha256_unchanged"] = False
         if process_result is not None:
             record["process_tree_closed"] = process_result.get("process_tree_closed", False)
             state["all_process_trees_closed"] = state.get("all_process_trees_closed", True) and bool(process_result.get("process_tree_closed"))
+        state["all_process_trees_closed"] = state.get("all_process_trees_closed", True) and bool(record.get("command_process_wait_completed", True))
+        if record.get("passed") and record.get("junction_removed") and record.get("config_source_sha256_unchanged"):
+            record["status"] = "PASS"
+        elif record.get("status") == "RUNNING":
+            record["status"] = "FAIL"
+        state["snapshot_output_probe"] = record
         append_jsonl(EVIDENCE / "snapshot_output_probe_results.jsonl", record)
         write_json(EVIDENCE / "snapshot_output_probe.json", record)
     if not record.get("passed") or not record.get("junction_removed"):
@@ -2159,15 +2353,68 @@ def r2_result_counts(report_path: Path) -> dict:
     return classify_reports(read_jsonl(report_path))
 
 
+def r2_phase_result_counts(report_path: Path, phase: str) -> dict:
+    rows = [row for row in read_jsonl(report_path) if row.get("pytest_phase") == phase]
+    return classify_reports(rows)
+
+
 def r2_write_report(state: dict) -> None:
     collection = state.get("collection", {}).get("nodeids", [])
     selected = state.get("selected_nodeids", [])
     counts = state.get("test_counts", {})
     preflight_counts = state.get("preflight_test_counts", {})
+    cache_rows = state.get("cache_controls", [])
+    log_rows = state.get("log_contract_controls", [])
+    long_results = state.get("long_test_results", [])
+    if not long_results:
+        long_results = [
+            {"name": name, "nodeid": nodeid, "status": "NOT_RUN"}
+            for name, nodeid, _limit in LONG_TESTS
+        ]
+    preflight_summary = (
+        f"{preflight_counts.get('passed', 0)} pass / {preflight_counts.get('failed', 0)} fail / "
+        f"{preflight_counts.get('errors', 0)} error / {preflight_counts.get('skipped', 0)} skip "
+        f"({preflight_counts.get('reported_nodes', 0)}/{len(ACCURACY_NODEIDS) + len(PREFLIGHT_NODEIDS) + 2} reported)"
+        if state.get("preflight_process") else "NOT_RUN"
+    )
+    normal_process = state.get("run_process", {})
+    normal_status = (
+        "PASS" if state.get("normal_gate_passed") else
+        "TIMEOUT" if normal_process.get("timed_out") else
+        "FAIL" if normal_process else "NOT_RUN"
+    )
+    def control_status(rows: list[dict], expected: int) -> str:
+        if not rows:
+            return "NOT_RUN"
+        if any(row.get("timed_out") or row.get("status") == "TIMEOUT" for row in rows):
+            return "TIMEOUT"
+        passed = sum(bool(row.get("passed")) for row in rows)
+        if passed == expected and len(rows) == expected:
+            return "PASS"
+        return f"FAIL/PARTIAL ({passed}/{expected}; {len(rows)} executed)"
+
+    def test_stage_status(process: dict, stage_counts: dict, expected: int) -> str:
+        if not process:
+            return "NOT_RUN"
+        if process.get("timed_out"):
+            return "TIMEOUT"
+        if (
+            process.get("exit_code") == 0 and stage_counts.get("passed") == expected
+            and stage_counts.get("reported_nodes") == expected
+            and not stage_counts.get("failed") and not stage_counts.get("errors")
+            and not stage_counts.get("skipped")
+        ):
+            return "PASS"
+        return "FAIL"
+
     accounted = sum(int(counts.get(key, 0)) for key in ("passed", "failed", "errors", "skipped"))
     unresolved = max(0, len(selected) - accounted)
     events = read_jsonl(EVIDENCE / "node_events.jsonl")
     phases = {"preflight": r2_result_counts(EVIDENCE / "preflight_reports.jsonl"), "run": counts}
+    phases.update({
+        str(result.get("name")): result.get("counts", {})
+        for result in long_results if isinstance(result, dict)
+    })
     failures = []
     for name, phase_counts in phases.items():
         for row in phase_counts.get("failed_nodes", []):
@@ -2178,6 +2425,7 @@ def r2_write_report(state: dict) -> None:
         f"**Bölüm sonucu:** `{state.get('section_status', 'BLOCKED_WITH_EVIDENCE')}`  ",
         "**Genel proje durumu:** `IMPLEMENTED_NOT_ACCEPTED`  ",
         f"**Toplam süre:** {state.get('duration_seconds', 0):.3f} sn  ",
+        f"**Altı saat deadline:** başlangıç `{state.get('task_started_at_utc', '')}`; bu denemede kalan `{state.get('task_remaining_seconds_at_start', 'NOT_RECORDED')}` sn  ",
         f"**Runtime hash (canlı başlangıç / snapshot / bitiş):** `{state.get('runtime_live_start', '')}` / `{state.get('runtime_snapshot_start', '')}` / `{state.get('runtime_snapshot_end', '')}`",
         "",
         "## Önceki engel ve bu turdaki dar düzeltme",
@@ -2191,18 +2439,18 @@ def r2_write_report(state: dict) -> None:
         f"- Snapshot dosya sayısı/bayt: {state.get('snapshot_copy', {}).get('file_count', 0)} / {state.get('snapshot_copy', {}).get('total_bytes', 0)}.",
         f"- Güncel kaynak kopyası sırasında kaynak/snapshot hash eşleşmesi: {state.get('snapshot_copy', {}).get('source_copy_hashes_match', False)}.",
         f"- Snapshot `outputs/` ayrı ve başlangıçta boş: {state.get('snapshot_copy', {}).get('snapshot_outputs_started_empty', False)}; gerçek dizin / symlink-junction değil; source manifestinden ve source inventory'den hariç. Üretilen çıktıların ayrı manifesti `{state.get('snapshot_outputs_manifest', {}).get('file_count', 0)} dosya`, güvensiz yol={len(state.get('snapshot_outputs_manifest', {}).get('unsafe_paths', []))}; `snapshot_outputs_manifest.json`.",
-        f"- Çıktı sınır probu PASS={state.get('snapshot_output_probe', {}).get('passed', False)}; gerçek çıktı yazımı başarılı; dotdot/junction/rename hedefi disk öncesi reddedildi: {len(state.get('expected_snapshot_output_escape_blocks', []))}/3; korunan `config.py` hash'i aynı; geçici junction kaldırıldı={state.get('snapshot_output_probe', {}).get('junction_removed', False)}.",
+        f"- Çıktı sınır probu: {state.get('snapshot_output_probe', {}).get('status', 'NOT_RUN')}; junction oluşturma={state.get('snapshot_output_probe', {}).get('junction_created_and_resolves_to_snapshot', False)}; kaçış reddi={len(state.get('expected_snapshot_output_escape_blocks', []))}/3 (probe çalışmadıysa `NOT_RUN`); korunan kaynak hash aynı={state.get('snapshot_output_probe', {}).get('config_source_sha256_unchanged', 'NOT_RUN')}; geçici junction kaldırıldı={state.get('snapshot_output_probe', {}).get('junction_removed', 'NOT_RUN')}.",
         f"- Cache: `{state.get('dependency_cache', {}).get('path', DEPENDENCY_CACHE_DIR)}`; başlangıçta boş: {state.get('dependency_cache', {}).get('started_empty', False)}; snapshot dışında/kanıt kökü içinde: {state.get('dependency_cache', {}).get('outside_source_snapshot', False)}/{state.get('dependency_cache', {}).get('inside_evidence_root', False)}.",
-        f"- Guard kontrolleri (OFFLINE absent / 0 / 1): {sum(1 for row in state.get('guard_probes', []) if row.get('passed'))}/3 geçiş.",
+        f"- Guard kontrolleri (OFFLINE absent / 0 / 1): {control_status(state.get('guard_probes', []), 3)}.",
         "- Her kontrol gerçek `sitecustomize.py` yükleyip yerel `127.0.0.1:1` `socket.connect` audit olayını OS bağlantısından önce engellemeyi sınadı; bu üç beklenen engel genel ağ ihlali sayılmadı.",
-        f"- Aynı kontrollerde snapshot yazma girişimi disk öncesi engellendi: {len(state.get('expected_probe_workspace_blocks', []))}/3.",
-        f"- İki ayrı Python cache kontrolü: {len([row for row in state.get('cache_controls', []) if row.get('passed')])}/2; `https://examplebrand.com.tr/iletisim` için sonuçlar eşit ve `domain_core=examplebrand`; extractor'ın gerçek cache yolu kanıt kökü altında. Süreç/PID/path kayıtları `cache_control_results.jsonl`; cache dosyaları ayrı manifestte.",
-        f"- B2B_SOCKET_DENY_JSONL gerçek bootstrap kontrolleri: {len([row for row in state.get('log_contract_controls', []) if row.get('passed')])}/3. Hedef eşlemeleri (mode, istenen, etkin, kaynak): {[(row.get('mode'), row.get('requested_target'), row.get('effective_target'), row.get('target_source')) for row in state.get('log_contract_controls', [])]}; explicit-relative child-cwd çözümü, same-path tek yazım ve unset varsayılanı `log_contract_results.jsonl` ile kanıtlandı.",
-        f"- Ayrı hedefte gerçek `socket.connect` engeli: merkezî/child logda aynı event-id: {len(state.get('expected_log_contract_network_events', []))}/1. Kanal birleştirme `(pid, guard_event_id)` ile yapıldı: {state.get('guard_channel_dedup', {}).get('rows_scanned', 0)} ham satır, {state.get('guard_channel_dedup', {}).get('unique_events', 0)} tekil olay, {state.get('guard_channel_dedup', {}).get('duplicate_channel_rows_ignored', 0)} çoklu-kanal kopyası tekilleştirildi; payload/path ihlali={len(state.get('guard_channel_dedup', {}).get('payload_mismatch_event_keys', []))}/{len(state.get('guard_channel_dedup', {}).get('outside_allowed_paths', []))}.",
-        f"- P07 kısa doğrulaması `{P07_NODEID}`: PASS={state.get('p07_log_contract', {}).get('passed', False)}; PID={state.get('p07_log_contract', {}).get('child_pid')}; command_id=`{state.get('p07_log_contract', {}).get('command_id', '')}`; istenen/effective log=`{state.get('p07_log_contract', {}).get('requested_socket_deny_path')}` / `{state.get('p07_log_contract', {}).get('effective_socket_deny_path')}`; sonuç `{state.get('p07_log_contract', {}).get('result')}`; blocked_network={state.get('p07_log_contract', {}).get('blocked_network_count')}.",
+        f"- Aynı kontrollerde snapshot yazma engeli: {len(state.get('expected_probe_workspace_blocks', []))}/3; guard probe yoksa `NOT_RUN` (kanıt `guard_probe_results.jsonl`).",
+        f"- Python cache kontrolleri: {control_status(cache_rows, 2)}; sonuç eşitliği={cache_rows[0].get('result') == cache_rows[1].get('result') if len(cache_rows) == 2 and all(row.get('result') is not None for row in cache_rows) else 'NOT_RUN'}; süreç/PID/path kanıtı `cache_control_results.jsonl`.",
+        f"- `B2B_SOCKET_DENY_JSONL` bootstrap kontrolleri: {control_status(log_rows, 3)}; yürütülen hedef kayıtları={[(row.get('mode'), row.get('requested_target'), row.get('effective_target'), row.get('target_source')) for row in log_rows] if log_rows else 'NOT_RUN'}; `log_contract_results.jsonl`.",
+        f"- Ayrı hedefte gerçek `socket.connect` engeli: {len(state.get('expected_log_contract_network_events', []))}/1{'' if log_rows else ' — NOT_RUN'}; kanal birleştirme kanıtı={state.get('guard_channel_dedup', {}).get('unique_events', 'NOT_RUN')} tekil olay (dedupe yoksa `NOT_RUN`).",
+        f"- P07 kısa doğrulaması `{P07_NODEID}`: {'PASS' if state.get('p07_log_contract', {}).get('passed') else ('FAIL' if state.get('p07_log_contract', {}).get('errors') else 'NOT_RUN')}; PID={state.get('p07_log_contract', {}).get('child_pid', 'NOT_RUN')}; command_id=`{state.get('p07_log_contract', {}).get('command_id', 'NOT_RUN')}`; istenen/effective log=`{state.get('p07_log_contract', {}).get('requested_socket_deny_path', 'NOT_RUN')}` / `{state.get('p07_log_contract', {}).get('effective_socket_deny_path', 'NOT_RUN')}`; sonuç `{state.get('p07_log_contract', {}).get('result', 'NOT_RUN')}`; blocked_network={state.get('p07_log_contract', {}).get('blocked_network_count', 'NOT_RUN')}.",
         f"- Ön test node'ları (yalnız yetkilendirilen beş): `{BENCHMARK_NODEID}`, `{P07_NODEID}`, `{PREFLIGHT_NODEIDS[0]}`, `{PREFLIGHT_NODEIDS[1]}`, `{ACCURACY_NODEIDS[0]}`.",
-        f"- Kısa kapı: {state.get('short_gate_seconds', 0)} sn / 180 sn; PASS={state.get('short_gate_passed', False)}. Test sayımı: {preflight_counts.get('passed', 0)} pass / {preflight_counts.get('failed', 0)} fail / {preflight_counts.get('errors', 0)} error / {preflight_counts.get('skipped', 0)} skip; raporlanan {preflight_counts.get('reported_nodes', 0)}/{len(ACCURACY_NODEIDS) + len(PREFLIGHT_NODEIDS) + 2}.",
-        f"- Benchmark public/missing-workbook CLI gerçek çağrıları ve ayrı stdout/stderr kaydı: PASS={state.get('benchmark_cli_verification', {}).get('passed', False)}; exit kodları={[(row.get('label'), row.get('returncode')) for row in state.get('benchmark_cli_verification', {}).get('calls', [])]}; varsayılan JSON=`{state.get('benchmark_cli_verification', {}).get('snapshot_output_path')}` SHA-256=`{state.get('benchmark_cli_verification', {}).get('snapshot_output_sha256')}`; çıktılar `benchmark_cli_*_stdout.txt`/`stderr.txt`.",
+        f"- Kısa kapı: {'PASS' if state.get('short_gate_passed') else ('FAIL' if state.get('short_gate_seconds') is not None else 'NOT_RUN')}; süre={state.get('short_gate_seconds', 'NOT_RUN')} / 180 sn; preflight test sayımı={preflight_summary}.",
+        f"- Benchmark public/missing-workbook CLI gerçek çağrıları: {('PASS' if state.get('benchmark_cli_verification', {}).get('passed') else ('FAIL' if state.get('benchmark_cli_verification', {}).get('errors') else 'NOT_RUN'))}; exit kodları={[(row.get('label'), row.get('returncode')) for row in state.get('benchmark_cli_verification', {}).get('calls', [])] if state.get('benchmark_cli_verification') else 'NOT_RUN'}; çıktı SHA-256=`{state.get('benchmark_cli_verification', {}).get('snapshot_output_sha256', 'NOT_RUN')}`.",
         f"- İlgili child env + gerçek network/filesystem hook doğrulamaları: {state.get('preflight_child_env_checks', [])}.",
         f"- Kısa kapıdaki beklenmeyen ağ blokları/korunan yazma engelleri: {len(state.get('unexpected_short_gate_network_blocks', []))}/{len(state.get('unexpected_short_gate_write_denials', []))}; izinli sınır testi dışında beklenmeyen yazma yok.",
         f"- Çocuk süreçlerde B2B_TEST_OFFLINE değer/yokluk ve bağımsız guard: `child_processes.jsonl`; ağ olayları: `{state.get('network_log_sha256', '')}` ({state.get('network_guard_counts', {})}).",
@@ -2212,12 +2460,13 @@ def r2_write_report(state: dict) -> None:
         "",
         "## Geniş regresyon sayımları",
         "",
-        f"- Collection: {len(collection)} node; önceki bölüm listesi 1105 ile tam sıralı eşitlik: {state.get('collection_matches_previous', False)}.",
-        f"- Planlanan ertelenen kimlik: {len(DEFERRED)}; gerçek run collection'ında deselect edilen: {len(state.get('actual_deselected_nodeids', []))}; seçilen: {len(selected)}.",
-        f"- Sonuç: pass {counts.get('passed', 0)} / fail {counts.get('failed', 0)} / error {counts.get('errors', 0)} / skip {counts.get('skipped', 0)} / çözümlenmemiş {unresolved}.",
-        f"- Başlayan node: {len(set(state.get('run_started_nodeids', [])))}; tamamlanan: {counts.get('completed_nodes', 0)}; başlayıp bitmeyen: {len(set(state.get('run_started_nodeids', [])) - set(state.get('run_finished_nodeids', [])))}; hiç başlamayan: {max(0, len(selected) - len(set(state.get('run_started_nodeids', []))))}.",
-        f"- Denklem: {len(selected)} seçilen = {counts.get('passed', 0)} pass + {counts.get('failed', 0)} fail + {counts.get('errors', 0)} error + {counts.get('skipped', 0)} skip + {unresolved} çözümlenmemiş.",
-        *[f"- `DEFERRED_NOT_RUN` — `{nodeid}`" for nodeid in DEFERRED],
+        f"- Collection: {'PASS' if state.get('collection_process', {}).get('exit_code') == 0 else ('TIMEOUT' if state.get('collection_process', {}).get('timed_out') else ('FAIL' if state.get('collection_process') else 'NOT_RUN'))}; node={len(collection)}; baseline 1105 korunma/eşitlik={state.get('collection_matches_previous', 'NOT_RUN')}; eklenen={len(state.get('collection_diff', {}).get('added', []))}.",
+        f"- Normal bölüm: {normal_status}; seçili={len(selected) if state.get('collection_process') else 'NOT_RUN'}; pass={counts.get('passed', 'NOT_RUN')}, fail={counts.get('failed', 'NOT_RUN')}, error={counts.get('errors', 'NOT_RUN')}, skip={counts.get('skipped', 'NOT_RUN')}, unresolved={unresolved if state.get('run_process') else 'NOT_RUN'}.",
+        f"- Normal bölüm başlama/tamamlanma: {len(set(state.get('run_started_nodeids', []))) if state.get('run_process') else 'NOT_RUN'} / {counts.get('completed_nodes', 'NOT_RUN')}; son tamamlanan `{state.get('last_completed_node', 'NOT_RUN')}`.",
+        *[
+            f"- Zorunlu uzun test `{result.get('nodeid')}`: `{result.get('status', 'NOT_RUN')}`; limit={result.get('wall_limit_seconds', 'NOT_RUN')} sn; pass={result.get('counts', {}).get('passed', 'NOT_RUN')}, fail={result.get('counts', {}).get('failed', 'NOT_RUN')}, error={result.get('counts', {}).get('errors', 'NOT_RUN')}, skip={result.get('counts', {}).get('skipped', 'NOT_RUN')}."
+            for result in long_results
+        ],
         f"- Collection süresi/exit: {state.get('collection_process', {}).get('duration_seconds')} sn / {state.get('collection_process', {}).get('exit_code')}.",
         f"- Geniş test süresi/exit/timeout: {state.get('run_process', {}).get('duration_seconds')} sn / {state.get('run_process', {}).get('exit_code')} / {state.get('run_process', {}).get('timed_out')}.",
         f"- Son tamamlanan node: `{state.get('last_completed_node', '')}`; son aşama: `{state.get('last_completed_stage', '')}`; kesilme anındaki node: `{state.get('active_node_at_stop', '')}`.",
@@ -2228,7 +2477,7 @@ def r2_write_report(state: dict) -> None:
         f"- Runtime SHA-256: başlangıç `{state.get('runtime_live_start', '')}`, snapshot başlangıç `{state.get('runtime_snapshot_start', '')}`, snapshot bitiş `{state.get('runtime_snapshot_end', '')}`.",
         f"- Snapshot kaynak/test/runner envanteri eşleşti: {state.get('source_inventory_match', False)}; başlangıç `{state.get('source_inventory_before', {}).get('inventory_sha256', '')}`, bitiş `{state.get('source_inventory_after', {}).get('inventory_sha256', '')}`.",
         f"- Runtime + pytest/test/helper + runner/plugin SHA envanteri başlangıç/son dosya sayısı: {state.get('source_inventory_before', {}).get('file_count', 0)} / {state.get('source_inventory_after', {}).get('file_count', 0)}.",
-        f"- Harness SHA-256: `{ {name: file_sha256(EVIDENCE / name) for name in ('run_offline_regression.py', 'petzoo_offline_plugin.py', 'sitecustomize.py')} }`.",
+        f"- Harness SHA-256: `{r2_harness_hashes()}`.",
         f"- Kaynak/test/helper/harness workspace dosyaları snapshot kopyasından sonra değişmedi: {state.get('source_workspace_unchanged_after_copy', False)}; değişen={len(state.get('source_workspace_changes_after_copy', []))}, eksik={len(state.get('source_workspace_missing_after_copy', []))}. Aday hashleri `candidate_hashes_start.json`/`candidate_hashes_end.json`; açık commit listesi `commit_scope.json`.",
         f"- Üretilen tldextract cache dosyaları (kaynak manifestinden ayrı): {len(state.get('dependency_cache_manifest', {}).get('files', []))}; liste/hash `dependency_cache_manifest.json`.",
         f"- P07 log-contract doğrulama ayrıntısı: `p07_log_contract.json`; çoklu-kanal event dedupe: `network_channel_dedup.json`.",
@@ -2269,7 +2518,7 @@ def r2_write_report(state: dict) -> None:
             stderr = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else ""
             lines.extend(["", f"### Cache kontrol hatası: `{control.get('probe_id')}`", "", "```text", stderr or json.dumps(control, ensure_ascii=False, indent=2), "```"])
     if not failures:
-        lines.append("Preflight veya geniş pytest hata/traceback üretmedi.")
+        lines.append("Koşulan pytest aşamalarında assertion traceback yok." if state.get("preflight_process") or state.get("run_process") else "Pytest aşamaları `NOT_RUN`; collection/çalıştırma başlamadı.")
     for phase_name, phase_counts in phases.items():
         for row in phase_counts.get("skipped_nodes", []):
             lines.append(f"- Normal skip `{phase_name}` `{row['nodeid']}` ({row['phase']}): {row.get('reason') or '<reason not recorded>'}; wasxfail=`{row.get('wasxfail', '')}`")
@@ -2303,7 +2552,10 @@ def r2_write_report(state: dict) -> None:
         "",
         f"Rapor yazım zamanı: {utc_now()} UTC.",
     ])
-    (EVIDENCE / "regresyon_raporu.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    report_text = "\n".join(lines) + "\n"
+    (EVIDENCE / "regresyon_raporu.md").write_text(report_text, encoding="utf-8")
+    if EVIDENCE_ROOT != EVIDENCE:
+        (EVIDENCE_ROOT / "FINAL_RAPOR.md").write_text(report_text, encoding="utf-8")
 
 
 def r2_main() -> int:
@@ -2312,25 +2564,41 @@ def r2_main() -> int:
     started = time.monotonic()
     state = {
         "started_at_utc": utc_now(),
+        "task_started_at_utc": TASK_START_UTC,
+        "task_deadline_qpc": TASK_DEADLINE_QPC,
+        "task_deadline_qpc_frequency": TASK_DEADLINE_FREQUENCY,
+        "task_budget_seconds": TOTAL_BUDGET_SECONDS,
+        "task_remaining_seconds_at_start": round(remaining_task_seconds(), 3),
         "section_status": "BLOCKED_WITH_EVIDENCE",
         "fatal_error": "",
         "all_process_trees_closed": True,
         "guard_probes": [],
         "processes": [],
         "collection_matches_previous": False,
+        "runtime_authorized_base_sha256": INITIAL_RUNTIME_SHA256,
+        "runtime_expected_candidate_sha256": EXPECTED_RUNTIME_SHA256,
     }
     write_json(EVIDENCE / "run_state.json", state)
     try:
+        if remaining_task_seconds() <= 0:
+            raise RuntimeError("the persistent six-hour task deadline has expired")
         if not RUNTIME.is_file():
             raise RuntimeError(f"required runtime executable missing: {RUNTIME}")
         if r2_tree_hash(ROOT) != EXPECTED_RUNTIME_SHA256:
             raise RuntimeError("live runtime source hash does not match the authorized source")
         state["runtime_live_start"] = r2_tree_hash(ROOT)
+        state["runtime_hash_change_reason"] = (
+            "modules/checkpoint.py now refreshes affected dispatch rounds atomically when a provider query flight receives its terminal receipt"
+            if EXPECTED_RUNTIME_SHA256 != INITIAL_RUNTIME_SHA256 else "none"
+        )
         write_commit_scope_manifest(state)
         state["run_options"] = {
             "evidence_dir": str(EVIDENCE), "scope_manifest": str(SCOPE_MANIFEST),
             "previous_evidence": str(PREVIOUS_EVIDENCE), "python": str(RUNTIME),
             "local_time_limit_seconds": TASK_LIMIT_SECONDS,
+            "persistent_deadline_file": str(DEADLINE_FILE),
+            "persistent_deadline_qpc": TASK_DEADLINE_QPC,
+            "task_remaining_seconds_at_run_start": round(remaining_task_seconds(), 3),
             "short_gate_limit_seconds": SHORT_GATE_LIMIT_SECONDS,
             "collection_limit_seconds": R2_COLLECTION_LIMIT_SECONDS,
             "broad_limit_seconds": RUN_LIMIT_SECONDS,
@@ -2512,15 +2780,14 @@ def r2_main() -> int:
         state["run_tldextract_cache"] = run_env.get("TLDEXTRACT_CACHE")
         state["removed_environment_names"] = sorted(set(removed_names) | set(removed_names_run))
         run_argv = r2_pytest_argv("run", [
-            "--maxfail=1", f"--junitxml={EVIDENCE / 'junit.xml'}",
+            "--maxfail=10", f"--junitxml={EVIDENCE / 'junit.xml'}",
             *[f"--deselect={nodeid}" for nodeid in DEFERRED],
         ])
         state["run_argv"] = run_argv
-        elapsed = time.monotonic() - started
-        run_limit = min(RUN_LIMIT_SECONDS, max(0.0, TASK_LIMIT_SECONDS - elapsed - 12.0))
+        run_limit = min(RUN_LIMIT_SECONDS, max(0.0, remaining_task_seconds() - 12.0))
         state["computed_run_limit_seconds"] = run_limit
         if run_limit < 1:
-            raise RuntimeError("remaining task budget leaves no safe window for the single broad run")
+            raise RuntimeError("persistent six-hour deadline leaves no safe window for the normal regression")
         run_result = supervise("run", run_argv, run_limit, run_env, started)
         state["run_process"] = run_result
         state["processes"].append(run_result)
@@ -2529,14 +2796,15 @@ def r2_main() -> int:
         selected_record_path = EVIDENCE / "selected_nodes.json"
         if selected_record_path.is_file():
             selected_record = json.loads(selected_record_path.read_text(encoding="utf-8"))
+            shutil.copyfile(selected_record_path, EVIDENCE / "plugin_selected_nodes_run.json")
             state["actual_deselected_nodeids"] = selected_record.get("deselected_nodeids", [])
             state["actual_selected_nodeids"] = selected_record.get("nodeids", [])
             if state["actual_selected_nodeids"] != selected or state["actual_deselected_nodeids"] != DEFERRED:
-                state["fatal_error"] = "pytest plugin's actual post-deselect list differs from the verified 1102/3 selection"
+                state["fatal_error"] = "pytest plugin's actual post-deselect list differs from the collection-verified normal/long partition"
         state["termination_reason"] = run_result.get("termination_reason", "")
         if run_result.get("exit_code") != 0:
-            state["fatal_error"] = f"broad pytest exited {run_result.get('exit_code')} with --maxfail=1; no rerun"
-        state["test_counts"] = r2_result_counts(EVIDENCE / "pytest_reports.jsonl")
+            state["fatal_error"] = f"normal regression pytest exited {run_result.get('exit_code')} with --maxfail=10"
+        state["test_counts"] = r2_phase_result_counts(EVIDENCE / "pytest_reports.jsonl", "run")
         run_events = [
             row for row in read_jsonl(EVIDENCE / "node_events.jsonl")
             if row.get("pytest_phase") == "run"
@@ -2553,9 +2821,97 @@ def r2_main() -> int:
         state["test_counts"]["started_not_finished_nodes"] = len(started_ids - finished_ids)
         if state["test_counts"].get("reported_nodes") != len(selected):
             state["test_counts"]["selected_unreported_count"] = max(0, len(selected) - state["test_counts"].get("reported_nodes", 0))
+        state["normal_gate_passed"] = bool(
+            run_result.get("exit_code") == 0 and not run_result.get("timed_out")
+            and run_result.get("job_assignment") == "success"
+            and state["test_counts"].get("failed", 0) == 0
+            and state["test_counts"].get("errors", 0) == 0
+            and state["test_counts"].get("reported_nodes", 0) == len(selected)
+            and state["test_counts"].get("unresolved_selected_count", 0) == 0
+            and state.get("actual_selected_nodeids") == selected
+            and state.get("actual_deselected_nodeids") == DEFERRED
+        )
+        if state["normal_gate_passed"]:
+            long_results = []
+            for short_name, nodeid, wall_limit in LONG_TESTS:
+                if remaining_task_seconds() <= 5:
+                    result = {
+                        "name": short_name, "nodeid": nodeid, "status": "NOT_RUN",
+                        "reason": "persistent six-hour deadline exhausted before this required long test",
+                        "process": {"started": False, "timed_out": True, "termination_reason": "global_deadline"},
+                        "counts": {},
+                    }
+                    long_results.append(result)
+                    write_json(EVIDENCE / "long_test_results.json", long_results)
+                    continue
+                phase = f"long_{short_name}"
+                long_env, long_removed = r2_child_env(phase)
+                state["removed_environment_names"] = sorted(set(state.get("removed_environment_names", [])) | set(long_removed))
+                long_argv = r2_pytest_argv(phase, [
+                    "--maxfail=1", f"--junitxml={EVIDENCE / f'{phase}.xml'}", nodeid,
+                ])
+                long_process = supervise(phase, long_argv, wall_limit, long_env, started)
+                state["processes"].append(long_process)
+                state["all_process_trees_closed"] = state["all_process_trees_closed"] and bool(long_process.get("process_tree_closed"))
+                append_jsonl(EVIDENCE / "process_supervision.jsonl", long_process)
+                selected_path = EVIDENCE / "selected_nodes.json"
+                if selected_path.is_file():
+                    shutil.copyfile(selected_path, EVIDENCE / f"plugin_selected_nodes_{phase}.json")
+                long_counts = r2_phase_result_counts(EVIDENCE / "pytest_reports.jsonl", phase)
+                if long_process.get("timed_out"):
+                    long_status = "TIMEOUT"
+                elif (
+                    long_process.get("exit_code") == 0 and long_process.get("job_assignment") == "success"
+                    and long_counts.get("reported_nodes") == 1 and long_counts.get("passed") == 1
+                    and long_counts.get("failed") == 0 and long_counts.get("errors") == 0
+                    and long_counts.get("skipped") == 0
+                ):
+                    long_status = "PASS"
+                else:
+                    long_status = "FAIL" if long_process.get("started") else "NOT_RUN"
+                long_results.append({
+                    "name": short_name, "nodeid": nodeid, "status": long_status,
+                    "wall_limit_seconds": wall_limit, "process": long_process, "counts": long_counts,
+                })
+                write_json(EVIDENCE / "long_test_results.json", long_results)
+            state["long_test_results"] = long_results
+        else:
+            state["long_test_results"] = [
+                {"name": name, "nodeid": nodeid, "status": "NOT_RUN", "reason": "normal regression did not pass on this source snapshot"}
+                for name, nodeid, _limit in LONG_TESTS
+            ]
+            write_json(EVIDENCE / "long_test_results.json", state["long_test_results"])
+        write_json(EVIDENCE / "selection_reconciliation.json", {
+            "collection_total": len(current), "previous_collection_total": len(previous),
+            "normal_selected_count": len(selected), "normal_selected_nodeids": selected,
+            "deferred_from_normal_nodeids": DEFERRED,
+            "required_long_nodeids": [nodeid for _name, nodeid, _limit in LONG_TESTS],
+            "partition_union_matches_collection": (
+                len(set(selected) | set(DEFERRED)) == len(current)
+                and set(selected).isdisjoint(DEFERRED)
+                and set(selected) | set(DEFERRED) == set(current)
+            ),
+            "normal_gate_passed": state.get("normal_gate_passed", False),
+        })
+        write_json(EVIDENCE / "selected_nodes.json", {
+            "collection_count": len(current),
+            "normal_selected_count": len(selected),
+            "normal_nodeids": selected,
+            "normal_deselected_nodeids": DEFERRED,
+            "long_test_nodeids": [nodeid for _name, nodeid, _limit in LONG_TESTS],
+            "partition_union_matches_collection": (
+                len(set(selected) | set(DEFERRED)) == len(current)
+                and set(selected).isdisjoint(DEFERRED)
+                and set(selected) | set(DEFERRED) == set(current)
+            ),
+        })
 
     except Exception as exc:
         state["fatal_error"] = state.get("fatal_error") or f"{type(exc).__name__}: {exc}"
+        gate_started_local = locals().get("gate_started")
+        if gate_started_local is not None:
+            state["short_gate_seconds"] = round(time.monotonic() - gate_started_local, 3)
+            state["short_gate_passed"] = False
     finally:
         state["dependency_cache_manifest"] = {
             "cache_path": str(DEPENDENCY_CACHE_DIR.resolve()),
@@ -2663,11 +3019,9 @@ def r2_main() -> int:
         selected = state.get("selected_nodeids", [])
         broad_ok = (
             state.get("collection_matches_previous") is True
-            and state.get("run_process", {}).get("exit_code") == 0
-            and not state.get("run_process", {}).get("timed_out")
-            and counts.get("failed", 0) == 0 and counts.get("errors", 0) == 0
-            and counts.get("reported_nodes", 0) == len(selected)
-            and counts.get("unresolved_selected_count", 0) == 0
+            and state.get("normal_gate_passed") is True
+            and len(state.get("long_test_results", [])) == len(LONG_TESTS)
+            and all(row.get("status") == "PASS" for row in state.get("long_test_results", []))
         )
         integrity_ok = (
             state.get("source_inventory_match") is True
@@ -2696,7 +3050,7 @@ def r2_main() -> int:
             and not state.get("unexpected_short_gate_write_denials")
             and not state.get("child_tldextract_cache_mismatches")
         )
-        state["section_status"] = "OFFLINE_REGRESSION_PART1_PASS" if all_probes_passed and preflight_ok and broad_ok and integrity_ok and not state.get("fatal_error") else "BLOCKED_WITH_EVIDENCE"
+        state["section_status"] = "OFFLINE_REGRESSION_ALL_PASS" if all_probes_passed and preflight_ok and broad_ok and integrity_ok and not state.get("fatal_error") else "BLOCKED_WITH_EVIDENCE"
         state["command_record"] = {
             "cwd": str(TEST_ROOT),
             "runtime": str(RUNTIME),
@@ -2721,7 +3075,7 @@ def r2_main() -> int:
                 "removed_environment_variable_names": state.get("removed_environment_names", []),
                 "environment_values_recorded": ["B2B_TEST_OFFLINE presence/value only", "TLDEXTRACT_CACHE isolated path", "B2B_SOCKET_DENY_JSONL requested/effective paths only"],
             },
-            "plugin_sha256": {name: file_sha256(EVIDENCE / name) for name in ("run_offline_regression.py", "petzoo_offline_plugin.py", "sitecustomize.py")},
+            "plugin_sha256": r2_harness_hashes(),
             "runtime_hash_start": state.get("runtime_live_start"),
             "runtime_hash_snapshot_start": state.get("runtime_snapshot_start"),
             "runtime_hash_snapshot_end": state.get("runtime_snapshot_end"),
@@ -2737,6 +3091,10 @@ def r2_main() -> int:
                 "child_mismatches": state.get("child_tldextract_cache_mismatches", []),
             },
             "deferred_nodeids": DEFERRED,
+            "long_test_nodeids": [nodeid for _name, nodeid, _limit in LONG_TESTS],
+            "task_deadline_file": str(DEADLINE_FILE),
+            "task_deadline_qpc": TASK_DEADLINE_QPC,
+            "task_remaining_seconds_at_finish": round(remaining_task_seconds(), 3),
             "processes": state.get("processes", []),
         }
         write_json(EVIDENCE / "run_command.json", state["command_record"])
@@ -2749,9 +3107,10 @@ def r2_main() -> int:
         "preflight": state.get("preflight_test_counts", {}),
         "tests": state.get("test_counts", {}),
         "duration_seconds": state.get("duration_seconds"),
-        "report": str(EVIDENCE / "regresyon_raporu.md"),
+        "long_tests": [{"nodeid": row.get("nodeid"), "status": row.get("status")} for row in state.get("long_test_results", [])],
+        "report": str(EVIDENCE_ROOT / "FINAL_RAPOR.md"),
     }, ensure_ascii=False), flush=True)
-    return 0 if state["section_status"] == "OFFLINE_REGRESSION_PART1_PASS" else 1
+    return 0 if state["section_status"] == "OFFLINE_REGRESSION_ALL_PASS" else 1
 
 
 if __name__ == "__main__":
