@@ -13,7 +13,7 @@ import uuid
 from openpyxl import Workbook
 
 import config
-from modules import excel, redaction, scorer
+from modules import excel, field_merge, redaction, runtime, scorer
 
 
 logger = logging.getLogger(__name__)
@@ -41,18 +41,14 @@ def _safe(value: object) -> object:
 
 
 def _table_row(row: dict) -> dict[str, object]:
+    row = dict(row)
+    field_merge.annotate(row, None)
     last_error = str(row.get("last_error", "") or "")
     paid_status = str(row.get("paid_state", "") or "")
     if last_error:
         paid_status = f"{paid_status} — {last_error}" if paid_status else last_error
-    gaps = row.get("field_gaps", "")
-    if isinstance(gaps, (list, tuple, set)):
-        gaps = ";".join(sorted(str(value) for value in gaps))
-    if not gaps:
-        gaps = ";".join(
-            field for field in ("website", "email", "phone") if not row.get(field)
-        )
-    ready = row.get("ready_for_publication", row.get("publication_eligible", False))
+    gaps = ";".join(field for field in ("website", "email", "phone") if field in field_merge.field_gaps(row))
+    ready = field_merge.ready_for_publication(row)
     return {
         "Firma": row.get("company", ""),
         "Web sitesi": row.get("website", ""),
@@ -65,10 +61,10 @@ def _table_row(row: dict) -> dict[str, object]:
         "Telefon kaynağı": row.get("phone_source_tier", row.get("phone_source", "")),
         "Telefon güven": row.get("phone_confidence", ""),
         "Diğer telefonlar": row.get("alternative_phones", row.get("alternative_phone", "")),
-        "Referans web sitesi": row.get("listed_website", row.get("reference_website", "")),
+        "Referans web sitesi": row.get("reference_website", ""),
         "Referans durumu": row.get("reference_tier", ""),
         "Referans sinyalleri": row.get("reference_signals", ""),
-        "Referans telefonu": row.get("listed_phone", ""),
+        "Referans telefonu": row.get("reference_phone", row.get("listed_phone", "")),
         "Girdi web durumu": row.get("listed_website_status", ""),
         "Eksik alanlar": gaps,
         "Yayına hazır": bool(ready),
@@ -102,7 +98,10 @@ def _confidence(stage: dict, field: str) -> str:
 def _ready(stage: dict) -> bool:
     if not isinstance(stage, dict):
         return False
-    return bool(stage.get("ready_for_publication", stage.get("publication_eligible", False)))
+    return (
+        _confidence(stage, "website") in field_merge.CONFIDENT
+        and any(_confidence(stage, field) in field_merge.CONFIDENT for field in ("email", "phone"))
+    )
 
 
 def _stage_summary(rows: list[dict]) -> list[dict[str, object]]:
@@ -167,7 +166,7 @@ def _build_report(
     for row in rows:
         stage_a = row.get("stage_a") if isinstance(row.get("stage_a"), dict) else {}
         site = str(stage_a.get("website", "") or "")
-        reference = str(row.get("listed_website", row.get("reference_website", "")) or "")
+        reference = str(row.get("reference_website", "") or "")
         if site and reference:
             comparable += 1
             try:
@@ -225,11 +224,22 @@ def _build_report(
     else:
         lines.append("- Canary durumu: ölçülmedi")
     lines.append("")
-    health = {
-        key: value for key, value in ((telemetry or {}).get("counters", {}) if isinstance(telemetry, dict) else {}).items()
-        if "canary" in str(key).casefold() or "engine" in str(key).casefold()
-    }
-    lines.append(json.dumps(health, ensure_ascii=False, sort_keys=True) if health else "Canary/motor ölçümleri: ölçülmedi")
+    health = (telemetry or {}).get("free_search_backend_health") if isinstance(telemetry, dict) else None
+    if not isinstance(health, dict):
+        try:
+            health = runtime.free_backend_health_snapshot()
+        except Exception:
+            health = {}
+    if health:
+        lines.extend(["", "| Motor | OK | Boş | Hata |", "|---|---:|---:|---:|"])
+        for backend, values in sorted(health.items()):
+            if isinstance(values, dict):
+                lines.append(
+                    f"| {_md(backend)} | {int(values.get('ok', 0) or 0)} | "
+                    f"{int(values.get('empty', 0) or 0)} | {int(values.get('error', 0) or 0)} |"
+                )
+    else:
+        lines.append("Motor sağlık ölçümleri: ölçülmedi")
 
     lines.extend(["", "## Hatalar", ""])
     categories = (
@@ -263,6 +273,8 @@ def write_run_report(
     safe_status = str(run_status) if str(run_status) in ALLOWED_STATUSES else "KISMI_KOSU_HATASI"
     target_root = Path(output_root)
     normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    for row in normalized_rows:
+        field_merge.annotate(row, None)
     table_rows = [_table_row(row) for row in normalized_rows]
     try:
         target_root.mkdir(parents=True, exist_ok=True)

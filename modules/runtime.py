@@ -424,6 +424,12 @@ def record_free_backend(backend: str, outcome: str) -> None:
         stats[outcome] = stats.get(outcome, 0) + 1
 
 
+def free_backend_health_snapshot() -> dict[str, dict[str, int]]:
+    """Return an isolated view of per-engine ok/empty/error counts."""
+    with _LOCK:
+        return {name: dict(stats) for name, stats in sorted(_FREE_BACKEND_HEALTH.items())}
+
+
 def set_free_backend_alive(backends: list[str] | None) -> None:
     global _FREE_BACKEND_ALIVE
     with _LOCK:
