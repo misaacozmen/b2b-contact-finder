@@ -128,6 +128,18 @@ def _is_source_host(domain: str, metadata: dict | None) -> bool:
     return bool(domain) and any(scorer.same_registrable_domain(domain, host) for host in hosts)
 
 
+def _brand_prefix_admission(company_name: str, domain: str, rank: int, metadata: dict | None) -> bool:
+    tokens = scorer.distinctive_tokens(company_name)
+    if not tokens or not domain or _is_source_host(domain, metadata) or scorer.is_excluded_domain(domain):
+        return False
+    token = tokens[0]
+    return (
+        len(token) >= config.CANDIDATE_BRAND_PREFIX_MIN_TOKEN_LEN
+        and int(rank) <= config.CANDIDATE_BRAND_PREFIX_MAX_RANK
+        and scorer.compact_domain_core(domain).startswith(token)
+    )
+
+
 class SearchBudgetExhausted(BrightDataSearchError):
     result_state = "BLOCKED_BUDGET"
     reason = "budget_exhausted"
@@ -2068,6 +2080,14 @@ def _add_search_results(
         legal_name_evidence = 1 if scorer.legal_name_phrase_match(company_name, f"{title} {snippet}") else 0
         ownership_evidence = 1 if scorer.ownership_statement_match(company_name, f"{title} {snippet}") else 0
         score_details = scorer.score_domain_details(company_name, url, title=title, snippet=snippet)
+        if score_details["score"] <= 0 and _brand_prefix_admission(company_name, domain, rank, metadata):
+            score_details = {
+                "score": config.MIN_ACCEPT_SCORE,
+                "reason": (
+                    f"brand_prefix_admission:L{config.CANDIDATE_BRAND_PREFIX_MIN_TOKEN_LEN}"
+                    f":K{config.CANDIDATE_BRAND_PREFIX_MAX_RANK}"
+                ),
+            }
         if score_details["score"] <= 0:
             # Brand names and legal company names often differ (MCMBOR/MCM
             # Kimya, Kristal/LaNaturel).  An official-intent result whose own

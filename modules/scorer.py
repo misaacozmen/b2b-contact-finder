@@ -169,7 +169,7 @@ def compact_domain_core(domain: str) -> str:
 
 def is_excluded_domain(domain: str) -> bool:
     domain = normalize_domain(domain)
-    return any(domain == excluded or domain.endswith(f".{excluded}") for excluded in config.EXCLUDED_DOMAINS)
+    return any(domain == excluded or domain.endswith(f".{excluded}") for excluded in (*config.EXCLUDED_DOMAINS, *config.CALIBRATED_DIRECTORY_DOMAINS))
 
 
 def is_mirror_directory_domain(company_name: str, domain: str) -> bool:

@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 import config
-from modules import reference_inputs, runtime, scorer, search
+from modules import calibration, reference_inputs, runtime, scorer, search
+from tools import calibrate_candidates
 
 
 def test_strip_references_keeps_source_hosts_for_exclusion_only():
@@ -90,3 +91,72 @@ def test_canary_alive_when_second_query_answers(monkeypatch):
         config.FREE_SEARCH_CANARY_QUERY,
         config.FREE_SEARCH_CANARY_QUERY_2,
     ]
+
+
+def test_brand_match_accepts_tld_variant_and_rejects_other_brand():
+    assert calibration.brand_match("sigmakarli.com", "sigmakarli.com.tr") is True
+    assert calibration.brand_match("tetamek.com.tr", "tetamekmuhendislik.com.tr") is False
+
+
+def test_wilson_lower_bound_reference_values():
+    assert calibration.wilson_lower_bound(42, 45) == pytest.approx(0.8214, abs=0.0005)
+    assert calibration.wilson_lower_bound(0, 0) == 0.0
+
+
+def test_candidate_calibration_selection_is_deterministic():
+    records = [
+        {
+            "labelled": True, "split": "cal", "company": "Acme Industrial",
+            "truth_domain": "acme.com", "raw_results": [
+                {"domain": "acme.com", "url": "https://acme.com/", "title": "Acme", "rank": 1},
+            ],
+        },
+        {
+            "labelled": True, "split": "hold", "company": "Beta Systems",
+            "truth_domain": "beta.com", "raw_results": [
+                {"domain": "beta.com", "url": "https://beta.com/", "title": "Beta", "rank": 1},
+            ],
+        },
+    ]
+
+    first = calibrate_candidates.calibrate(records)
+    second = calibrate_candidates.calibrate(records)
+
+    assert first == second
+    assert first["selected"] == {"L": 5, "K": 3}
+
+
+def test_brand_prefix_admission_admits_airpak():
+    company = "AİRPAK HAVALANDIRMA VE FİLTRE SİS. SAN. VE TİC. LTD. ŞTİ."
+    candidates = {}
+    runtime.reset()
+
+    search._add_search_results(
+        candidates,
+        company,
+        "airpak havalandırma filtre resmi web sitesi",
+        [{"href": "https://www.airpak.com.tr/", "title": "AİRPAK", "body": ""}],
+    )
+
+    assert candidates["airpak.com.tr"]["score"] >= config.MIN_ACCEPT_SCORE
+    assert "brand_prefix_admission" in candidates["airpak.com.tr"]["reason"]
+
+
+def test_brand_prefix_admission_respects_rank_and_token_length(monkeypatch):
+    company = "AİRPAK HAVALANDIRMA VE FİLTRE SİS. SAN. VE TİC. LTD. ŞTİ."
+    monkeypatch.setattr(config, "CANDIDATE_BRAND_PREFIX_MAX_RANK", 3)
+    monkeypatch.setattr(config, "CANDIDATE_BRAND_PREFIX_MIN_TOKEN_LEN", 4)
+
+    assert search._brand_prefix_admission(company, "airpak.com.tr", 4, {}) is False
+    assert search._brand_prefix_admission(company, "airpak.com.tr", 1, {}) is True
+    monkeypatch.setattr(config, "CANDIDATE_BRAND_PREFIX_MIN_TOKEN_LEN", 7)
+    assert search._brand_prefix_admission(company, "airpak.com.tr", 1, {}) is False
+
+
+def test_brand_prefix_admission_never_admits_source_host_or_directory():
+    company = "AİRPAK HAVALANDIRMA VE FİLTRE SİS. SAN. VE TİC. LTD. ŞTİ."
+
+    assert search._brand_prefix_admission(
+        company, "sites.tuyap.com.tr", 1, {"_source_hosts": ["tuyap.com.tr"]},
+    ) is False
+    assert search._brand_prefix_admission(company, "woodtechistanbul.com", 1, {}) is False
