@@ -35,6 +35,16 @@ def test_confidence_table(row, field, expected):
     assert field_merge.field_confidence(row, field) == expected
 
 
+def test_unknown_website_source_counts_as_own_search():
+    row = {
+        "website": "https://example.com/",
+        "website_source": "Example official website contact",
+        "status": "OK_MEDIUM_CONFIDENCE",
+    }
+
+    assert field_merge.field_confidence(row, "website") == "MEDIUM"
+
+
 def test_field_gaps_counts_low_as_gap():
     row = {
         "website": "https://thin.example/", "website_source": "REFERENCE_THIN",
@@ -145,6 +155,70 @@ def test_report_rates_table_three_stages(monkeypatch):
         "| Final (A + Referans + Ücretli) | 2 (66.7%) | 2 (66.7%) | 2 (66.7%) | 2 (66.7%) |",
     ])
     assert expected in markdown
+
+
+def test_report_splits_strict_and_brand_hit_rate(monkeypatch):
+    from modules import checkpoint
+
+    monkeypatch.setattr(checkpoint, "load_run_state_by_id", lambda _run_id: {})
+    rows = [
+        {
+            "company": "Same domain",
+            "stage_a": {"website": "https://acme.com/", "status": "OK_HIGH_CONFIDENCE"},
+            "reference_website": "https://www.acme.com/",
+        },
+        {
+            "company": "TLD variant",
+            "stage_a": {"website": "https://acme.com/", "status": "OK_MEDIUM_CONFIDENCE"},
+            "reference_website": "https://acme.com.tr/",
+        },
+        {
+            "company": "Different brand",
+            "stage_a": {"website": "https://other.net/", "status": "REVIEW_NEEDED"},
+            "reference_website": "https://acme.com/",
+        },
+    ]
+
+    markdown = run_report._build_report(
+        rows, run_id="fake-run", run_status="TAMAMLANDI", status_detail="ok",
+        elapsed_seconds=3, telemetry=None, generated_at="2026-09-26T00:00:00+00:00",
+        file_names=["sonuclar.xlsx"],
+    )
+
+    assert "A isabeti — aynı alan adı (katı): 1 / 3 (33.3%)" in markdown
+    assert "A isabeti — aynı marka çekirdeği (TLD farkı dahil, ör. firma.com ↔ firma.com.tr): 2 / 3 (66.7%)" in markdown
+    assert "Yalnız doğrulanmış (OK) A satırları — katı: 1 / 2 (50.0%)" in markdown
+    assert "Yalnız doğrulanmış (OK) A satırları — marka: 2 / 2 (100.0%)" in markdown
+
+
+def test_report_input_status_distribution_from_row(tmp_path, monkeypatch):
+    from modules import checkpoint
+
+    monkeypatch.setattr(checkpoint, "load_run_state_by_id", lambda _run_id: {})
+    rows = [
+        {"company": "OK", "listed_website_status": "OK"},
+        {"company": "Fixed", "listed_website_status": "FIXED"},
+        {"company": "Invalid", "listed_website_status": "INVALID"},
+        {"company": "Empty", "listed_website_status": "EMPTY"},
+    ]
+
+    errors = run_report.write_run_report(
+        rows, output_root=tmp_path, run_status="TAMAMLANDI", status_detail="test",
+        elapsed_seconds=1,
+    )
+
+    assert errors == {}
+    markdown = (tmp_path / "rapor.md").read_text(encoding="utf-8")
+    assert "Girdi web: EMPTY=1, FIXED=1, INVALID=1, OK=1" in markdown
+    book = load_workbook(tmp_path / "sonuclar.xlsx", read_only=True, data_only=True)
+    try:
+        headers = [cell.value for cell in next(book["Tüm firmalar"].iter_rows())]
+        status_column = headers.index("Girdi web durumu")
+        assert [book["Tüm firmalar"].cell(row, status_column + 1).value for row in range(2, 6)] == [
+            "OK", "FIXED", "INVALID", "EMPTY",
+        ]
+    finally:
+        book.close()
 
 
 def test_excel_has_four_sheets_and_exact_headers(tmp_path):

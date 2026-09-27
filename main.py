@@ -2444,7 +2444,8 @@ def _finalize_selected_evaluation(
     row = {
         "company": company,
         "website": crawl_result["url"],
-        "website_source": evaluation["candidate"]["query"],
+        "website_source": "OWN_SEARCH",
+        "website_discovery_query": evaluation["candidate"]["query"],
         **_contact_output_fields(evaluation),
         "status": status,
         "confidence": confidence,
@@ -2771,7 +2772,8 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
                 authoritative["score"],
             )
             row["website"] = authoritative["url"]
-            row["website_source"] = authoritative["query"]
+            row["website_source"] = "OWN_SEARCH"
+            row["website_discovery_query"] = authoritative["query"]
             row["confidence"] = "review"
             row["email_verification_reason"] = "website_unreachable"
             return finish(row, candidates)
@@ -3086,7 +3088,8 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
                 fallback["score"],
             )
             row["website"] = fallback["url"]
-            row["website_source"] = fallback["query"]
+            row["website_source"] = "OWN_SEARCH"
+            row["website_discovery_query"] = fallback["query"]
             row["confidence"] = "review"
             row["email_verification_reason"] = "website_unreachable"
             random_delay()
@@ -3196,6 +3199,8 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         index, company, logger, stage_a_row, metadata,
         evaluate_fn=_evaluate_candidate_with_stage,
     )
+    row["listed_website_status"] = str((metadata or {}).get("listed_website_status", "") or "")
+    row["website_input_status"] = str((metadata or {}).get("website_input_status", "") or "")
     row["stage_a"] = field_merge.stage_snapshot(stage_a_row)
     field_merge.annotate(row, metadata)
     row["stage_ab"] = field_merge.stage_snapshot(row)

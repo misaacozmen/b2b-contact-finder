@@ -91,3 +91,9 @@ def test_read_company_records_normalizes_inputs_and_keeps_raw_values(tmp_path):
 
 def test_site_mapper_discover_skips_invalid_ipv6_href():
     assert site_mapper.discover('<a href="http://[bad">x</a>', "https://example.com") == []
+
+
+def test_marketplace_domains_are_excluded():
+    assert reference_inputs.normalize_reference_url("https://www.makinaturkiye.com") == (
+        "", "EXCLUDED_DOMAIN",
+    )

@@ -9,7 +9,7 @@ _FIELDS = ("website", "email", "phone")
 _CONFIDENCE_ORDER = {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 _FIELD_COMPANIONS = {
     "website": (
-        "website_source", "website_confidence", "website_source_url",
+        "website_source", "website_discovery_query", "website_confidence", "website_source_url",
         "selected_website", "status",
     ),
     "email": (
@@ -29,7 +29,11 @@ _FIELD_COMPANIONS = {
 
 def _website_confidence(row: dict) -> str:
     source = str(row.get("website_source", "") or "")
-    if not source and row.get("website"):
+    is_known_source = (
+        source in {"OWN_SEARCH", "OWN_SEARCH+REFERENCE", "PAID_BRIGHTDATA"}
+        or source.startswith("REFERENCE_")
+    )
+    if row.get("website") and not is_known_source:
         source = "OWN_SEARCH"
     status = str(row.get("status", "") or "")
     if source in {"OWN_SEARCH", "PAID_BRIGHTDATA"}:

@@ -309,10 +309,15 @@ def test_real_authorized_e2e_uses_main_process_company_and_recording_transport(t
     root = next(runs.iterdir())
     assert outcome.status is pipeline_runner.PipelineOutcomeStatus.COMPLETE
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["phase"] == "COMPLETE" and len(transport.journal) == 3
+    assert manifest["phase"] == "COMPLETE" and len(transport.journal) == 1
     monkeypatch.setattr(config, "PROGRESS_DB_FILE", root / "state" / "progress.sqlite3")
     telemetry = checkpoint.derive_telemetry(manifest["run_id"])["provider_budgets"]["brightdata"]
-    assert {key: telemetry[key] for key in ("effective_limit", "reserved_total", "done", "failed", "unknown", "physical_http_attempts")} == {"effective_limit": 8, "reserved_total": 3, "done": 3, "failed": 0, "unknown": 0, "physical_http_attempts": 3}
+    assert {key: telemetry[key] for key in ("effective_limit", "reserved_total", "done", "failed", "unknown", "physical_http_attempts")} == {"effective_limit": 8, "reserved_total": 1, "done": 1, "failed": 0, "unknown": 0, "physical_http_attempts": 1}
+    with sqlite3.connect(root / "state" / "progress.sqlite3") as db:
+        paid_required_by_item = dict(db.execute("SELECT item_index, paid_required FROM run_items WHERE run_id=?", (manifest["run_id"],)).fetchall())
+        brightdata_call_items = [row[0] for row in db.execute("SELECT item_index FROM provider_calls WHERE run_id=? AND provider='brightdata'", (manifest["run_id"],))]
+    assert paid_required_by_item == {0: 0, 1: 1}
+    assert brightdata_call_items == [1]
     _capture_scenario("authorized_free_paid", root / "state" / "progress.sqlite3", run_root=root, transport=transport, outcome=outcome)
 
 

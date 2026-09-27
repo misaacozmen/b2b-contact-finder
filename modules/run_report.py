@@ -161,20 +161,37 @@ def _build_report(
         f"| {_md(row['stage'])} | {_md(row['website'])} | {_md(row['email'])} | {_md(row['phone'])} | {_md(row['ready'])} |"
         for row in table
     )
-    matches = 0
-    comparable = 0
-    for row in rows:
-        stage_a = row.get("stage_a") if isinstance(row.get("stage_a"), dict) else {}
-        site = str(stage_a.get("website", "") or "")
-        reference = str(row.get("reference_website", "") or "")
-        if site and reference:
+    def hit_rate(*, brand: bool, verified_only: bool = False) -> tuple[int, int, str]:
+        matches = 0
+        comparable = 0
+        for row in rows:
+            stage_a = row.get("stage_a") if isinstance(row.get("stage_a"), dict) else {}
+            if verified_only and not str(stage_a.get("status", "")).startswith("OK_"):
+                continue
+            site = scorer.normalize_domain(str(stage_a.get("website", "") or ""))
+            reference = scorer.normalize_domain(str(row.get("reference_website", "") or ""))
+            if not site or not reference:
+                continue
             comparable += 1
-            try:
-                matches += int(scorer.same_registrable_domain(site, reference))
-            except Exception:
-                pass
-    hit_rate = f"{matches / comparable * 100:.1f}%" if comparable else "0.0%"
-    lines.extend(["", "## Bağımsız arama isabet vekili", "", f"A isabeti (referansla aynı alan adı): {matches} / {comparable} ({hit_rate})"])
+            strict_match = scorer.same_registrable_domain(site, reference)
+            brand_match = strict_match or (
+                scorer.compact_domain_core(site) == scorer.compact_domain_core(reference)
+            )
+            matches += int(brand_match if brand else strict_match)
+        percentage = f"{matches / comparable * 100:.1f}%" if comparable else "0.0%"
+        return matches, comparable, percentage
+
+    strict = hit_rate(brand=False)
+    brand = hit_rate(brand=True)
+    strict_ok = hit_rate(brand=False, verified_only=True)
+    brand_ok = hit_rate(brand=True, verified_only=True)
+    lines.extend([
+        "", "## Bağımsız arama isabet vekili", "",
+        f"A isabeti — aynı alan adı (katı): {strict[0]} / {strict[1]} ({strict[2]})",
+        f"A isabeti — aynı marka çekirdeği (TLD farkı dahil, ör. firma.com ↔ firma.com.tr): {brand[0]} / {brand[1]} ({brand[2]})",
+        f"  - Yalnız doğrulanmış (OK) A satırları — katı: {strict_ok[0]} / {strict_ok[1]} ({strict_ok[2]})",
+        f"  - Yalnız doğrulanmış (OK) A satırları — marka: {brand_ok[0]} / {brand_ok[1]} ({brand_ok[2]})",
+    ])
 
     confidence_fields = ("website", "email", "phone")
     lines.extend(["", "## Güven dağılımı", "", "| Alan | HIGH | MEDIUM | LOW | NONE |", "|---|---:|---:|---:|---:|"])
