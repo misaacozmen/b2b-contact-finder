@@ -78,14 +78,14 @@ def predict(record: dict, rule: dict | None) -> str | None:
     return str(candidates[0].get("domain") or "") or None if candidates else None
 
 
-def metrics(records: list[dict], rule: dict | None) -> dict[str, float | int]:
+def metrics(records: list[dict], rule: dict | None, adjudication: dict | None = None) -> dict[str, float | int]:
     labelled = [record for record in records if record.get("labelled")]
     predicted = correct = 0
     for record in labelled:
         prediction = predict(record, rule)
         if prediction:
             predicted += 1
-            if calibration.brand_match(prediction, str(record.get("truth_domain") or "")):
+            if calibration.truth_match(prediction, record, adjudication):
                 correct += 1
     total = len(labelled)
     return {
@@ -177,6 +177,57 @@ def calibrate(records: list[dict]) -> tuple[dict, list[dict]]:
     return result, table_rows
 
 
+def wrong_predictions(records: list[dict], rule: dict | None, adjudication: dict | None = None) -> list[dict]:
+    wrong = []
+    for record in records:
+        if not record.get("labelled"):
+            continue
+        prediction = predict(record, rule)
+        if prediction and not calibration.truth_match(prediction, record, adjudication):
+            wrong.append({
+                "source_record_id": record.get("source_record_id"),
+                "company": record.get("company"),
+                "prediction": prediction,
+                "truth_domain": record.get("truth_domain"),
+            })
+    return wrong
+
+
+def calibrate_all(records: list[dict], adjudication: dict | None) -> tuple[dict, list[dict]]:
+    """Select on every labelled record; the independent test set is evaluated separately."""
+    rules = acceptance_grid()
+    rows = [
+        {"rule_id": rule_id(rule), **rule, "split": "all", **metrics(records, rule, adjudication)}
+        for rule in rules
+    ]
+    eligible = [row for row in rows if row["precision"] >= 0.92 and row["wilson"] >= 0.80]
+    winner = sorted(
+        eligible, key=lambda row: (-row["coverage"], -row["precision"], row["rule_id"]),
+    )[0] if eligible else None
+    selected_rule = next((rule for rule in rules if winner and rule_id(rule) == winner["rule_id"]), None)
+    result = {
+        "mode": "all",
+        "selected": {"rule_id": rule_id(selected_rule), **selected_rule} if selected_rule else None,
+        "all": metrics(records, selected_rule, adjudication) if selected_rule else None,
+        "strict_all": metrics(records, selected_rule, None) if selected_rule else None,
+        "baseline": metrics(records, None, adjudication),
+        "wrong": wrong_predictions(records, selected_rule, adjudication) if selected_rule else [],
+        "selection_constraints": {"precision_min": 0.92, "wilson_min": 0.80},
+    }
+    return result, rows
+
+
+def evaluate(records: list[dict], rule: dict, adjudication: dict | None) -> dict:
+    return {
+        "mode": "evaluate",
+        "rule": {"rule_id": rule_id(rule), **rule},
+        "metrics": metrics(records, rule, adjudication),
+        "strict": metrics(records, rule, None),
+        "baseline": metrics(records, None, adjudication),
+        "wrong": wrong_predictions(records, rule, adjudication),
+    }
+
+
 def _write_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = (
@@ -189,12 +240,42 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--truth", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--table", required=True)
+    parser.add_argument("--table", default="")
+    parser.add_argument("--mode", choices=("holdout", "all", "evaluate"), default="holdout")
+    parser.add_argument("--adjudication", default="")
+    parser.add_argument("--rule-id", default="")
     args = parser.parse_args()
+    records = _read_truth(Path(args.truth))
+    adjudication = (
+        json.loads(Path(args.adjudication).read_text(encoding="utf-8")) if args.adjudication else None
+    )
+    if args.mode == "all":
+        if not args.table:
+            parser.error("--table is required for --mode all")
+        result, rows = calibrate_all(records, adjudication)
+        _write_json(Path(args.out), result)
+        _write_csv(Path(args.table), rows)
+        print(json.dumps({"selected": result["selected"], "all": result["all"], "strict_all": result["strict_all"]}, ensure_ascii=False))
+        return 0 if result["selected"] else 2
+    if args.mode == "evaluate":
+        rule = next((rule for rule in acceptance_grid() if rule_id(rule) == args.rule_id), None)
+        if rule is None:
+            parser.error(f"unknown --rule-id: {args.rule_id!r}")
+        result = evaluate(records, rule, adjudication)
+        _write_json(Path(args.out), result)
+        print(json.dumps({"rule": result["rule"]["rule_id"], "metrics": result["metrics"], "strict": result["strict"]}, ensure_ascii=False))
+        return 0
+    if not args.table:
+        parser.error("--table is required for --mode holdout")
     result, rows = calibrate(_read_truth(Path(args.truth)))
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
