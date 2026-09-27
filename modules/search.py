@@ -795,6 +795,14 @@ def _retry_delay(response: requests.Response | None, attempt: int) -> float:
     return min((attempt + 1) * config.RETRY_BACKOFF_BASE_SEC, 60.0)
 
 
+def _brightdata_retry_wait(response: requests.Response | None, attempt: int) -> float:
+    """Bright Data rejects a failed query retried too soon; wait out its window."""
+    return max(
+        float(config.BRIGHTDATA_FAILED_QUERY_COOLDOWN_SEC),
+        min(_retry_delay(response, attempt), float(config.MAX_RETRY_AFTER_SEC)),
+    )
+
+
 def _result_url(result: dict) -> str:
     return discovery_rules.result_url(result)
 
@@ -1418,7 +1426,7 @@ def _brightdata_text(query: str) -> SearchResults:
             runtime.complete_api(reservation, "FAILED", f"brightdata_header:{header_code}:{header_message}"[:300])
             if header_retryable and attempt + 1 < max_attempts:
                 runtime.record("api.brightdata.retries")
-                _paid_wait(min(_retry_delay(response, attempt), float(config.MAX_RETRY_AFTER_SEC)), lease_keeper)
+                _paid_wait(_brightdata_retry_wait(response, attempt), lease_keeper)
                 continue
             reason = f"provider_header_error:{header_code or 'unspecified'}:{header_message}"[:300]
             return finish(SearchResults([], "error", "brightdata", result_state="FAILED", reason=reason, call_ids=tuple(call_ids), stop_scope="PAID_PROVIDER"))

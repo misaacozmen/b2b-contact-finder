@@ -176,6 +176,11 @@ BRIGHTDATA_EMPTY_BODY_RETRY_SEC = max(
 BRIGHTDATA_MAX_DECODE_RETRIES = max(
     0, int(os.getenv("BRIGHTDATA_MAX_DECODE_RETRIES", "1"))
 )
+# Bright Data answers "failed_query_rejected" when a failed query is retried
+# within its minimum 15 s window; stay safely outside it.
+BRIGHTDATA_FAILED_QUERY_COOLDOWN_SEC = max(
+    0.0, float(os.getenv("BRIGHTDATA_FAILED_QUERY_COOLDOWN_SEC", "20"))
+)
 MAX_FALLBACK_SEARCH_QUERIES = int(os.getenv("MAX_FALLBACK_SEARCH_QUERIES", "3"))
 MAX_ADAPTIVE_SEARCH_QUERIES = int(os.getenv("MAX_ADAPTIVE_SEARCH_QUERIES", "4"))
 # Keep the total paid-query ceiling unchanged: reserve part of the existing

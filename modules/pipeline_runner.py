@@ -239,6 +239,21 @@ def paid_fillable_gaps(row: dict, paid_settings: dict[str, Any]) -> set[str]:
     return fillable
 
 
+def _paid_round_made_progress(before_progress: dict, after_progress: dict) -> bool:
+    """Apply the paid loop's durable progress rule to two scheduler snapshots."""
+    before_work = {row["job_fingerprint"]: row["state"] for row in before_progress["work"]}
+    after_work = {row["job_fingerprint"]: row["state"] for row in after_progress["work"]}
+    return bool(
+        set(after_progress["physical_calls"]) - set(before_progress["physical_calls"])
+        or set(after_progress["terminal_jobs"]) - set(before_progress["terminal_jobs"])
+        or any(
+            state == "WAITING_DEPENDENCY" and after_work.get(job) != "WAITING_DEPENDENCY"
+            for job, state in before_work.items()
+        )
+        or any(before_work.get(job) != state for job, state in after_work.items())
+    )
+
+
 def classify_scheduler_states(row: dict, *, attempt_number: int, paid_gaps: set[str] | None = None) -> dict[str, object]:
     """Produce the three scheduler fields from one durable-free outcome."""
     status = str(row.get("status", "")).upper()
@@ -2012,6 +2027,30 @@ def _run_pipeline_impl_body(
                             reason="provider_dispatch_capacity_exhausted",
                         )
                 after_progress = checkpoint.scheduler_progress_snapshot(context.run_id)
+                declined_closed: list[dict[str, Any]] = []
+                if not _paid_round_made_progress(before_progress, after_progress):
+                    declined_closed = checkpoint.close_executor_declined_work(run_id=context.run_id)
+                    for declined_index in sorted({row["item_index"] for row in declined_closed}):
+                        try:
+                            reconciled = checkpoint.reconcile_paid_item_state_after_work_materialization(
+                                run_id=context.run_id, item_index=declined_index,
+                            )
+                        except (checkpoint.EvidenceInvariant, checkpoint.StateTransitionInvariant, checkpoint.LedgerInvariant, checkpoint.OutcomeInvariant) as exc:
+                            logger.exception("declined paid work reconciliation invariant isolated item=%s", declined_index)
+                            checkpoint.mark_item_invariant_failure(
+                                run_id=context.run_id, item_index=declined_index, error=exc,
+                            )
+                            continue
+                        declined_row = results_by_index.get(declined_index)
+                        if reconciled and isinstance(declined_row, dict):
+                            declined_row.update(reconciled)
+                            declined_row["__paid_escalation_complete"] = reconciled["paid_state"] != "PENDING"
+                    if declined_closed:
+                        logger.info(
+                            "=== ÜCRETLİ TUR %s: yürütücünün göndermediği %s iş kapatıldı ===",
+                            paid_round_ordinal, len(declined_closed),
+                        )
+                        after_progress = checkpoint.scheduler_progress_snapshot(context.run_id)
                 before_work = {row["job_fingerprint"]: row["state"] for row in before_progress["work"]}
                 after_work = {row["job_fingerprint"]: row["state"] for row in after_progress["work"]}
                 before_work_rows = {row["job_fingerprint"]: row for row in before_progress["work"]}
@@ -2043,6 +2082,7 @@ def _run_pipeline_impl_body(
                         if before_work.get(job) != state
                     ),
                     "pending_jobs": list(after_progress["pending_jobs"]),
+                    "executor_declined_closed": sorted(row["job_fingerprint"] for row in declined_closed),
                     "budgets": after_progress["budgets"],
                     "paid_attempt_numbers": {
                         str(item["item_index"]): int(item.get("paid_attempts", 0))

@@ -3957,6 +3957,42 @@ def release_provider_dispatch_allocation(
         return True
 
 
+def close_executor_declined_work(*, run_id: str) -> list[dict[str, Any]]:
+    """Close READY jobs the item's real executor declined in the latest round.
+
+    A job qualifies only when its own allocation in its provider's latest
+    dispatch round was released as ``no_physical_dispatch``.  Allocations
+    bound to another job fingerprint never qualify, so injected scheduler
+    faults still end as a durable stall.
+    """
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with closing(_connect()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            "SELECT DISTINCT w.job_fingerprint,w.item_index,w.provider FROM provider_work_items w "
+            "JOIN provider_dispatch_allocations a ON a.run_id=w.run_id AND a.provider=w.provider "
+            "AND a.item_index=w.item_index AND a.job_fingerprint=w.job_fingerprint "
+            "WHERE w.run_id=? AND w.state='READY' AND a.state='RELEASED' "
+            "AND a.released_reason='no_physical_dispatch' "
+            "AND a.round_ordinal=(SELECT MAX(r.round_ordinal) FROM provider_dispatch_rounds r "
+            "WHERE r.run_id=w.run_id AND r.provider=w.provider) "
+            "ORDER BY w.item_index,w.provider,w.job_fingerprint",
+            (str(run_id),),
+        ).fetchall()
+        for job_fingerprint, _item_index, _provider in rows:
+            connection.execute(
+                "UPDATE provider_work_items SET state='NOT_REQUIRED',"
+                "terminal_reason='executor_declined_after_allocation',updated_at=? "
+                "WHERE run_id=? AND job_fingerprint=? AND state='READY'",
+                (now, str(run_id), str(job_fingerprint)),
+            )
+        connection.commit()
+    return [
+        {"job_fingerprint": str(row[0]), "item_index": int(row[1]), "provider": str(row[2])}
+        for row in rows
+    ]
+
+
 def terminalize_pending_paid_budget(*, run_id: str, item_index: int, reason: str) -> None:
     """Close a pending dispatch job as typed exhaustion after all rounds are spent."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -4709,7 +4745,7 @@ def validate_paid_evidence(run_id: str, *, collect: bool = False) -> dict[str, A
                         blocked = connection.execute("SELECT 1 FROM paid_attempt_block_links l JOIN provider_budget_blocks b ON b.block_id=l.block_id WHERE l.paid_attempt_id=? AND b.run_id=? AND b.item_index=? AND b.provider=? AND b.provider<>'ddgs' LIMIT 1", (paid_attempt_id, run_id, int(item_index), str(provider))).fetchone()
                         if not terminal and not blocked:
                             raise EvidenceInvariant(f"BLOCKED_BUDGET lacks current-plan evidence for provider {provider}")
-            except EvidenceInvariant as exc:
+            except (EvidenceInvariant, OutcomeInvariant) as exc:
                 if not collect:
                     raise
                 violations.append({"item_index": int(item_index), "error": str(exc)[:200]})

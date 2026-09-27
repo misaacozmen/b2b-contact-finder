@@ -75,6 +75,9 @@ class DiverseQueryBudgetTests(unittest.TestCase):
     def test_live_pipeline_escalates_only_unresolved_rows_to_paid_sources(self):
         calls = []
 
+        class _ReachedFinalization(Exception):
+            pass
+
         def process(index, company, logger, known_website="", metadata=None):
             calls.append((company, config.SEARCH_PROVIDER, config.ENABLE_GOOGLE_PLACES))
             resolved = company == "FREE OK" or config.SEARCH_PROVIDER == "brightdata"
@@ -122,16 +125,15 @@ class DiverseQueryBudgetTests(unittest.TestCase):
         ), patch.multiple(
             main,
             process_company=Mock(side_effect=process),
-            _write_outputs=Mock(return_value="done"),
+            _write_outputs=Mock(side_effect=_ReachedFinalization),
         ), patch.multiple(
             pipeline_runner,
             ensure_directories=Mock(), setup_logging=Mock(return_value=Mock()),
         ):
             input_path = Path(directory) / "input.xlsx"
             input_path.touch()
-            outcome = main.run(input_path, allow_paid=True)
-
-        self.assertEqual(outcome.status, pipeline_runner.PipelineOutcomeStatus.SCHEDULER_STALLED)
+            with self.assertRaises(_ReachedFinalization):
+                main.run(input_path, allow_paid=True)
 
         self.assertEqual(calls, [
             ("FREE OK", "ddgs", False),
