@@ -55,6 +55,7 @@ from modules import (
     search,
     selection,
     secrets_store,
+    stage_a_features,
 )
 from modules.utils import close_logging, ensure_directories, random_delay, setup_logging
 
@@ -1282,6 +1283,7 @@ def _evaluate_candidate_with_stage(
             reason=";".join(str(value) for value in evaluation.get("reasons", [])[:8]),
             execution_id=str(execution.get("execution_id") or ""),
         )
+    stage_a_features.record(company, candidate, evaluation, metadata)
     return evaluation
 
 
@@ -3192,9 +3194,15 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     if execution_phase == "PAID":
         return paid_gap_fill(index, company, logger, known_website, metadata)
     blind_metadata = reference_inputs.strip_references(metadata)
-    _, stage_a_row = _process_company_core(
-        index, company, logger, "", blind_metadata, execution_phase="FREE",
-    )
+    entries = []
+    stage_a_features.begin()
+    try:
+        _, stage_a_row = _process_company_core(
+            index, company, logger, "", blind_metadata, execution_phase="FREE",
+        )
+        entries = stage_a_features.collect()
+    finally:
+        stage_a_features.end()
     row = reference_resolution.complete_with_reference(
         index, company, logger, stage_a_row, metadata,
         evaluate_fn=_evaluate_candidate_with_stage,
@@ -3202,6 +3210,24 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     row["listed_website_status"] = str((metadata or {}).get("listed_website_status", "") or "")
     row["website_input_status"] = str((metadata or {}).get("website_input_status", "") or "")
     row["stage_a"] = field_merge.stage_snapshot(stage_a_row)
+    ranked_entries = sorted(
+        entries,
+        key=lambda entry: (
+            entry.get("features", {}).get("rank_best")
+            if isinstance(entry.get("features", {}).get("rank_best"), int) else 99
+        ),
+    )
+    row["stage_a_candidates"] = [entry["features"] for entry in ranked_entries[:8]]
+    top3_domains = {
+        entry["features"].get("domain")
+        for entry in entries
+        if entry.get("features", {}).get("domain")
+        and isinstance(entry.get("features", {}).get("brand_prefix_len"), int)
+        and entry["features"]["brand_prefix_len"] > 0
+        and isinstance(entry.get("features", {}).get("rank_best"), int)
+        and entry["features"]["rank_best"] <= 3
+    }
+    row["stage_a_brand_prefix_top3"] = len(top3_domains)
     field_merge.annotate(row, metadata)
     row["stage_ab"] = field_merge.stage_snapshot(row)
     return index, row

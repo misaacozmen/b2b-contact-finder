@@ -86,6 +86,42 @@ def test_unreachable():
     assert decision == {"tier": "REFERENCE_UNREACHABLE", "signals": [], "reason": "timeout"}
 
 
+def test_site_signals_refactor_preserves_decide_results():
+    cases = [
+        (
+            _obs(listed_phone="02125550000", phones=["02125550000"]), "Example",
+            {"tier": "REFERENCE_VERIFIED", "signals": ["S1_phone", "S3_name", "S4_country"], "reason": "reference_corroborated"},
+        ),
+        (
+            _obs(reference_domain="airpak.com.tr", final_domain="airpak.com.tr", title_names=["airpak"], all_text="istanbul turkey"), "Airpak",
+            {"tier": "REFERENCE_VERIFIED", "signals": ["S3_name", "S4_country"], "reason": "reference_corroborated"},
+        ),
+        (
+            _obs(reference_domain="teksinhidrolik.com", final_domain="teksinhidrolik.com", title_names=["teksin hidrolik"]), "AHMET PALABIYIK",
+            {"tier": "REFERENCE_ACCEPTED", "signals": [], "reason": "reference_supplied_not_contradicted"},
+        ),
+        (
+            _obs(home_text="cok yakinda buradayiz", all_text="cok yakinda buradayiz"), "ADEKO",
+            {"tier": "REFERENCE_UNUSABLE", "signals": [], "reason": "parked"},
+        ),
+        (
+            _obs(home_text="x" * 120, all_text="x" * 120, reference_domain="unrelated.example", final_domain="unrelated.example"), "Completely Different Company",
+            {"tier": "REFERENCE_THIN", "signals": [], "reason": "thin_page_unconfirmed"},
+        ),
+        (
+            _obs(legal_names=["xyz makina san ve tic ltd sti"]), "AAB Plastik",
+            {"tier": "REFERENCE_CONFLICT", "signals": [], "reason": "site_names_other_company"},
+        ),
+        (
+            _obs(reachable=False, crawl_error="timeout"), "Example",
+            {"tier": "REFERENCE_UNREACHABLE", "signals": [], "reason": "timeout"},
+        ),
+    ]
+
+    for observed, company, expected in cases:
+        assert resolution.decide(observed, company) == expected
+
+
 def test_own_search_match_skips_crawl():
     called = []
     result = resolution.complete_with_reference(

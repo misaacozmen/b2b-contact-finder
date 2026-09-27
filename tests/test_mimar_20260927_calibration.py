@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 import config
-from modules import calibration, reference_inputs, runtime, scorer, search
+from modules import calibration, reference_inputs, reference_resolution, runtime, scorer, search, stage_a_features
 from tools import calibrate_candidates
 
 
@@ -160,3 +160,60 @@ def test_brand_prefix_admission_never_admits_source_host_or_directory():
         company, "sites.tuyap.com.tr", 1, {"_source_hosts": ["tuyap.com.tr"]},
     ) is False
     assert search._brand_prefix_admission(company, "woodtechistanbul.com", 1, {}) is False
+
+
+def test_stage_a_feature_collection_is_scoped_deduplicated_and_keeps_features(monkeypatch):
+    observation = {
+        "reachable": True,
+        "emails": ["info@airpak.com.tr"],
+        "phones": ["02125551234"],
+    }
+    monkeypatch.setattr(reference_resolution, "observe", lambda *_args: observation)
+    monkeypatch.setattr(reference_resolution, "site_signals", lambda *_args: {
+        "s1": True, "s2": False, "s3": True, "s4": True,
+        "parked": False, "thin": False, "conflict": False, "has_contact": True,
+    })
+    company = "AİRPAK HAVALANDIRMA VE FİLTRE SİS. SAN. VE TİC. LTD. ŞTİ."
+    identity_candidate = {
+        "url": "https://www.airpak.com.tr/identity",
+        "_stage_history": [{"stage": "identity_evaluated"}],
+        "_search_evidence": [
+            {"query": "airpak first", "rank": 4},
+            {"query": "airpak second", "rank": 1},
+        ],
+        "reason": "brand_prefix_admission",
+    }
+    full_candidate = {
+        **identity_candidate,
+        "url": "https://airpak.com.tr/contact",
+        "_stage_history": [{"stage": "full_evaluated"}],
+    }
+    stage_a_features.end()
+    assert stage_a_features.collect() == []
+    stage_a_features.record(company, identity_candidate, {"final_score": 4}, {})
+
+    stage_a_features.begin()
+    first_evaluation = {"final_score": 4, "identity_assessment": {"publishable": False}}
+    full_evaluation = {"final_score": 8, "identity_assessment": {"publishable": True}}
+    stage_a_features.record(company, identity_candidate, first_evaluation, {})
+    stage_a_features.record(company, full_candidate, full_evaluation, {})
+    entries = stage_a_features.collect()
+    stage_a_features.end()
+
+    assert len(entries) == 1
+    assert entries[0]["evaluation"] is full_evaluation
+    features = entries[0]["features"]
+    assert features["crawl_profile"] == "full"
+    assert features["domain"] == "airpak.com.tr"
+    assert features["rank_best"] == 1
+    assert features["query_hits"] == 2
+    assert features["admission"] == "brand_prefix"
+    assert features["same_domain_email"] is True
+    assert features["tr_phone"] is True
+    assert features["legacy_publishable"] is True
+    assert set(features) == {
+        "domain", "url", "crawl_profile", "reachable", "brand_prefix_len",
+        "rank_best", "query_hits", "admission", "s1", "s2", "s3", "s4",
+        "parked", "thin", "conflict", "same_domain_email", "tr_phone",
+        "legacy_final_score", "legacy_publishable",
+    }

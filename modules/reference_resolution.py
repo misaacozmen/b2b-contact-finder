@@ -124,14 +124,11 @@ def observe(evaluation: dict, reference_url: str, metadata: dict) -> dict:
     }
 
 
-def decide(obs: dict, company: str) -> dict:
-    if not obs.get("reachable"):
-        return {"tier": "REFERENCE_UNREACHABLE", "signals": [], "reason": obs.get("crawl_error") or "unreachable"}
+def site_signals(obs: dict, company: str) -> dict:
+    """Return the pure identity and quality signals for an observed site."""
     home = str(obs.get("home_text", "") or "")
     has_contact = bool(obs.get("phones") or obs.get("emails"))
     parked = any(marker in home for marker in PARKED_MARKERS) and not has_contact
-    if parked:
-        return {"tier": "REFERENCE_UNUSABLE", "signals": [], "reason": "parked"}
     thin = len(home.strip()) < 300 and not has_contact
     domain = obs.get("final_domain") or obs.get("reference_domain", "")
     tokens = [token for token in scorer.distinctive_tokens(company)[:2] if len(token) >= 3]
@@ -167,9 +164,30 @@ def decide(obs: dict, company: str) -> dict:
         name for name in obs.get("legal_names", [])
         if name and not any(token in scorer.normalize_text(name) for token in tokens)
     ]
-    if foreign_legal and not (s1 or s2 or s3):
+    conflict = bool(foreign_legal and not (s1 or s2 or s3))
+    return {
+        "s1": bool(s1), "s2": bool(s2), "s3": bool(s3), "s4": bool(s4),
+        "parked": bool(parked), "thin": bool(thin), "conflict": conflict,
+        "has_contact": bool(has_contact),
+    }
+
+
+def decide(obs: dict, company: str) -> dict:
+    if not obs.get("reachable"):
+        return {"tier": "REFERENCE_UNREACHABLE", "signals": [], "reason": obs.get("crawl_error") or "unreachable"}
+    signals_state = site_signals(obs, company)
+    signals = [
+        name for name, key in (
+            ("S1_phone", "s1"), ("S2_email", "s2"),
+            ("S3_name", "s3"), ("S4_country", "s4"),
+        ) if signals_state[key]
+    ]
+    if signals_state["parked"]:
+        return {"tier": "REFERENCE_UNUSABLE", "signals": [], "reason": "parked"}
+    s1, s2, s3, s4 = (signals_state[key] for key in ("s1", "s2", "s3", "s4"))
+    if signals_state["conflict"]:
         return {"tier": "REFERENCE_CONFLICT", "signals": signals, "reason": "site_names_other_company"}
-    if thin and not (s1 or s2 or s3):
+    if signals_state["thin"] and not (s1 or s2 or s3):
         return {"tier": "REFERENCE_THIN", "signals": signals, "reason": "thin_page_unconfirmed"}
     if s1 or s2 or (s3 and s4):
         return {"tier": "REFERENCE_VERIFIED", "signals": signals, "reason": "reference_corroborated"}
