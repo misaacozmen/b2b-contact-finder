@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
+from modules import api_configuration
 
 
 QUERIES = (
@@ -36,8 +37,9 @@ def _organic_count(payload: object) -> int:
 
 
 def main() -> int:
+    api_configuration.apply_saved_resolver_configuration()
     if not config.BRIGHTDATA_API_KEY:
-        print("BRIGHTDATA_API_KEY is not set")
+        print("BRIGHTDATA_API_KEY is not set (ortam değişkeni ve kayıtlı anahtar deposu boş)")
         return 2
     headers = {
         "Authorization": f"Bearer {config.BRIGHTDATA_API_KEY}",
