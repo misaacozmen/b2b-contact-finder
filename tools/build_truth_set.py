@@ -55,6 +55,7 @@ def _read_run(run_dir: Path) -> list[dict]:
                     payload.get("stage_a_candidates")
                     if isinstance(payload.get("stage_a_candidates"), list) else []
                 ),
+                "stage_a_brand_prefix_top3": _stage_a_brand_prefix_top3(payload),
             }
 
         replay_rows = connection.execute(
@@ -104,6 +105,11 @@ def _multi_firm_domains(records: list[dict]) -> list[str]:
         and not scorer.is_excluded_domain(domain)
         and not any(calibration.brand_match(domain, truth) for truth in labelled_truth)
     )
+
+
+def _stage_a_brand_prefix_top3(payload: dict) -> int | None:
+    value = payload.get("stage_a_brand_prefix_top3")
+    return value if type(value) is int else None
 
 
 def main() -> int:

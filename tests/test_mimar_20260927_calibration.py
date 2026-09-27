@@ -6,7 +6,7 @@ import pytest
 
 import config
 from modules import calibration, reference_inputs, reference_resolution, runtime, scorer, search, stage_a_features
-from tools import calibrate_candidates
+from tools import build_truth_set, calibrate_acceptance, calibrate_candidates
 
 
 def test_strip_references_keeps_source_hosts_for_exclusion_only():
@@ -217,3 +217,64 @@ def test_stage_a_feature_collection_is_scoped_deduplicated_and_keeps_features(mo
         "parked", "thin", "conflict", "same_domain_email", "tr_phone",
         "legacy_final_score", "legacy_publishable",
     }
+
+
+def _acceptance_fixture():
+    records = []
+    for index in range(100):
+        company = f"Brand{index:03d} Systems"
+        truth = f"brand{index:03d}.com"
+        wrong = index in range(76, 80) or index == 99
+        domain = f"wrongbrand{index:03d}.com" if wrong else truth
+        records.append({
+            "company": company,
+            "truth_domain": truth,
+            "labelled": True,
+            "split": "cal" if index < 80 else "hold",
+            "stage_a": {"status": "WEBSITE_NOT_FOUND", "website": ""},
+            "stage_a_brand_prefix_top3": 0,
+            "stage_a_candidates": [{
+                "domain": domain, "url": f"https://{domain}/", "reachable": True,
+                "brand_prefix_len": 5, "rank_best": 1, "query_hits": 1,
+                "s3": True, "s4": False, "parked": False, "conflict": False,
+                "tr_phone": False, "same_domain_email": False,
+                "legacy_final_score": 7, "legacy_publishable": False,
+            }],
+        })
+    return records
+
+
+def test_acceptance_grid_has_144_rules():
+    rules = calibrate_acceptance.acceptance_grid()
+    assert len(rules) == 144
+    assert len({calibrate_acceptance.rule_id(rule) for rule in rules}) == 144
+
+
+def test_truth_builder_preserves_stage_a_brand_prefix_top3():
+    assert build_truth_set._stage_a_brand_prefix_top3({"stage_a_brand_prefix_top3": 1}) == 1
+    assert build_truth_set._stage_a_brand_prefix_top3({"stage_a_brand_prefix_top3": 0}) == 0
+    assert build_truth_set._stage_a_brand_prefix_top3({}) is None
+
+
+def test_acceptance_selection_obeys_precision_and_wilson_constraints():
+    result, rows = calibrate_acceptance.calibrate(_acceptance_fixture())
+
+    assert result["selected"] is not None
+    assert result["cal"]["precision"] >= 0.92
+    assert result["cal"]["wilson"] >= 0.80
+    assert result["hold"]["precision"] >= 0.90
+    assert result["holdout_pass"] is True
+    assert result["baseline"]["all"]["labelled"] == 100
+    assert len(rows) == 288
+
+
+def test_rule_accepts_matches_tool_and_production():
+    record = _acceptance_fixture()[0]
+    rule = {"L": 3, "R": 1, "H": 1, "C": "none", "N": 0, "U": 0}
+    features = record["stage_a_candidates"][0]
+
+    assert calibration.rule_accepts(features, 0, rule) is True
+    assert calibrate_acceptance.predict(record, rule) == features["domain"]
+    features["s3"] = False
+    assert calibration.rule_accepts(features, 0, rule) is False
+    assert calibrate_acceptance.predict(record, rule) is None
