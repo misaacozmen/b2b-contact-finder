@@ -102,11 +102,18 @@ def free_search_canary() -> dict:
             continue
         try:
             with DDGS() as ddgs:
-                results = list(ddgs.text(
-                    config.FREE_SEARCH_CANARY_QUERY, max_results=3, backend=backend,
-                ))
-            if results:
-                alive.append(backend)
+                for query in (
+                    config.FREE_SEARCH_CANARY_QUERY,
+                    config.FREE_SEARCH_CANARY_QUERY_2,
+                ):
+                    try:
+                        results = list(ddgs.text(query, max_results=3, backend=backend))
+                    except Exception as exc:
+                        LOGGER.debug("free search canary backend '%s' query failed: %s", backend, exc)
+                        continue
+                    if results:
+                        alive.append(backend)
+                        break
         except Exception as exc:
             LOGGER.debug("free search canary backend '%s' failed: %s", backend, exc)
     dead = [backend for backend in backends if backend not in alive]
@@ -114,6 +121,11 @@ def free_search_canary() -> dict:
     if not alive:
         LOGGER.error("FREE_SEARCH_UNAVAILABLE: hiçbir ücretsiz arama motoru sonuç vermiyor")
     return {"status": "ok" if alive else "unavailable", "alive": alive, "dead": dead}
+
+
+def _is_source_host(domain: str, metadata: dict | None) -> bool:
+    hosts = (metadata or {}).get("_source_hosts") or []
+    return bool(domain) and any(scorer.same_registrable_domain(domain, host) for host in hosts)
 
 
 class SearchBudgetExhausted(BrightDataSearchError):
@@ -2044,6 +2056,8 @@ def _add_search_results(
                 candidates_by_domain, company_name, query, rank, result,
             )
         if scorer.is_excluded_domain(domain):
+            continue
+        if _is_source_host(domain, metadata):
             continue
         existing = candidates_by_domain.get(domain)
         candidate_role = _strongest_candidate_role(

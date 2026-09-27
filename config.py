@@ -103,6 +103,7 @@ DEFAULT_FREE_SEARCH_QUERY_LIMIT_PER_COMPANY = max(
 FREE_SEARCH_PHYSICAL_MULTIPLIER = 3
 FREE_SEARCH_MAX_BACKENDS_PER_QUERY = 3
 FREE_SEARCH_CANARY_QUERY = "Türkiye Büyük Millet Meclisi"
+FREE_SEARCH_CANARY_QUERY_2 = "İstanbul Büyükşehir Belediyesi"
 def _optional_request_cap(name: str, default: int | None = None) -> int | None:
     raw = os.getenv(name)
     return default if raw is None else max(0, int(raw))
@@ -460,6 +461,12 @@ EXCLUDED_DOMAINS = [
     "emis.com",
     "tendata.com",
     "rocketreach.co",
+    "tuyap.com.tr",
+    "tuyap.online",
+    "woodtechistanbul.com",
+    "intermobistanbul.com",
+    "avrasyapencerekapifuari.com",
+    "eurasiaglassfair.com",
 ]
 
 # Services that publish a mirrored company page under a host shaped like

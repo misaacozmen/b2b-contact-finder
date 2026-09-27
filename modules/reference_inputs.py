@@ -66,6 +66,12 @@ def reference_website(record: dict | None) -> str:
 def strip_references(metadata: dict | None) -> dict:
     """Reference-blind view used by the independent search stage."""
     blind = deepcopy(metadata or {})
+    source_hosts = sorted({
+        scorer.registrable_domain(str(value))
+        for key in ("listing_url", "profile_url", "source_detail_url")
+        for value in [(metadata or {}).get(key)]
+        if str(value or "").strip() and scorer.registrable_domain(str(value))
+    })
     for key in REFERENCE_KEYS:
         if key in blind:
             blind[key] = ""
@@ -77,4 +83,5 @@ def strip_references(metadata: dict | None) -> dict:
         identity["source_evidence"] = []
     blind["source_evidence"] = ""
     blind["_reference_blind"] = True
+    blind["_source_hosts"] = source_hosts
     return blind
