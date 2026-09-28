@@ -50,7 +50,8 @@ jobs:
           & python @pytestArgs 2>&1 | ForEach-Object { Write-Host $_ }
           $testExit = $LASTEXITCODE
           if ($testExit -ne 0) { throw "normal offline regression failed: $testExit" }
-      - run: python validate_benchmark_suite.py
+      # validate_benchmark_suite.py reads private golden workbooks that are not
+      # published; it runs locally only. Its logic is covered by the tests above.
       - run: python -m pip check
       - run: python main.py --help
       - run: python setup_company_resolvers.py --help
