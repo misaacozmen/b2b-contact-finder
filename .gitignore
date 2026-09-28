@@ -20,9 +20,13 @@ artifact_work/
 .codex-tmp/
 .codex_tmp*/
 
-# Existing tracked benchmark fixtures remain versioned. New generated runs
-# under outputs/ must be added explicitly only when they are intentional,
-# sanitized regression fixtures.
+# Private business data: run outputs, contact lists, truth sets and delivery
+# files stay on the local machine and are never published.
+data/truth/
+data/company_aliases.json
+/teslim/
+/MIMAR_*.md
+/FUAR_KOSU_KILAVUZU.md
 prepare_final*.txt
 
 .env
