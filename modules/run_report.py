@@ -18,8 +18,9 @@ from modules import excel, field_merge, redaction, runtime, scorer
 
 logger = logging.getLogger(__name__)
 
+CANDIDATE_WEBSITE_HEADER = "Aday web sitesi (kontrol edin)"
 HEADERS = [
-    "Firma", "Web sitesi", "Web kaynağı", "Web güven", "E-posta",
+    "Firma", "Web sitesi", "Web kaynağı", "Web güven", CANDIDATE_WEBSITE_HEADER, "E-posta",
     "E-posta kaynağı", "E-posta güven", "Telefon", "Telefon kaynağı",
     "Telefon güven", "Diğer telefonlar", "Referans web sitesi",
     "Referans durumu", "Referans sinyalleri", "Referans telefonu",
@@ -40,6 +41,18 @@ def _safe(value: object) -> object:
     return excel._safe_cell_value(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
 
 
+def _candidate_website(row: dict) -> str:
+    """Best unverified search candidate, shown only when no website was accepted."""
+    if str(row.get("website", "") or "").strip():
+        return ""
+    for index in (1, 2, 3):
+        url = str(row.get(f"candidate_{index}_url", "") or "").strip()
+        domain = scorer.normalize_domain(url) if url else ""
+        if domain and not scorer.is_excluded_domain(domain) and not scorer.is_foreign_country_domain(domain):
+            return url
+    return ""
+
+
 def _table_row(row: dict) -> dict[str, object]:
     row = dict(row)
     field_merge.annotate(row, None)
@@ -54,6 +67,7 @@ def _table_row(row: dict) -> dict[str, object]:
         "Web sitesi": row.get("website", ""),
         "Web kaynağı": row.get("website_source", ""),
         "Web güven": row.get("website_confidence", ""),
+        CANDIDATE_WEBSITE_HEADER: _candidate_website(row),
         "E-posta": row.get("email", ""),
         "E-posta kaynağı": row.get("email_source_tier", row.get("email_source", "")),
         "E-posta güven": row.get("email_confidence", ""),
