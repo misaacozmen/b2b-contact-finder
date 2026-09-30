@@ -79,7 +79,7 @@ def _record_fetch_attempt(page_url: str, *, profile: str, transport_outcome: str
     source_id = str(runtime.current_source_record_id() or "").strip()
     if not run_id or not source_id:
         return
-    normalized = urlunparse(urlparse(str(page_url))._replace(fragment=""))
+    normalized = urlunparse(urlparse(str(page_url or "").strip())._replace(fragment=""))
     attempt_id = checkpoint.discovery_event_id(
         f"fetch:{profile}:{normalized}",
         execution_id=execution_id,
@@ -896,6 +896,7 @@ def _fetch_site_live(
 
     def _fetch_page(page_url: str) -> tuple[str | None, str | None]:
         """Reuse one run-local page response across identity/full crawl phases."""
+        page_url = str(page_url or "").strip()
         if _unresolved_template_url(page_url):
             _FETCH_STATE.last = {"requested_url": page_url, "final_url": page_url, "tls_insecure": False}
             runtime.record("crawler.unresolved_template_url")
