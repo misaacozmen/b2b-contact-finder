@@ -69,12 +69,7 @@ def predict(record: dict, rule: dict | None) -> str | None:
         if isinstance(candidate, dict)
         and calibration.rule_accepts(candidate, top3, rule)
     ]
-    candidates.sort(key=lambda candidate: (
-        _numeric(candidate.get("rank_best"), 99),
-        -_numeric(candidate.get("query_hits"), -1),
-        -_numeric(candidate.get("legacy_final_score"), float("-inf")),
-        str(candidate.get("domain") or ""),
-    ))
+    candidates.sort(key=calibration.acceptance_sort_key)
     return str(candidates[0].get("domain") or "") or None if candidates else None
 
 

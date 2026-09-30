@@ -56,6 +56,7 @@ SIGNAL_LABELS = {"S1_phone": "telefon", "S2_email": "e-posta", "S3_name": "ad", 
 WEBSITE_SOURCE_LABELS = {
     "OWN_SEARCH": "Arama",
     "OWN_SEARCH+REFERENCE": "Arama + fuar listesi",
+    "OWN_SEARCH_CALIBRATED": "Arama (kalibre kural)",
     "REFERENCE_VERIFIED": "Fuar listesi (doğrulandı)",
     "REFERENCE_ACCEPTED": "Fuar listesi (kabul edildi)",
     "REFERENCE_UNREACHABLE": "Fuar listesi (site açılmadı)",

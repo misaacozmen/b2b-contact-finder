@@ -86,6 +86,37 @@ def truth_match(prediction: str, record: dict, adjudication: dict | None = None)
     return verdicts.get(key) == "SAME_ENTITY"
 
 
+def _sort_number(value: object, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def acceptance_sort_key(features: dict) -> tuple:
+    """Order rule-accepted candidates; shared by the calibration tool and production."""
+    return (
+        _sort_number(features.get("rank_best"), 99),
+        -_sort_number(features.get("query_hits"), -1),
+        -_sort_number(features.get("legacy_final_score"), float("-inf")),
+        str(features.get("domain") or ""),
+    )
+
+
+def brand_prefix_top3(features_list: list[dict]) -> int:
+    """Distinct brand-prefix domains ranked in the top three."""
+    return len({
+        features.get("domain")
+        for features in features_list
+        if isinstance(features, dict)
+        and features.get("domain")
+        and isinstance(features.get("brand_prefix_len"), int)
+        and features["brand_prefix_len"] > 0
+        and isinstance(features.get("rank_best"), int)
+        and features["rank_best"] <= 3
+    })
+
+
 def rule_accepts(features: dict, firm_brand_prefix_top3: int, rule: dict) -> bool:
     """Apply the calibrated Stage A admission rule to one candidate."""
     if not isinstance(features, dict) or not isinstance(rule, dict):

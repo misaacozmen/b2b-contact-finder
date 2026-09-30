@@ -207,6 +207,12 @@ PROFILE_BRIDGE_BLOCKED_DOMAINS = [
     "trendyol.com", "hepsiburada.com", "n11.com", "amazon.com.tr",
 ]
 DOMAIN_GUESS_TLDS = [".com.tr", ".com", ".tr"]
+# Calibrated reference-blind Stage A acceptance (Talimat 17). The rule is
+# fixed by data/truth/calibration_acceptance_v2.json and was tested once on
+# independent fairs; do not tune it here.
+ENABLE_CALIBRATED_ACCEPTANCE = os.getenv("ENABLE_CALIBRATED_ACCEPTANCE", "1") == "1"
+CALIBRATED_ACCEPTANCE_RULE_ID = "L3_R3_H2_Ccontact_N0_U0"
+CALIBRATED_ACCEPTANCE_RULE = {"L": 3, "R": 3, "H": 2, "C": "contact", "N": 0, "U": 0}
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "ddgs").lower()
 SEARCH_REPLAY_PROVIDER_FALLBACKS = tuple(
     provider.strip().lower()

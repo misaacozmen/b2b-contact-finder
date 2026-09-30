@@ -12,6 +12,7 @@ from pathlib import Path
 import config
 from modules import (
     api_configuration,
+    calibration,
     candidate_reranker,
     checkpoint,
     company_resolvers,
@@ -3189,6 +3190,41 @@ def paid_gap_fill(index: int, company: str, logger, known_website: str, metadata
     return index, row
 
 
+def _apply_calibrated_acceptance(stage_a_row: dict, entries: list[dict], blind_metadata: dict | None) -> dict:
+    """Accept the best reference-blind Stage A candidate that passes the calibrated rule."""
+    rule = config.CALIBRATED_ACCEPTANCE_RULE
+    if not config.ENABLE_CALIBRATED_ACCEPTANCE or not rule:
+        return stage_a_row
+    if str(stage_a_row.get("status", "") or "").startswith("OK_"):
+        return stage_a_row
+    features_list = [entry.get("features", {}) for entry in entries if isinstance(entry, dict)]
+    top3 = calibration.brand_prefix_top3(features_list)
+    accepted = [
+        entry for entry in entries
+        if isinstance(entry, dict) and calibration.rule_accepts(entry.get("features", {}), top3, rule)
+    ]
+    if not accepted:
+        return stage_a_row
+    accepted.sort(key=lambda entry: calibration.acceptance_sort_key(entry["features"]))
+    selected = accepted[0]
+    url = str(selected["features"].get("url") or "")
+    domain = str(selected["features"].get("domain") or "")
+    if not url or not domain:
+        return stage_a_row
+    observation = reference_resolution.observe(selected.get("evaluation") or {}, url, blind_metadata or {})
+    contacts = reference_resolution.select_contacts(observation, domain, "")
+    row = dict(stage_a_row)
+    row.update({
+        "website": url,
+        "selected_website": url,
+        "website_source": "OWN_SEARCH_CALIBRATED",
+        "status": "OK_MEDIUM_CONFIDENCE",
+        **contacts,
+    })
+    row["reason"] = f"calibrated_acceptance:{config.CALIBRATED_ACCEPTANCE_RULE_ID}; {row.get('reason', '')}".rstrip()
+    return row
+
+
 def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
     execution_phase = str(execution_phase).upper()
     if execution_phase == "PAID":
@@ -3203,6 +3239,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         entries = stage_a_features.collect()
     finally:
         stage_a_features.end()
+    stage_a_row = _apply_calibrated_acceptance(stage_a_row, entries, blind_metadata)
     row = reference_resolution.complete_with_reference(
         index, company, logger, stage_a_row, metadata,
         evaluate_fn=_evaluate_candidate_with_stage,
@@ -3218,16 +3255,9 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
         ),
     )
     row["stage_a_candidates"] = [entry["features"] for entry in ranked_entries[:8]]
-    top3_domains = {
-        entry["features"].get("domain")
-        for entry in entries
-        if entry.get("features", {}).get("domain")
-        and isinstance(entry.get("features", {}).get("brand_prefix_len"), int)
-        and entry["features"]["brand_prefix_len"] > 0
-        and isinstance(entry.get("features", {}).get("rank_best"), int)
-        and entry["features"]["rank_best"] <= 3
-    }
-    row["stage_a_brand_prefix_top3"] = len(top3_domains)
+    row["stage_a_brand_prefix_top3"] = calibration.brand_prefix_top3(
+        [entry.get("features", {}) for entry in entries]
+    )
     field_merge.annotate(row, metadata)
     row["stage_ab"] = field_merge.stage_snapshot(row)
     return index, row
