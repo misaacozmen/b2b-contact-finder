@@ -212,16 +212,16 @@ def test_report_input_status_distribution_from_row(tmp_path, monkeypatch):
     assert "Girdi web: EMPTY=1, FIXED=1, INVALID=1, OK=1" in markdown
     book = load_workbook(tmp_path / "sonuclar.xlsx", read_only=True, data_only=True)
     try:
-        headers = [cell.value for cell in next(book["Tüm firmalar"].iter_rows())]
+        headers = [cell.value for cell in next(book["Detaylar"].iter_rows())]
         status_column = headers.index("Girdi web durumu")
-        assert [book["Tüm firmalar"].cell(row, status_column + 1).value for row in range(2, 6)] == [
-            "OK", "FIXED", "INVALID", "EMPTY",
+        assert [book["Detaylar"].cell(row, status_column + 1).value for row in range(2, 6)] == [
+            "Geçerli", "Düzeltildi", "Geçersiz", "Boş",
         ]
     finally:
         book.close()
 
 
-def test_excel_has_four_sheets_and_exact_headers(tmp_path):
+def test_excel_has_three_sheets_and_exact_headers(tmp_path):
     rows = [
         {
             "company": "Ready Co", "website": "https://ready.example/",
@@ -245,12 +245,14 @@ def test_excel_has_four_sheets_and_exact_headers(tmp_path):
     assert (tmp_path / "sonuclar.xlsx").is_file()
     book = load_workbook(tmp_path / "sonuclar.xlsx", read_only=True, data_only=True)
     try:
-        assert book.sheetnames == ["Tüm firmalar", "Yayına hazır", "Eksikler", "Özet"]
-        for name in book.sheetnames[:3]:
-            assert [cell.value for cell in next(book[name].iter_rows())] == run_report.HEADERS
-        summary_headers = [cell.value for cell in next(book["Özet"].iter_rows())]
-        assert summary_headers == ["Aşama", "Web sitesi", "E-posta", "Telefon", "Yayına hazır"]
-        assert book["Yayına hazır"].max_row == 2
-        assert book["Eksikler"].max_row == 3
+        assert book.sheetnames == ["İletişim", "Özet", "Detaylar"]
+        assert [cell.value for cell in next(book["İletişim"].iter_rows())] == run_report.CONTACT_HEADERS
+        assert [cell.value for cell in next(book["Detaylar"].iter_rows())] == run_report.DETAIL_HEADERS
+        assert book["İletişim"].max_row == 3
+        assert book["Detaylar"].max_row == 3
+        assert [book["Özet"].cell(7, column).value for column in range(1, 4)] == ["Alan", "Bulunan firma", "Oran"]
+        assert [book["Özet"].cell(15, column).value for column in range(1, 6)] == [
+            "Aşama", "Web sitesi", "E-posta", "Telefon", "Yayına hazır",
+        ]
     finally:
         book.close()
