@@ -213,6 +213,9 @@ DOMAIN_GUESS_TLDS = [".com.tr", ".com", ".tr"]
 ENABLE_CALIBRATED_ACCEPTANCE = os.getenv("ENABLE_CALIBRATED_ACCEPTANCE", "1") == "1"
 CALIBRATED_ACCEPTANCE_RULE_ID = "L3_R3_H2_Ccontact_N0_U0"
 CALIBRATED_ACCEPTANCE_RULE = {"L": 3, "R": 3, "H": 2, "C": "contact", "N": 0, "U": 0}
+# The same rule on PAID (Bright Data) candidates, with FREE search evidence for
+# the same domain added (Talimat 19). Off until the one-time measurement passes.
+ENABLE_PAID_CALIBRATED_ACCEPTANCE = os.getenv("ENABLE_PAID_CALIBRATED_ACCEPTANCE", "0") == "1"
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "ddgs").lower()
 SEARCH_REPLAY_PROVIDER_FALLBACKS = tuple(
     provider.strip().lower()

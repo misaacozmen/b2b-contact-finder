@@ -117,6 +117,25 @@ def brand_prefix_top3(features_list: list[dict]) -> int:
     })
 
 
+def with_free_evidence(features: dict, free_features: list[dict] | None) -> dict:
+    """Add FREE Stage A search evidence for the same domain to a PAID candidate."""
+    updated = dict(features)
+    domain = str(features.get("domain") or "")
+    match = next((
+        item for item in free_features or ()
+        if isinstance(item, dict) and domain
+        and scorer.same_registrable_domain(str(item.get("domain") or ""), domain)
+    ), None)
+    free_hits = int(_sort_number(match.get("query_hits"), 0)) if match else 0
+    updated["free_query_hits"] = free_hits
+    if free_hits > 0:
+        updated["query_hits"] = int(_sort_number(features.get("query_hits"), 0)) + free_hits
+        updated["rank_best"] = int(min(
+            _sort_number(features.get("rank_best"), 99), _sort_number(match.get("rank_best"), 99),
+        ))
+    return updated
+
+
 def rule_accepts(features: dict, firm_brand_prefix_top3: int, rule: dict) -> bool:
     """Apply the calibrated Stage A admission rule to one candidate."""
     if not isinstance(features, dict) or not isinstance(rule, dict):

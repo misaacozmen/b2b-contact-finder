@@ -3141,6 +3141,17 @@ def _best_hunter_email(result, website: str) -> str:
     return min(candidates)[2] if candidates else ""
 
 
+def _ranked_candidate_features(entries: list[dict], limit: int = 8) -> list[dict]:
+    ranked_entries = sorted(
+        entries,
+        key=lambda entry: (
+            entry.get("features", {}).get("rank_best")
+            if isinstance(entry.get("features", {}).get("rank_best"), int) else 99
+        ),
+    )
+    return [entry["features"] for entry in ranked_entries[:limit]]
+
+
 def paid_gap_fill(index: int, company: str, logger, known_website: str, metadata: dict | None) -> tuple[int, dict]:
     prior = dict((metadata or {}).get("_prior_row") or {})
     core_metadata = reference_inputs.strip_references(
@@ -3151,13 +3162,30 @@ def paid_gap_fill(index: int, company: str, logger, known_website: str, metadata
     row = dict(prior)
     provider_results: list[dict] = []
     if "website" in gaps:
-        _, searched = _process_company_core(
-            index, company, logger, "", core_metadata, execution_phase="PAID",
-        )
+        entries = []
+        stage_a_features.begin()
+        try:
+            _, searched = _process_company_core(
+                index, company, logger, "", core_metadata, execution_phase="PAID",
+            )
+            entries = stage_a_features.collect()
+        finally:
+            stage_a_features.end()
         provider_results.extend(_provider_results_of(searched))
+        free_features = prior.get("stage_a_candidates") if isinstance(prior.get("stage_a_candidates"), list) else []
+        entries = [
+            {**entry, "features": calibration.with_free_evidence(entry.get("features", {}), free_features)}
+            for entry in entries if isinstance(entry, dict)
+        ]
+        if config.ENABLE_PAID_CALIBRATED_ACCEPTANCE:
+            searched = _apply_calibrated_acceptance(searched, entries, core_metadata)
         if searched.get("status") in report.OK_STATUSES and searched.get("website"):
-            searched["website_source"] = "PAID_BRIGHTDATA"
+            searched["website_source"] = (
+                "PAID_BRIGHTDATA_CALIBRATED"
+                if searched.get("website_source") == "OWN_SEARCH_CALIBRATED" else "PAID_BRIGHTDATA"
+            )
         row = field_merge.merge(row, field_merge.annotate(searched, metadata)) if row else field_merge.annotate(searched, metadata)
+        row["paid_stage_a_candidates"] = _ranked_candidate_features(entries)
         gaps = field_merge.field_gaps(row)
     website = row.get("website") if field_merge.field_confidence(row, "website") in field_merge.CONFIDENT else ""
     if website and "phone" in gaps and google_places.is_enabled():
@@ -3247,14 +3275,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     row["listed_website_status"] = str((metadata or {}).get("listed_website_status", "") or "")
     row["website_input_status"] = str((metadata or {}).get("website_input_status", "") or "")
     row["stage_a"] = field_merge.stage_snapshot(stage_a_row)
-    ranked_entries = sorted(
-        entries,
-        key=lambda entry: (
-            entry.get("features", {}).get("rank_best")
-            if isinstance(entry.get("features", {}).get("rank_best"), int) else 99
-        ),
-    )
-    row["stage_a_candidates"] = [entry["features"] for entry in ranked_entries[:8]]
+    row["stage_a_candidates"] = _ranked_candidate_features(entries)
     row["stage_a_brand_prefix_top3"] = calibration.brand_prefix_top3(
         [entry.get("features", {}) for entry in entries]
     )

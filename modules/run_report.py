@@ -62,6 +62,7 @@ WEBSITE_SOURCE_LABELS = {
     "REFERENCE_UNREACHABLE": "Fuar listesi (site açılmadı)",
     "REFERENCE_THIN": "Fuar listesi (zayıf kanıt)",
     "PAID_BRIGHTDATA": "Bright Data (ücretli)",
+    "PAID_BRIGHTDATA_CALIBRATED": "Bright Data (kalibre kural)",
 }
 CONTACT_SOURCE_LABELS = {
     "SITE": "Firma sitesi",
