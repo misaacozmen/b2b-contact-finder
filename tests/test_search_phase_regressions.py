@@ -1562,11 +1562,21 @@ def test_paid_targeted_query_plan_is_append_only_across_real_rounds_and_resume(t
         search.find_targeted_candidates("ACME", {"source_record_id": "s0"}, queries, round_ordinal=ordinal, limit=1)
         expected.append((ordinal, queries[0]))
     search.find_targeted_candidates("ACME", {"source_record_id": "s0"}, ["acme legal title"], round_ordinal=2, limit=1)
-    with pytest.raises(checkpoint.ResumeInvariant):
-        search.find_targeted_candidates("ACME", {"source_record_id": "s0"}, ["different meaning"], round_ordinal=2, limit=1)
+    search.find_targeted_candidates("ACME", {"source_record_id": "s0"}, ["different meaning"], round_ordinal=2, limit=1)
     with sqlite3.connect(path) as db:
         rows = db.execute("SELECT round_ordinal,normalized_query FROM paid_query_plan_entries WHERE query_kind='targeted' ORDER BY round_ordinal,query_ordinal").fetchall()
     assert rows == expected and checkpoint.paid_query_plan_receipt("run")["paid_query_plan_count"] == 3
+
+
+def test_later_paid_pass_runs_the_frozen_targeted_plan(tmp_path, monkeypatch):
+    path = tmp_path / "targeted-frozen.sqlite3"; init_run(path, budget=6); runtime.set_item_context(0, "paid")
+    monkeypatch.setattr(config, "MAX_SEARCH_QUERIES_PER_COMPANY", 6)
+    calls = []
+    monkeypatch.setattr(search, "_safe_search_text", lambda query: calls.append(query) or search.SearchResults([], "live", "brightdata", result_state="EMPTY"))
+    search.find_targeted_candidates("ACME", {"source_record_id": "s0"}, ["acme official site", "acme legal title"], round_ordinal=1, limit=2)
+    search.find_targeted_candidates("ACME", {"source_record_id": "s0"}, ["acme new evidence gap"], round_ordinal=1, limit=2)
+    assert calls == ["acme official site", "acme legal title", "acme official site", "acme legal title"]
+    assert checkpoint.load_paid_query_plan("run", 0, query_kind="targeted", round_ordinal=1) == ["acme official site", "acme legal title"]
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra", "bool", "negative", "float"])

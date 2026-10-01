@@ -3570,7 +3570,14 @@ def find_targeted_candidates(
     if runtime.phase() == "PAID" and runtime.durable_run_id() and runtime.current_item_index() >= 0:
         if isinstance(round_ordinal, bool) or int(round_ordinal) < 1:
             raise checkpoint.ResumeInvariant("paid targeted query round ordinal must be explicit and positive")
-        proposed_queries = checkpoint.freeze_paid_query_plan(
+        # A later paid dispatch round re-runs the item with more evidence and
+        # may propose other targeted queries; the first frozen plan stays the
+        # contract for this round (Talimat 19 erratum 1).
+        frozen = checkpoint.load_paid_query_plan(
+            runtime.durable_run_id(), runtime.current_item_index(),
+            query_kind="targeted", round_ordinal=int(round_ordinal),
+        )
+        proposed_queries = frozen or checkpoint.freeze_paid_query_plan(
             run_id=runtime.durable_run_id(), item_index=runtime.current_item_index(),
             queries=proposed_queries[:max(0, min(int(limit), _effective_paid_query_limit()))],
             query_kind="targeted", round_ordinal=int(round_ordinal),
