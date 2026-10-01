@@ -48,8 +48,8 @@ def _paid_row(monkeypatch, paid_features, *, prior_candidates=(), searched=None,
     return main.paid_gap_fill(0, COMPANY, logging.getLogger("t19"), "", {"_prior_row": prior})[1]
 
 
-def test_paid_flag_defaults_off():
-    assert config.ENABLE_PAID_CALIBRATED_ACCEPTANCE is False
+def test_paid_flag_defaults_on():
+    assert config.ENABLE_PAID_CALIBRATED_ACCEPTANCE is True
 
 
 def test_free_evidence_adds_hits_for_same_domain_without_mutating_input():
