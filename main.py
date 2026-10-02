@@ -3179,6 +3179,11 @@ def paid_gap_fill(index: int, company: str, logger, known_website: str, metadata
         ]
         if config.ENABLE_PAID_CALIBRATED_ACCEPTANCE:
             searched = _apply_calibrated_acceptance(searched, entries, core_metadata)
+            if config.ENABLE_PAID_SECOND_RULE:
+                searched = _apply_calibrated_acceptance(
+                    searched, entries, core_metadata,
+                    rule=config.PAID_SECOND_RULE, rule_id=config.PAID_SECOND_RULE_ID,
+                )
         if searched.get("status") in report.OK_STATUSES and searched.get("website"):
             searched["website_source"] = (
                 "PAID_BRIGHTDATA_CALIBRATED"
@@ -3218,9 +3223,13 @@ def paid_gap_fill(index: int, company: str, logger, known_website: str, metadata
     return index, row
 
 
-def _apply_calibrated_acceptance(stage_a_row: dict, entries: list[dict], blind_metadata: dict | None) -> dict:
+def _apply_calibrated_acceptance(
+    stage_a_row: dict, entries: list[dict], blind_metadata: dict | None,
+    *, rule: dict | None = None, rule_id: str = "",
+) -> dict:
     """Accept the best reference-blind Stage A candidate that passes the calibrated rule."""
-    rule = config.CALIBRATED_ACCEPTANCE_RULE
+    rule = rule or config.CALIBRATED_ACCEPTANCE_RULE
+    rule_id = rule_id or config.CALIBRATED_ACCEPTANCE_RULE_ID
     if not config.ENABLE_CALIBRATED_ACCEPTANCE or not rule:
         return stage_a_row
     if str(stage_a_row.get("status", "") or "").startswith("OK_"):
@@ -3249,7 +3258,7 @@ def _apply_calibrated_acceptance(stage_a_row: dict, entries: list[dict], blind_m
         "status": "OK_MEDIUM_CONFIDENCE",
         **contacts,
     })
-    row["reason"] = f"calibrated_acceptance:{config.CALIBRATED_ACCEPTANCE_RULE_ID}; {row.get('reason', '')}".rstrip()
+    row["reason"] = f"calibrated_acceptance:{rule_id}; {row.get('reason', '')}".rstrip()
     return row
 
 

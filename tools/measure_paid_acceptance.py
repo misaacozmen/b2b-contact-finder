@@ -23,7 +23,7 @@ from modules import calibration, field_merge, scorer  # noqa: E402
 from tools import adjudicate_same_entity, calibrate_acceptance  # noqa: E402
 
 
-CATEGORIES = ("FREE", "PAID_LEGACY", "PAID_CALIBRATED", "NONE")
+CATEGORIES = ("FREE", "PAID_LEGACY", "PAID_CALIBRATED", "PAID_CALIBRATED_2", "NONE")
 
 
 def _named_paths(values: list[str]) -> dict[str, Path]:
@@ -116,7 +116,8 @@ def category(row: dict) -> str:
         return "NONE"
     source = str(row.get("website_source") or "")
     if source == "PAID_BRIGHTDATA_CALIBRATED":
-        return "PAID_CALIBRATED"
+        second = f"calibrated_acceptance:{config.PAID_SECOND_RULE_ID};"
+        return "PAID_CALIBRATED_2" if str(row.get("reason") or "").startswith(second) else "PAID_CALIBRATED"
     if source == "PAID_BRIGHTDATA":
         return "PAID_LEGACY"
     return "FREE"
@@ -192,6 +193,8 @@ def evaluate(
         }
     calibrated = summary["PAID_CALIBRATED"]
     summary["paid_calibrated_precision"] = calibrated["correct"] / calibrated["count"] if calibrated["count"] else 0.0
+    second = summary["PAID_CALIBRATED_2"]
+    summary["paid_second_precision"] = second["correct"] / second["count"] if second["count"] else 0.0
     summary["paid_calibrated_precision_strict"] = (
         calibrated["correct_strict"] / calibrated["count"] if calibrated["count"] else 0.0
     )

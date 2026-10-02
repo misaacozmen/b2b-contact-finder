@@ -216,6 +216,11 @@ CALIBRATED_ACCEPTANCE_RULE = {"L": 3, "R": 3, "H": 2, "C": "contact", "N": 0, "U
 # The same rule on PAID (Bright Data) candidates, with FREE search evidence for
 # the same domain added (Talimat 19). Enabled after the one-time measurement passed.
 ENABLE_PAID_CALIBRATED_ACCEPTANCE = os.getenv("ENABLE_PAID_CALIBRATED_ACCEPTANCE", "1") == "1"
+# Second PAID rule: one Google hit at rank 1-2 is enough (Talimat 20). Fixed on
+# the Talimat 19 measurement; off until an independent fair passes the test.
+ENABLE_PAID_SECOND_RULE = os.getenv("ENABLE_PAID_SECOND_RULE", "0") == "1"
+PAID_SECOND_RULE_ID = "L3_R2_H1_Ccontact_N0_U0"
+PAID_SECOND_RULE = {"L": 3, "R": 2, "H": 1, "C": "contact", "N": 0, "U": 0}
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "ddgs").lower()
 SEARCH_REPLAY_PROVIDER_FALLBACKS = tuple(
     provider.strip().lower()
