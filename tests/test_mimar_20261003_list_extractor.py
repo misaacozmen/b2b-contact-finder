@@ -164,3 +164,22 @@ def test_empty_page_reports_no_firms(tmp_path):
 def test_list_output_path_goes_to_input_folder():
     path = run_launcher.list_output_path("Ornek Fuarı 2026", now=datetime(2026, 10, 3, 9, 5))
     assert path == run_launcher.PROJECT_ROOT / "input" / "Ornek_Fuarı_2026_20261003_0905_liste.xlsx"
+
+
+def test_cards_with_only_stand_and_location_are_exhibitors_and_dialogs_are_ignored():
+    cards = "".join(
+        f"""<article class="card" data-company-id="{index}">
+          <h3 data-card-name>Ornek{index} Kompozit San. ve Tic. A.Ş.</h3>
+          <span data-card-hall><strong>Hol / Stant:</strong> <span>9 / A-{index}</span></span>
+          <span data-card-location><span data-card-location-name>İSTANBUL, Türkiye</span></span>
+          <button type="button">Detaylar</button>
+        </article>"""
+        for index in range(1, 7)
+    )
+    dialog = '<dialog><article class="card"><h3>Hol / Stant:</h3><span>Temsil eden firma</span></article></dialog>'
+    records = list_extractor.parse_records(f"<html><body>{MENU}{cards}{dialog}</body></html>", LIST_URL)
+    assert len(records) == 6
+    assert records[0]["company"] == "Ornek1 Kompozit San. ve Tic. A.Ş."
+    assert records[0]["stand"] == "9 / A-1"
+    assert records[0]["country"] == "Türkiye"
+    assert records[0]["website"] == ""

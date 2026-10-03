@@ -51,6 +51,7 @@ NAME_ATTRIBUTES = (
     "data-name", "data-firma", "data-title",
 )
 COUNTRY_ATTRIBUTES = ("data-country", "data-countries", "data-ulke")
+LOCATION_ATTRIBUTE_RE = re.compile(r"^data-[\w-]*(?:country|location|ulke)[\w-]*$")
 NAME_SELECTORS = (
     "h1", "h2", "h3", "h4", "h5", "h6", "[class*=name]", "[class*=title]",
     "[class*=firma]", "[class*=company]", "strong", "b",
@@ -59,7 +60,9 @@ PAGE_PARAMETERS = ("page", "sayfa", "p", "pg", "paged")
 LEGAL_MARKER_RE = re.compile(
     r"\b(?:a\.?\s?s|ltd|sti|san|tic|inc|llc|gmbh|s\.?a|srl|sp\.?\s?z\s?o\.?\s?o|b\.?v|ag|kg|corp|limited)\b"
 )
-STAND_RE = re.compile(r"\b(?:stand|stant|booth)\s*(?:no)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-/ ]{0,12})", re.I)
+STAND_RE = re.compile(
+    r"\b(?:stand|stant|booth)\s*(?:no)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]*(?:\s*[/,]\s*[A-Z0-9][A-Z0-9\-]*)*)", re.I,
+)
 HALL_RE = re.compile(r"\b(?:hall|hol|salon)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{0,5})", re.I)
 CHROME_TOKEN_RE = re.compile(r"(?:^|[-_])(?:menu|nav|navbar|navigation|footer|header|breadcrumb)(?:[-_]|$)")
 RECORD_FIELDS = ("company", "website", "phone", "email", "country", "hall", "stand", "profile_url")
@@ -174,6 +177,19 @@ def _card_attribute(card, attributes: tuple[str, ...]) -> str:
     return ""
 
 
+def _card_country(card) -> str:
+    """Country from a data attribute, or the last part of a location label."""
+    country = _card_attribute(card, COUNTRY_ATTRIBUTES)
+    if country:
+        return country
+    for node in card.find_all(True):
+        if any(LOCATION_ATTRIBUTE_RE.search(name) for name in node.attrs):
+            text = _clean(node.get_text(" "))
+            if text:
+                return text.rsplit(",", 1)[-1].strip()
+    return ""
+
+
 def _card_name(card) -> str:
     name = _card_attribute(card, NAME_ATTRIBUTES)
     if name:
@@ -219,29 +235,33 @@ def _card_record(card, page_url: str) -> dict:
         "website": website,
         "phone": phones[0] if phones else "",
         "email": emails[0] if emails else "",
-        "country": _card_attribute(card, COUNTRY_ATTRIBUTES),
-        "hall": _clean(hall.group(1)) if hall else "",
-        "stand": _clean(stand.group(1)) if stand else "",
+        "country": _card_country(card),
+        "hall": _clean(hall.group(1)) if hall and re.search(r"\d", hall.group(1)) else "",
+        "stand": _clean(stand.group(1)) if stand and re.search(r"\d", stand.group(1)) else "",
         "profile_url": profile,
     }
 
 
 def _record_score(record: dict) -> int:
-    # A card without any link or contact is a filter label or menu entry.
-    if not (record["website"] or record["profile_url"] or record["phone"] or record["email"]):
+    # A card without any link, contact or stand is a filter label or menu entry.
+    if not (
+        record["website"] or record["profile_url"] or record["phone"]
+        or record["email"] or record["stand"] or record["hall"]
+    ):
         return 0
     return (
         (2 if record["company"] else 0)
         + (2 if record["website"] else 0)
         + (1 if record["profile_url"] else 0)
         + (1 if record["phone"] or record["email"] else 0)
+        + (1 if record["stand"] or record["hall"] else 0)
         + (2 if LEGAL_MARKER_RE.search(fold(record["company"])) else 0)
     )
 
 
 def _site_chrome(soup: BeautifulSoup) -> set[int]:
-    """Ids of elements inside page headers, menus and footers."""
-    roots = list(soup.find_all(["header", "nav", "footer"]))
+    """Ids of elements inside page headers, menus, footers and pop-up templates."""
+    roots = list(soup.find_all(["header", "nav", "footer", "dialog", "template"]))
     for element in soup.find_all(True):
         tokens = [*element.get("class", []), str(element.get("id", ""))]
         if any(CHROME_TOKEN_RE.search(token.casefold()) for token in tokens if token):
