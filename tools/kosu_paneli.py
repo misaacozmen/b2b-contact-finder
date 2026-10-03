@@ -1,10 +1,12 @@
-"""Desktop panel that starts and watches fair runs without the terminal (Talimat 21)."""
+"""Desktop panel that starts and watches fair runs without the terminal (Talimat 21, 23)."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import queue
 import sys
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -13,12 +15,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from modules import run_launcher  # noqa: E402
+from modules import list_extractor, run_launcher  # noqa: E402
 
 
 POLL_MS = 2000
 SECTION_FONT = ("Segoe UI", 10, "bold")
 SUCCESS_STATUS = "TAMAMLANDI"
+NOT_FOUND_HELP = (
+    "Sayfada firma bulunamadı.\n\n"
+    "Liste bir formun arkasındaysa ya da sayfa açıldıktan sonra yükleniyorsa:\n"
+    "1. Sayfayı tarayıcıda açın, gerekiyorsa formu doldurun.\n"
+    "2. Firmalar görününce Ctrl+S ile \"Web sayfası, tamamı\" olarak kaydedin.\n"
+    "3. Adres kutusunda sayfanın adresi dururken \"Kayıtlı sayfa…\" ile kaydettiğiniz dosyayı seçin."
+)
 
 
 def _duration(seconds: float | None) -> str:
@@ -38,14 +47,15 @@ class Panel:
         self.input_info: dict = {}
         self.finished_dir: Path | None = None
         self.last_stage = 0
+        self.extraction: dict | None = None
         root.title("Fuar koşu paneli")
-        root.geometry("680x620")
-        root.minsize(600, 560)
+        root.geometry("680x680")
+        root.minsize(600, 620)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         frame = ttk.Frame(root, padding=14)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text="1. Fuar listesi (Excel)", font=SECTION_FONT).pack(anchor="w")
+        ttk.Label(frame, text="1. Fuar listesi", font=SECTION_FONT).pack(anchor="w")
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=(4, 2))
         self.input_var = tk.StringVar()
@@ -53,7 +63,16 @@ class Panel:
         self.choose_button = ttk.Button(row, text="Seç…", command=self.choose_input)
         self.choose_button.pack(side="left", padx=(8, 0))
         self.input_label = ttk.Label(frame, text="Bir .xlsx dosyası seçin. İlk satırda \"company\" başlığı olmalı.")
-        self.input_label.pack(anchor="w", pady=(0, 10))
+        self.input_label.pack(anchor="w", pady=(0, 4))
+        ttk.Label(frame, text="ya da fuar sitesinden çekin (liste sayfasının adresi):").pack(anchor="w")
+        fetch_row = ttk.Frame(frame)
+        fetch_row.pack(fill="x", pady=(2, 10))
+        self.url_var = tk.StringVar()
+        ttk.Entry(fetch_row, textvariable=self.url_var).pack(side="left", fill="x", expand=True)
+        self.fetch_button = ttk.Button(fetch_row, text="Listeyi çek", command=self.fetch_list)
+        self.fetch_button.pack(side="left", padx=(8, 0))
+        self.saved_button = ttk.Button(fetch_row, text="Kayıtlı sayfa…", command=self.read_saved_page)
+        self.saved_button.pack(side="left", padx=(8, 0))
 
         ttk.Label(frame, text="2. Koşu türü", font=SECTION_FONT).pack(anchor="w")
         self.mode_var = tk.StringVar(value=run_launcher.MODE_FREE)
@@ -102,8 +121,11 @@ class Panel:
         )
         if not path:
             return
-        self.input_var.set(path)
-        self.input_info = run_launcher.inspect_input(Path(path))
+        self.load_input(Path(path))
+
+    def load_input(self, path: Path) -> None:
+        self.input_var.set(str(path))
+        self.input_info = run_launcher.inspect_input(path)
         if self.input_info["ok"]:
             parts = [f"{self.input_info['company_count']} firma"]
             parts.append("web sitesi sütunu var" if self.input_info["has_website"] else "web sitesi sütunu yok")
@@ -128,11 +150,80 @@ class Panel:
                 text += f" Bright Data üst sınırı ~{run_launcher.brightdata_cost_ceiling(limits['brightdata']):.2f} $."
         self.limits_label.configure(text=text)
 
-    def set_running(self, running: bool) -> None:
+    def fetch_list(self) -> None:
+        url = self.url_var.get().strip()
+        if not url.startswith(("http://", "https://")):
+            messagebox.showwarning("Listeyi çek", "Liste sayfasının adresini yazın (https:// ile başlayan).")
+            return
+        self.start_extraction(url, None)
+
+    def read_saved_page(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Kaydedilmiş liste sayfasını seçin",
+            filetypes=[("Web sayfası", "*.html *.htm"), ("Veri dosyası", "*.json")],
+        )
+        if paths:
+            self.start_extraction(self.url_var.get().strip(), [Path(path) for path in paths])
+
+    def start_extraction(self, url: str, files: list[Path] | None) -> None:
+        name = simpledialog.askstring("Listeyi çek", "Fuar adı (ör. Turkcomposite):", parent=self.root)
+        if not name or not name.strip():
+            return
+        output = run_launcher.list_output_path(name)
+        messages: queue.Queue = queue.Queue()
+
+        def work() -> None:
+            try:
+                counts = list_extractor.build_input(url, files, name.strip(), output, progress=messages.put)
+            except (ValueError, OSError) as exc:
+                messages.put(("error", exc))
+            else:
+                messages.put(("done", counts))
+
+        self.extraction = {"queue": messages, "output": output}
+        self.set_running(True, extracting=True)
+        self.log(f"Liste çekiliyor: {url or ', '.join(path.name for path in files or [])}")
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(300, self.poll_extraction)
+
+    def poll_extraction(self) -> None:
+        if self.extraction is None:
+            return
+        while True:
+            try:
+                item = self.extraction["queue"].get_nowait()
+            except queue.Empty:
+                self.root.after(300, self.poll_extraction)
+                return
+            if isinstance(item, str):
+                self.stage_label.configure(text=item)
+                continue
+            break
+        output = self.extraction["output"]
+        self.extraction = None
+        self.set_running(False)
+        self.stage_label.configure(text="Koşu başlamadı.")
+        kind, value = item
+        if kind == "error":
+            text = NOT_FOUND_HELP if isinstance(value, ValueError) else f"Liste çekilemedi: {value}"
+            self.log(text.splitlines()[0])
+            messagebox.showwarning("Listeyi çek", text)
+            return
+        message = (
+            f"Liste hazır: {value['firms']} firma · web sitesi {value['website']} · "
+            f"telefon {value['phone']} · e-posta {value['email']}"
+        )
+        self.log(f"{message} → {output.name}")
+        self.load_input(output)
+        messagebox.showinfo("Listeyi çek", f"{message}\n\nDosya: {output}\n\nKoşu türünü seçip koşuyu başlatabilirsiniz.")
+
+    def set_running(self, running: bool, extracting: bool = False) -> None:
         state = "disabled" if running else "normal"
         self.start_button.configure(state=state)
         self.choose_button.configure(state=state)
-        self.stop_button.configure(state="normal" if running else "disabled")
+        self.fetch_button.configure(state=state)
+        self.saved_button.configure(state=state)
+        self.stop_button.configure(state="normal" if running and not extracting else "disabled")
         if running:
             for button in (self.open_results_button, self.open_folder_button, self.archive_button):
                 button.configure(state="disabled")
@@ -256,6 +347,10 @@ class Panel:
             os.startfile(target)
 
     def on_close(self) -> None:
+        if self.extraction is not None and not messagebox.askyesno(
+            "Fuar koşu paneli", "Liste çekiliyor. Pencere kapatılırsa yarıda kalır.\n\nKapatılsın mı?", icon="warning",
+        ):
+            return
         if self.session is not None:
             if not messagebox.askyesno(
                 "Fuar koşu paneli",

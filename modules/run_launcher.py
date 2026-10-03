@@ -83,7 +83,7 @@ def inspect_input(path: Path) -> dict:
     result.update({
         "ok": True,
         "company_count": len(records),
-        "has_website": any(record.get("website") for record in records),
+        "has_website": any(record.get("website") or record.get("listed_website") for record in records),
         "has_phone": any(record.get("listed_phone") for record in records),
         "has_email": any(record.get("listed_email") for record in records),
     })
@@ -236,6 +236,12 @@ def summarize_results(run_dir: Path) -> dict:
     finally:
         workbook.close()
     return summary
+
+
+def list_output_path(fair_name: str, now: datetime | None = None) -> Path:
+    """Where a pulled exhibitor list is written: input/<name>_<time>_liste.xlsx."""
+    slug = re.sub(r"[^\w]+", "_", " ".join(str(fair_name or "").split())).strip("_") or "fuar"
+    return PROJECT_ROOT / "input" / f"{slug}_{(now or datetime.now()):%Y%m%d_%H%M}_liste.xlsx"
 
 
 def archive_run(run_dir: Path, input_path: Path, fair_name: str, *, archive_root: Path = ARCHIVE_ROOT, today: date | None = None) -> Path:
