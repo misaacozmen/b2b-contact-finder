@@ -865,6 +865,17 @@ def _evaluate_candidate(
     )
     eligible_email_records = contact_policy["eligible_email_records"]
     eligible_phone_records = contact_policy["eligible_phone_records"]
+    # Mailboxes held back only for their domain.  They may fill an empty
+    # email after the website is decided; they never take part in scoring.
+    email_completion_records = [
+        item["record"] for item in contact_policy["emails"]
+        if not item["eligible"]
+        and item["reason"] == "cross_domain_email_relation_unverified"
+        and (
+            scorer.sibling_brand_domain(item["value_domain"], crawl_result["url"])
+            or item["value_domain"] in reference_resolution.FREE_MAIL_DOMAINS
+        )
+    ]
     selected_email_record = eligible_email_records[0] if eligible_email_records else {}
     email_verification = {
         "status": selected_email_record.get("verification_status", "not_checked"),
@@ -949,6 +960,7 @@ def _evaluate_candidate(
             record for record in eligible_email_records
             if record["value"] != selected_email
         ],
+        "email_completion_records": email_completion_records,
         "email_verification": email_verification["status"],
         "email_verification_reason": email_verification["reason"],
         "phone": normalized_phones[0] if normalized_phones else "",
@@ -2376,6 +2388,30 @@ def _process_known_website(
     return index, _attach_candidates(row, [candidate])
 
 
+def _complete_email_from_official_site(row: dict, evaluation: dict) -> None:
+    """Fill an empty email from the decided official site.
+
+    A sibling brand domain (firma.com.tr -> firma.com) wins over a free
+    mailbox (gmail etc.).  Both were seen on the site's own pages.
+    """
+    records = evaluation.get("email_completion_records", []) or []
+    website = str(row.get("website", "") or "")
+    for tier in ("SITE_SIBLING", "SITE_FREEMAIL"):
+        for record in records:
+            value = str(record.get("value", "") or "").strip().casefold()
+            domain = value.rsplit("@", 1)[-1] if "@" in value else ""
+            if not domain:
+                continue
+            if tier == "SITE_SIBLING" and not scorer.sibling_brand_domain(domain, website):
+                continue
+            if tier == "SITE_FREEMAIL" and domain not in reference_resolution.FREE_MAIL_DOMAINS:
+                continue
+            row["email"] = value
+            row["email_source_tier"] = tier
+            row["email_source_url"] = record.get("source_url", "")
+            return
+
+
 def _finalize_selected_evaluation(
     company: str,
     evaluation: dict,
@@ -2520,6 +2556,8 @@ def _finalize_selected_evaluation(
         row["selected_website"] = crawl_result["url"]
         _clear_unpublished_contacts(row)
         row["email_verification_reason"] = "website_identity_unverified"
+    elif not row.get("email"):
+        _complete_email_from_official_site(row, evaluation)
     return row
 
 

@@ -71,6 +71,8 @@ def field_confidence(row: dict, field: str) -> str:
             if scorer.same_registrable_domain(value.rsplit("@", 1)[-1], row.get("website", "")):
                 return website_confidence
             return "NONE"
+        if source == "SITE_SIBLING":
+            return "MEDIUM" if website_confidence in CONFIDENT else "LOW"
         return {
             "SITE_FREEMAIL": "LOW", "REFERENCE_LISTING": "MEDIUM",
             "PAID_HUNTER": "MEDIUM",

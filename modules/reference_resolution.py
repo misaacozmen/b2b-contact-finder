@@ -206,8 +206,15 @@ def select_contacts(obs: dict, reference_domain: str, listed_phone: str) -> dict
             except ValueError:
                 priority = len(_CONTACT_PREFIXES)
             ranked_emails.append(((0 if priority < len(_CONTACT_PREFIXES) else 1, priority, index), email, "SITE"))
+        elif scorer.sibling_brand_domain(domain, reference_domain):
+            local = email.rsplit("@", 1)[0]
+            try:
+                priority = _CONTACT_PREFIXES.index(local)
+            except ValueError:
+                priority = len(_CONTACT_PREFIXES)
+            ranked_emails.append(((2, priority, index), email, "SITE_SIBLING"))
         elif domain in FREE_MAIL_DOMAINS:
-            ranked_emails.append(((2, 0, index), email, "SITE_FREEMAIL"))
+            ranked_emails.append(((3, 0, index), email, "SITE_FREEMAIL"))
     ranked_emails.sort(key=lambda item: item[0])
     selected_email = ranked_emails[0][1] if ranked_emails else ""
     email_source = ranked_emails[0][2] if ranked_emails else ""

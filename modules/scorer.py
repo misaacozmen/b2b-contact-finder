@@ -167,6 +167,30 @@ def compact_domain_core(domain: str) -> str:
     return re.sub(r"[^a-z0-9]", "", domain_core(domain))
 
 
+def sibling_brand_domain(first: str, second: str) -> bool:
+    """Return True for two different registrable domains of one brand.
+
+    firma.com / firma.com.tr and firma.com / firmamarine.com qualify.  The
+    shorter core must lead the longer one and have at least four characters.
+    Registered e-mail (KEP) and public-body domains never qualify.
+    """
+    first_domain = registrable_domain(first)
+    second_domain = registrable_domain(second)
+    if not first_domain or not second_domain or first_domain == second_domain:
+        return False
+    for value in (first_domain, second_domain):
+        if value == "kep.tr" or value.endswith(".kep.tr") or is_public_body_domain(value):
+            return False
+    first_core = compact_domain_core(first_domain)
+    second_core = compact_domain_core(second_domain)
+    if not first_core or not second_core:
+        return False
+    if first_core == second_core:
+        return True
+    shorter, longer = sorted((first_core, second_core), key=len)
+    return len(shorter) >= 4 and longer.startswith(shorter)
+
+
 def is_excluded_domain(domain: str) -> bool:
     domain = normalize_domain(domain)
     return any(domain == excluded or domain.endswith(f".{excluded}") for excluded in (*config.EXCLUDED_DOMAINS, *config.CALIBRATED_DIRECTORY_DOMAINS))

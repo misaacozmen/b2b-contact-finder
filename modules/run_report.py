@@ -66,6 +66,7 @@ WEBSITE_SOURCE_LABELS = {
 }
 CONTACT_SOURCE_LABELS = {
     "SITE": "Firma sitesi",
+    "SITE_SIBLING": "Firma sitesi (farklı alan adı)",
     "SITE_FREEMAIL": "Firma sitesi (gmail vb.)",
     "REFERENCE_LISTING": "Fuar listesi",
     "PAID_HUNTER": "Hunter (ücretli)",
