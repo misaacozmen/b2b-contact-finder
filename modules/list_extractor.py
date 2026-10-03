@@ -41,10 +41,14 @@ NAME_KEYS = (
     "company", "firma", "exhibitor_name", "exhibitor", "name", "title",
 )
 WEB_KEYS = ("website", "web", "web_site", "url", "site", "www", "homepage")
-PHONE_KEYS = ("phone", "telefon", "tel", "telephone")
-EMAIL_KEYS = ("email", "e_mail", "e_posta", "eposta", "mail")
-STAND_KEYS = ("stand", "stant", "booth")
-HALL_KEYS = ("hall", "hol", "salon")
+PHONE_KEYS = ("phone", "telefon", "tel", "telephone", "contactphone", "contact_phone", "phone_number", "phonenumber")
+EMAIL_KEYS = ("email", "e_mail", "e_posta", "eposta", "mail", "contactemail", "contact_email")
+STAND_KEYS = ("stand", "stant", "booth", "standnumber", "stand_number", "boothnumber", "booth_number")
+HALL_KEYS = ("hall", "hol", "salon", "hallname", "hall_name")
+CONTACT_KEYS = (*WEB_KEYS, *PHONE_KEYS, *EMAIL_KEYS)
+WEBSITE_VALUE_RE = re.compile(r"^(?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:[/?#]\S*)?$", re.I)
+DATA_URL_RE = re.compile(r"https?:(?:\\?/){2}[^\"'\s<>]+?\.json\b")
+MAX_DATA_FILES = 3
 COUNTRY_KEYS = ("country", "ulke", "countries")
 NAME_ATTRIBUTES = (
     "data-company-name", "data-firm-name", "data-exhibitor-name", "data-company",
@@ -69,7 +73,7 @@ RECORD_FIELDS = ("company", "website", "phone", "email", "country", "hall", "sta
 
 
 def fold(value: object) -> str:
-    text = str(value or "").replace("ı", "i").replace("İ", "i")
+    text = str(value or "").replace("ı", "i").replace("İ", "i").replace("ł", "l").replace("Ł", "l")
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
@@ -123,14 +127,48 @@ def _json_objects(text: str):
         index = text.find("{", end)
 
 
-def _walk(value):
+def _walk(value, parent=None):
+    """Yield (dict, enclosing dict) pairs; list items have no enclosing dict."""
     if isinstance(value, dict):
-        yield value
+        yield value, parent
         for item in value.values():
-            yield from _walk(item)
+            yield from _walk(item, value)
     elif isinstance(value, list):
         for item in value:
-            yield from _walk(item)
+            yield from _walk(item, None)
+
+
+def _with_parent_fields(node: dict, parent: dict | None) -> dict:
+    """The node's fields, then its parent's simple and one-level nested fields.
+
+    Catalog data often keeps the stand or address beside the company block.
+    """
+    merged = dict(node)
+    nested: dict = {}
+    for key, value in (parent or {}).items():
+        if isinstance(value, dict):
+            for inner_key, inner in value.items():
+                nested.setdefault(inner_key, inner)
+        elif not isinstance(value, list):
+            merged.setdefault(key, value)
+    for key, value in nested.items():
+        merged.setdefault(key, value)
+    return merged
+
+
+def _website_value(value: str) -> str:
+    value = _clean(value)
+    return value if WEBSITE_VALUE_RE.match(value) else ""
+
+
+def data_urls(html: str, page_url: str) -> list[str]:
+    """JSON data files on the fair's own site referenced by the page scripts."""
+    urls: list[str] = []
+    for match in DATA_URL_RE.findall(html):
+        url = match.replace("\\/", "/")
+        if scorer.same_registrable_domain(url, page_url) and url not in urls:
+            urls.append(url)
+    return urls[:MAX_DATA_FILES]
 
 
 def json_records(soup: BeautifulSoup) -> list[dict]:
@@ -142,23 +180,37 @@ def json_records(soup: BeautifulSoup) -> list[dict]:
 
 
 def records_from_texts(texts: list[str]) -> list[dict]:
-    """Records from the largest group of same-shaped JSON objects with a name."""
+    """Records from the best group of same-shaped JSON objects with a name.
+
+    Groups whose objects carry a website, phone or email win; then groups
+    whose names look like companies; then the larger group.
+    """
     groups: dict[tuple, list[dict]] = {}
     for text in texts:
         for value in _json_objects(text):
-            for node in _walk(value):
+            for node, parent in _walk(value):
                 name = _pick(node, NAME_KEYS)
                 if name and len(name) <= 200:
-                    groups.setdefault(tuple(sorted(fold(key) for key in node)), []).append(node)
-    best = max(groups.values(), key=len, default=[])
+                    signature = tuple(sorted(fold(key).replace(" ", "_") for key in node))
+                    groups.setdefault(signature, []).append(_with_parent_fields(node, parent))
+
+    def group_score(item) -> tuple[int, int, int]:
+        signature, members = item
+        legal = sum(1 for node in members if LEGAL_MARKER_RE.search(fold(_pick(node, NAME_KEYS))))
+        return (
+            1 if any(key in CONTACT_KEYS for key in signature) else 0,
+            1 if legal * 5 >= len(members) else 0,
+            len(members),
+        )
+
+    best = max(groups.items(), key=group_score, default=((), []))[1]
     if len(best) < MIN_RECORDS:
         return []
     records = []
     for node in best:
-        website = _pick(node, WEB_KEYS)
         records.append({
             "company": _pick(node, NAME_KEYS),
-            "website": website if re.match(r"^(?:https?://|www\.)", website, re.I) else "",
+            "website": _website_value(_pick(node, WEB_KEYS)),
             "phone": _pick(node, PHONE_KEYS),
             "email": _pick(node, EMAIL_KEYS),
             "country": _pick(node, COUNTRY_KEYS),
@@ -439,6 +491,19 @@ def extract(*, url: str = "", html_files: list[Path] | None = None, fetch_html=N
     first = fetch_html(url)
     records.extend(parse_records(first, url))
     pages = 1
+    if len(records) < MIN_RECORDS:
+        for data_url in data_urls(first, url):
+            if progress:
+                progress("Katalog veri dosyası")
+            try:
+                found = records_from_texts([fetch_html(data_url)])
+            except requests.RequestException:
+                continue
+            if len(found) > len(records):
+                records = found
+        if len(records) >= MIN_RECORDS:
+            records = dedupe(records)
+            return {"records": records, "pages": pages, "profiles": 0}
     others = page_urls(first, url)
     for number, other in enumerate(others, start=2):
         if progress:

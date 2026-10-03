@@ -183,3 +183,61 @@ def test_cards_with_only_stand_and_location_are_exhibitors_and_dialogs_are_ignor
     assert records[0]["stand"] == "9 / A-1"
     assert records[0]["country"] == "Türkiye"
     assert records[0]["website"] == ""
+
+
+def _catalog_entry(index: int) -> dict:
+    return {
+        "exhibitorId": str(index),
+        "companyInfo": {
+            "name": f"Przyklad{index} Sp. z o.o.",
+            "displayName": f"Marka{index}",
+            "contactPhone": f"+48 22 555 00 0{index}",
+            "contactEmail": f"biuro@przyklad{index}.pl",
+            "website": f"przyklad{index}.pl",
+        },
+        "stand": {"hallName": "Hala B", "standNumber": f"B{index}"},
+        "people": [{"full_name": f"Osoba {index}", "email": f"osoba{index}@przyklad{index}.pl"}],
+        "products": [{"name": f"Produkt {index}-{number}"} for number in range(3)],
+    }
+
+
+def test_catalog_json_uses_company_block_and_parent_stand_not_people_or_products():
+    text = json.dumps([_catalog_entry(index) for index in range(1, 7)])
+    records = list_extractor.records_from_texts([text])
+    assert len(records) == 6
+    first = records[0]
+    assert first["company"] == "Przyklad1 Sp. z o.o."
+    assert first["website"] == "przyklad1.pl"
+    assert first["phone"] == "+48 22 555 00 01"
+    assert first["email"] == "biuro@przyklad1.pl"
+    assert (first["hall"], first["stand"]) == ("Hala B", "B1")
+
+
+def test_page_without_cards_reads_its_catalog_data_file_on_the_same_site():
+    data = json.dumps([_catalog_entry(index) for index in range(1, 7)])
+    page = (
+        "<html><body><div id='app'>Katalog</div><script>window.CONFIG = "
+        r'{"dataUrl":"https:\/\/fuar.example\/uploads\/katalog.json"};'
+        'var other = "https://baska.example/veri.json";</script></body></html>'
+    )
+    pages = {LIST_URL: page, "https://fuar.example/uploads/katalog.json": data}
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return pages[url]
+
+    result = list_extractor.extract(url=LIST_URL, fetch_html=fetch)
+    assert len(result["records"]) == 6
+    assert "https://baska.example/veri.json" not in fetched
+
+
+def test_website_values_without_scheme_are_kept_and_junk_is_dropped():
+    assert list_extractor._website_value("przyklad.pl") == "przyklad.pl"
+    assert list_extractor._website_value("https://www.przyklad.com.pl/kontakt") == "https://www.przyklad.com.pl/kontakt"
+    assert list_extractor._website_value("brak") == ""
+    assert list_extractor._website_value("-") == ""
+
+
+def test_fold_maps_polish_l():
+    assert list_extractor.fold("SPÓŁKA Złota") == "spolka zlota"
