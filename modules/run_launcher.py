@@ -94,9 +94,11 @@ def brightdata_budget(company_count: int) -> int:
     return max(0, int(company_count)) * BRIGHTDATA_BUDGET_PER_FIRM
 
 
-def build_command(mode: str, input_path: Path, company_count: int) -> tuple[list[str], dict[str, str]]:
+def build_command(mode: str, input_path: Path, company_count: int, country: str = "TR") -> tuple[list[str], dict[str, str]]:
     """Return the guide's command for a mode and the environment it needs."""
     command = [str(RUNTIME_PYTHON), str(PROJECT_ROOT / "main.py"), "--input", str(Path(input_path)), "--non-interactive"]
+    if country != "TR":
+        command += ["--country", country]
     if mode == MODE_FREE:
         return command + ["--no-allow-paid", "--finalize-without-paid"], {}
     paid_env = {"ENABLE_LLM_ARBITER": "0", "ENABLE_LINKEDIN_COMPANY_LOOKUP": "0"}
@@ -308,8 +310,10 @@ class RunSession:
     """One panel-launched main.py run. poll() is cheap; call it every few seconds."""
 
     def __init__(self, mode: str, input_path: Path, company_count: int, *,
-                 runs_root: Path | None = None, log_dir: Path = PANEL_LOG_DIR, popen=subprocess.Popen):
+                 runs_root: Path | None = None, log_dir: Path = PANEL_LOG_DIR, popen=subprocess.Popen,
+                 country: str = "TR"):
         self.mode = mode
+        self.country = country
         self.input_path = Path(input_path)
         self.company_count = int(company_count)
         self.runs_root = Path(runs_root or config.RUNS_DIR)
@@ -327,7 +331,7 @@ class RunSession:
     def start(self) -> None:
         if self.process is not None:
             raise RuntimeError("run already started")
-        command, overrides = build_command(self.mode, self.input_path, self.company_count)
+        command, overrides = build_command(self.mode, self.input_path, self.company_count, self.country)
         self._before = {path.name for path in self.runs_root.iterdir() if path.is_dir()} if self.runs_root.is_dir() else set()
         self.started_at = time.time()
         self.log_dir.mkdir(parents=True, exist_ok=True)

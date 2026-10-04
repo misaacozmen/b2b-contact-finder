@@ -6,6 +6,7 @@ import hashlib
 import re
 from urllib.parse import urlparse
 
+import config
 from modules import scorer
 
 
@@ -14,9 +15,9 @@ def page_scope(source_url: str) -> str:
     scopes = (
         ("legal", ("kvkk", "legal", "ticari bilgi", "sirket bilgi", "imprint")),
         ("privacy", ("privacy", "gizlilik", "veri koruma", "data protection")),
-        ("contact", ("contact", "iletisim", "bize ulas")),
+        ("contact", ("contact", "iletisim", "bize ulas", *config.EXTRA_CONTACT_LINK_WORDS)),
         ("locations", ("location", "lokasyon", "sube", "branch", "factory", "fabrika")),
-        ("about", ("about", "hakkimizda", "kurumsal", "corporate")),
+        ("about", ("about", "hakkimizda", "kurumsal", "corporate", *config.EXTRA_ABOUT_LINK_WORDS)),
         ("document", ("pdf", "catalog", "catalogue", "katalog", "brochure", "brosur")),
     )
     for scope, markers in scopes:

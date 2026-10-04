@@ -19,17 +19,12 @@ FREE_MAIL_DOMAINS = frozenset({
     "gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "yandex.com",
     "yandex.com.tr", "icloud.com", "mynet.com", "hotmail.com.tr", "windowslive.com",
 })
-TR_CITY_MARKERS = (
-    "turkiye", "turkey", "istanbul", "ankara", "izmir", "bursa", "konya", "kayseri",
-    "gaziantep", "adana", "antalya", "kocaeli", "eskisehir", "denizli", "manisa", "inegol",
-)
+
 REFERENCE_TIERS = (
     "REFERENCE_VERIFIED", "REFERENCE_ACCEPTED", "REFERENCE_THIN",
     "REFERENCE_CONFLICT", "REFERENCE_UNUSABLE", "REFERENCE_UNREACHABLE",
 )
-_CONTACT_PREFIXES = (
-    "info", "iletisim", "contact", "satis", "sales", "bilgi", "office", "export", "ihracat",
-)
+
 
 
 def _unique(values: list[str]) -> list[str]:
@@ -46,6 +41,17 @@ def _unique(values: list[str]) -> list[str]:
 
 def _digits(value: str) -> str:
     return re.sub(r"\D", "", str(value or ""))[-10:]
+
+
+def _domestic_phone(value: str) -> bool:
+    """A normalized phone in the target country's own numbering."""
+    if config.TARGET_COUNTRY == "TR":
+        return value.startswith("0") and len(_digits(value)) == 10
+    return bool(value)
+
+
+def free_mail_domains() -> frozenset[str]:
+    return FREE_MAIL_DOMAINS | frozenset(config.EXTRA_FREE_MAIL_DOMAINS)
 
 
 def _fax_numbers(evaluation: dict) -> set[str]:
@@ -150,9 +156,9 @@ def site_signals(obs: dict, company: str) -> dict:
     )
     s3 = any(token in compact_domain or token in names_text or token in home for token in tokens)
     s4 = (
-        str(domain).endswith(".tr")
-        or any(value.startswith("0") and len(_digits(value)) == 10 for value in obs.get("phones", []))
-        or any(marker in str(obs.get("all_text", "") or "") for marker in TR_CITY_MARKERS)
+        str(domain).endswith(tuple(config.COUNTRY_DOMAIN_SUFFIXES))
+        or any(_domestic_phone(value) for value in obs.get("phones", []))
+        or any(marker in str(obs.get("all_text", "") or "") for marker in config.COUNTRY_CITY_MARKERS)
     )
     s2 = s2 or (s3 and any(scorer.same_registrable_domain(mail_domain, domain) for mail_domain in email_domains))
     signals = [
@@ -199,21 +205,22 @@ def select_contacts(obs: dict, reference_domain: str, listed_phone: str) -> dict
     ranked_emails = []
     for index, email in enumerate(emails):
         domain = email.rsplit("@", 1)[1]
+        prefixes = tuple(config.CONTACT_EMAIL_LOCALS)
         if scorer.same_registrable_domain(domain, reference_domain):
             local = email.rsplit("@", 1)[0]
             try:
-                priority = _CONTACT_PREFIXES.index(local)
+                priority = prefixes.index(local)
             except ValueError:
-                priority = len(_CONTACT_PREFIXES)
-            ranked_emails.append(((0 if priority < len(_CONTACT_PREFIXES) else 1, priority, index), email, "SITE"))
+                priority = len(prefixes)
+            ranked_emails.append(((0 if priority < len(prefixes) else 1, priority, index), email, "SITE"))
         elif scorer.sibling_brand_domain(domain, reference_domain):
             local = email.rsplit("@", 1)[0]
             try:
-                priority = _CONTACT_PREFIXES.index(local)
+                priority = prefixes.index(local)
             except ValueError:
-                priority = len(_CONTACT_PREFIXES)
+                priority = len(prefixes)
             ranked_emails.append(((2, priority, index), email, "SITE_SIBLING"))
-        elif domain in FREE_MAIL_DOMAINS:
+        elif domain in free_mail_domains():
             ranked_emails.append(((3, 0, index), email, "SITE_FREEMAIL"))
     ranked_emails.sort(key=lambda item: item[0])
     selected_email = ranked_emails[0][1] if ranked_emails else ""
@@ -225,10 +232,13 @@ def select_contacts(obs: dict, reference_domain: str, listed_phone: str) -> dict
     ])
     normalized_listed = phone.normalize_phone(listed_phone)
     listed_match = next((value for value in site_phones if normalized_listed and _digits(value) == _digits(normalized_listed)), "")
-    tr_phones = [value for value in site_phones if value.startswith("0") and len(_digits(value)) == 10]
-    fixed = next((value for value in tr_phones if value[1:2] in {"2", "3", "4"}), "")
-    mobile = next((value for value in tr_phones if value[1:2] == "5"), "")
-    selected_phone = listed_match or fixed or mobile
+    if config.TARGET_COUNTRY == "TR":
+        tr_phones = [value for value in site_phones if value.startswith("0") and len(_digits(value)) == 10]
+        fixed = next((value for value in tr_phones if value[1:2] in {"2", "3", "4"}), "")
+        mobile = next((value for value in tr_phones if value[1:2] == "5"), "")
+        selected_phone = listed_match or fixed or mobile
+    else:
+        selected_phone = listed_match or next(iter(site_phones), "")
     phone_source = "SITE" if selected_phone else ""
     if not selected_phone and normalized_listed:
         selected_phone = normalized_listed

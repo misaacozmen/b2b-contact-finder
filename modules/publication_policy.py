@@ -428,7 +428,7 @@ def evaluate_content(evidence: dict[str, Any]) -> ContentDecision:
         and all(
             item.get("target_source_record_id") == target_source_record_id
             and item.get("observation_type") == "country"
-            and str(item.get("observation_value") or "").strip().casefold() in {"tr", "turkey", "türkiye", "turkiye"}
+            and str(item.get("observation_value") or "").strip().casefold() in set(config.COUNTRY_OBSERVATION_VALUES)
             and str(item.get("relation") or "").casefold() == "country"
             and scorer.same_registrable_domain(
                 scorer.normalize_domain(str(item.get("final_url") or item.get("url") or "")),

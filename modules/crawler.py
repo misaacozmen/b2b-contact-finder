@@ -666,7 +666,8 @@ def _contactish_url(url: str) -> bool:
         "terms", "kullanim", "location", "lokasyon", "distributor",
         "bayi", "dealer", "catalog", "catalogue", "katalog", "brochure", "brosur",
     )
-    return any(keyword in value for keyword in (*keywords, *smart_map_keywords)) or value.endswith((".vcf", ".vcard"))
+    extra = (*config.EXTRA_CONTACT_LINK_WORDS, *config.EXTRA_ABOUT_LINK_WORDS)
+    return any(keyword in value for keyword in (*keywords, *smart_map_keywords, *extra)) or value.endswith((".vcf", ".vcard"))
 
 
 def _robots_and_sitemaps(root: str) -> tuple[robotparser.RobotFileParser | None, list[str]]:
@@ -1708,6 +1709,7 @@ def fetch_site(
                     identity_markers = (
                         "about", "hakkimizda", "kurumsal", "company", "corporate",
                         "kvkk", "aydinlatma", "gizlilik", "privacy", "legal",
+                        *config.EXTRA_ABOUT_LINK_WORDS,
                     )
                     identity_pages.extend(
                         page for page in pages[1:]

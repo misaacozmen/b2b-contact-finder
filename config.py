@@ -155,6 +155,41 @@ SEARCH_COUNTRY_QUERY_TEMPLATES = [
     "{company} {country} resmi web sitesi" if TARGET_COUNTRY == "TR"
     else "{company} {country} official website",
 ]
+# Country-dependent words used inside search queries and page checks
+# (Talimat 26).  These are Türkiye's values; modules/country_profile.py
+# replaces them when a run targets another country.
+COUNTRY_QUERY_NAME = "Turkiye"
+OFFICIAL_SITE_PHRASE = "resmi web sitesi"
+OFFICIAL_SITE_SHORT_PHRASE = "resmi sitesi"
+WEBSITE_QUERY_WORD = "web sitesi"
+CONTACT_QUERY_WORD = "iletisim"
+CONTACT_QUERY_WORD_NATIVE = "iletişim"
+REPRESENTATIVE_QUERY_WORDS = "distributor temsilci"
+LEGAL_NOTICE_QUERY_WORD = "kvkk"
+TRADE_NAME_QUERY_WORD = "ticari unvan"
+BRAND_OFFICIAL_QUERY_PHRASE = "marka resmi sitesi"
+# Empty keeps the DuckDuckGo library default region.
+DDGS_REGION = ""
+COUNTRY_DOMAIN_SUFFIXES = (".tr",)
+COUNTRY_CITY_MARKERS = (
+    "turkiye", "turkey", "istanbul", "ankara", "izmir", "bursa", "konya", "kayseri",
+    "gaziantep", "adana", "antalya", "kocaeli", "eskisehir", "denizli", "manisa", "inegol",
+)
+COUNTRY_IDENTITY_MARKERS = (
+    "turkiye", "turkey", "istanbul", "ankara", "izmir", "bursa", "kocaeli", "konya", "gaziantep",
+)
+COUNTRY_PAGE_MARKERS = ("turkey", "türkiye", "istanbul", "ankara", "izmir", "bursa")
+COUNTRY_OBSERVATION_VALUES = ("tr", "turkey", "türkiye", "turkiye")
+ADDRESS_COUNTRY_IGNORED_TERMS = ("turkiye", "turkey", "tr", "osb", "organize sanayi bolgesi")
+BRAND_CORPORATE_WORDS = ("anonim", "limited", "sirket", "sirketi", "sanayi", "ticaret")
+CONTACT_EMAIL_LOCALS = (
+    "info", "iletisim", "contact", "satis", "sales", "bilgi", "office", "export", "ihracat",
+)
+LOCAL_ROUTE_TOKENS = ("tr", "tr-tr", "tr_tr", "turkiye", "turkey")
+LOCAL_MAILBOX_TOKENS = ("tr", "turkiye", "turkey")
+EXTRA_CONTACT_LINK_WORDS = ()
+EXTRA_ABOUT_LINK_WORDS = ()
+EXTRA_FREE_MAIL_DOMAINS = ()
 SEARCH_RESULTS_PER_QUERY = 8
 MAX_SEARCH_QUERIES_PER_COMPANY = int(os.getenv("MAX_SEARCH_QUERIES_PER_COMPANY", "0"))
 DEFAULT_PAID_SEARCH_QUERY_LIMIT = int(os.getenv("DEFAULT_PAID_SEARCH_QUERY_LIMIT", "10"))

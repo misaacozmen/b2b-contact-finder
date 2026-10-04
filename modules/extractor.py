@@ -610,8 +610,14 @@ def extract_contact_page_links(
     if base is None:
         return []
     base_domain = base.netloc.lower()
-    contact_keywords = ("contact", "iletisim", "iletişim", "kontakt", "bize ulaş", "bize ulas")
-    company_keywords = ("hakkımızda", "hakkimizda", "kurumsal", "about", "company", "corporate")
+    contact_keywords = (
+        "contact", "iletisim", "iletişim", "kontakt", "bize ulaş", "bize ulas",
+        *config.EXTRA_CONTACT_LINK_WORDS,
+    )
+    company_keywords = (
+        "hakkımızda", "hakkimizda", "kurumsal", "about", "company", "corporate",
+        *config.EXTRA_ABOUT_LINK_WORDS,
+    )
     candidates: list[tuple[int, str]] = []
     seen = set()
     for link in soup.find_all("a", href=True):

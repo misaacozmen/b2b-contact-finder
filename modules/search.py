@@ -85,6 +85,11 @@ class BrightDataProviderRejected(BrightDataSearchError):
         super().__init__(provider_result.result_reason or provider_result.result_state)
 
 
+def _ddgs_region() -> dict:
+    """DuckDuckGo region for the target country; empty keeps the library default."""
+    return {"region": config.DDGS_REGION} if config.DDGS_REGION else {}
+
+
 def _ddgs_backend_available(backend: str) -> bool:
     # Test doubles own their backend surface. The real DDGS client falls back
     # to "auto" for unknown names, which can unexpectedly issue other queries.
@@ -107,7 +112,7 @@ def free_search_canary() -> dict:
                     config.FREE_SEARCH_CANARY_QUERY_2,
                 ):
                     try:
-                        results = list(ddgs.text(query, max_results=3, backend=backend))
+                        results = list(ddgs.text(query, max_results=3, backend=backend, **_ddgs_region()))
                     except Exception as exc:
                         LOGGER.debug("free search canary backend '%s' query failed: %s", backend, exc)
                         continue
@@ -990,7 +995,9 @@ def _ddgs_text(query: str) -> SearchResults:
             # one logical free query reservation.
             runtime.wait_for_request_slot()
             with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend))
+                results = list(ddgs.text(
+                    query, max_results=config.SEARCH_RESULTS_PER_QUERY, backend=backend, **_ddgs_region(),
+                ))
             runtime.record_free_backend(backend, "ok" if results else "empty")
             runtime.complete_free_physical_attempt(physical.attempt_id, True)
             attempt["transport_outcome"] = "DONE"
@@ -2148,7 +2155,7 @@ def _add_search_results(
         identity_seed_urls = list(existing.get("_identity_seed_urls", ())) if existing else []
         contact_path = any(
             marker in scorer.normalize_text(unquote(url))
-            for marker in ("contact", "iletisim", "bize-ulas")
+            for marker in ("contact", scorer.normalize_text(config.CONTACT_QUERY_WORD), "bize-ulas")
         )
         # A deep contact result can surface under an official-site query too.
         # Keep it as a crawl seed only when the result itself carries the legal
@@ -3421,9 +3428,9 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
             results = run_query(query, "adaptive", gaps)
             if "discovery" in blocked_buckets or paid_provider_stopped or manual_authorization_stopped:
                 break
-            official_phrase = "resmi web sitesi" if config.TARGET_COUNTRY == "TR" else "official website"
+            official_phrase = config.OFFICIAL_SITE_PHRASE
             hint_queries = {
-                f'"{hint}" Turkiye {official_phrase}': hint
+                f'"{hint}" {config.COUNTRY_QUERY_NAME} {official_phrase}': hint
                 for hint in related_name_hints if hint
             }
             if query in hint_queries:

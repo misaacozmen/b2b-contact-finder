@@ -1,4 +1,4 @@
-"""Desktop panel that starts and watches fair runs without the terminal (Talimat 21, 23)."""
+"""Desktop panel that starts and watches fair runs without the terminal (Talimat 21, 23, 26)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from modules import list_extractor, run_launcher  # noqa: E402
+from modules import country_profile, list_extractor, run_launcher  # noqa: E402
 
 
 POLL_MS = 2000
@@ -49,8 +49,8 @@ class Panel:
         self.last_stage = 0
         self.extraction: dict | None = None
         root.title("Fuar koşu paneli")
-        root.geometry("680x680")
-        root.minsize(600, 620)
+        root.geometry("680x710")
+        root.minsize(600, 650)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         frame = ttk.Frame(root, padding=14)
         frame.pack(fill="both", expand=True)
@@ -73,6 +73,16 @@ class Panel:
         self.fetch_button.pack(side="left", padx=(8, 0))
         self.saved_button = ttk.Button(fetch_row, text="Kayıtlı sayfa…", command=self.read_saved_page)
         self.saved_button.pack(side="left", padx=(8, 0))
+
+        country_row = ttk.Frame(frame)
+        country_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(country_row, text="Firmaların ülkesi:").pack(side="left")
+        self.country_var = tk.StringVar(value="TR")
+        self.country_buttons = []
+        for code, label in country_profile.LABELS.items():
+            button = ttk.Radiobutton(country_row, text=label, value=code, variable=self.country_var)
+            button.pack(side="left", padx=(8, 0))
+            self.country_buttons.append(button)
 
         ttk.Label(frame, text="2. Koşu türü", font=SECTION_FONT).pack(anchor="w")
         self.mode_var = tk.StringVar(value=run_launcher.MODE_FREE)
@@ -223,6 +233,8 @@ class Panel:
         self.choose_button.configure(state=state)
         self.fetch_button.configure(state=state)
         self.saved_button.configure(state=state)
+        for button in self.country_buttons:
+            button.configure(state=state)
         self.stop_button.configure(state="normal" if running and not extracting else "disabled")
         if running:
             for button in (self.open_results_button, self.open_folder_button, self.archive_button):
@@ -241,7 +253,8 @@ class Panel:
             "Ücretli koşu", run_launcher.paid_confirmation_text(mode, count), icon="warning",
         ):
             return
-        self.session = run_launcher.RunSession(mode, Path(self.input_var.get()), count)
+        country = self.country_var.get()
+        self.session = run_launcher.RunSession(mode, Path(self.input_var.get()), count, country=country)
         try:
             self.session.start()
         except OSError as exc:
@@ -253,7 +266,10 @@ class Panel:
         self.last_stage = 0
         self.progress.configure(value=0)
         self.set_running(True)
-        self.log(f"Koşu başladı: {Path(self.input_var.get()).name} · {run_launcher.MODE_LABELS[mode]} · {count} firma")
+        self.log(
+            f"Koşu başladı: {Path(self.input_var.get()).name} · {country_profile.LABELS[country]} · "
+            f"{run_launcher.MODE_LABELS[mode]} · {count} firma"
+        )
         self.root.after(POLL_MS, self.poll)
 
     def poll(self) -> None:

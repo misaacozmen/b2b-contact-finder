@@ -14,7 +14,7 @@ DISCOVERY_ONLY_ROLES = {
 
 
 def _official_website_phrase() -> str:
-    return "resmi web sitesi" if config.TARGET_COUNTRY == "TR" else "official website"
+    return config.OFFICIAL_SITE_PHRASE
 
 
 def metadata_query_terms(metadata: dict | None) -> list[str]:
@@ -27,9 +27,12 @@ def query_priority(query: str) -> int:
         term in normalized for term in (scorer.normalize_text(value) for value in config.TARGET_COUNTRY_QUERY_TERMS)
     ):
         return 3
-    if "official website" in normalized or "resmi sitesi" in normalized or "resmi web sitesi" in normalized:
+    if "official website" in normalized or any(
+        scorer.normalize_text(phrase) in normalized
+        for phrase in (config.OFFICIAL_SITE_SHORT_PHRASE, config.OFFICIAL_SITE_PHRASE)
+    ):
         return 2
-    if normalized.endswith(" contact") or normalized.endswith(" iletisim"):
+    if normalized.endswith(" contact") or normalized.endswith(f" {scorer.normalize_text(config.CONTACT_QUERY_WORD)}"):
         return 0
     return 1
 
@@ -226,7 +229,7 @@ def primary_queries(
     brand = " ".join(scorer.primary_brand_tokens(legal_name or full_name, limit=1))
     if core:
         add(core)
-        add(f"{core} iletişim")
+        add(f"{core} {config.CONTACT_QUERY_WORD_NATIVE}")
     if brand and brand != core:
         sector = next((scorer.tr_lower(token) for token in core.split()[1:2]), "")
         add(f'"{brand}" {sector}'.strip())
@@ -235,7 +238,7 @@ def primary_queries(
     official_phrase = _official_website_phrase()
     if query_name:
         add(f'"{query_name}" {country} {official_phrase}')
-        add(f'"{query_name}" {country} resmi sitesi')
+        add(f'"{query_name}" {country} {config.OFFICIAL_SITE_SHORT_PHRASE}')
         add(f'"{query_name}" contact')
         for term in metadata_query_terms_fn(metadata):
             add(f'{scorer.tr_lower(query_name)} {term}')
@@ -259,7 +262,7 @@ def primary_queries(
             add(f'"{name}" "{city}"')
             add(f'"{name}" "{city}" contact')
     if query_name:
-        add(f'"{query_name}" iletisim {country}')
+        add(f'"{query_name}" {config.CONTACT_QUERY_WORD} {country}')
     for representation in re.split(r"[/;\n]+", str(identity.get("representations") or metadata.get("representations", "") or "")):
         representation = representation.strip()
         if representation:
@@ -288,9 +291,9 @@ def fallback_queries(
     quoted_name = f'"{full_name}"'
     contexts = metadata_query_terms_fn(metadata)
     queries = [
-        f"{quoted_name} {contexts[0]} resmi sitesi" if contexts else "",
-        f"{quoted_name} Turkiye {_official_website_phrase()}",
-        f"{quoted_name} iletisim",
+        f"{quoted_name} {contexts[0]} {config.OFFICIAL_SITE_SHORT_PHRASE}" if contexts else "",
+        f"{quoted_name} {config.COUNTRY_QUERY_NAME} {_official_website_phrase()}",
+        f"{quoted_name} {config.CONTACT_QUERY_WORD}",
     ]
     unique = list(dict.fromkeys(query for query in queries if query))
     return sorted(unique, key=query_priority_fn, reverse=True)[: config.MAX_FALLBACK_SEARCH_QUERIES]
@@ -356,7 +359,7 @@ def adaptive_discovery_gaps(
     ):
         gaps.add("missing_legal_name")
     if not any(
-        scorer.normalize_domain(item.get("url", "")).endswith(".tr")
+        scorer.normalize_domain(item.get("url", "")).endswith(tuple(config.COUNTRY_DOMAIN_SUFFIXES))
         or item.get("_metadata_context_matches", 0) > 0
         for item in candidates
     ):
@@ -671,7 +674,10 @@ def can_early_stop(company_name: str, candidate: dict, metadata: dict | None = N
         or candidate.get("email")
         or candidate.get("phone")
         or (metadata and (metadata.get("listed_email") or metadata.get("listed_phone")))
-        or any(marker in scorer.normalize_text(str(candidate.get("url", ""))) for marker in ("contact", "iletisim", "bize-ulas"))
+        or any(
+            marker in scorer.normalize_text(str(candidate.get("url", "")))
+            for marker in ("contact", scorer.normalize_text(config.CONTACT_QUERY_WORD), "bize-ulas")
+        )
     )
     if not contact_evidence:
         return False

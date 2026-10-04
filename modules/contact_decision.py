@@ -125,13 +125,15 @@ def rank_email_records(company: str, website: str, records: list[dict], is_usabl
         )
         affinity = (80 if website_family else 0) + (
             35 if any(token in email_text for token in tokens) else 0
-        ) + (5 if email_domain.endswith((".com.tr", ".tr")) else 0)
+        ) + (5 if email_domain.endswith(tuple(config.COUNTRY_DOMAIN_SUFFIXES)) else 0)
         source_path = urlparse(item.get("source_url", "")).path.casefold()
+        route_tokens = "|".join(re.escape(token) for token in config.LOCAL_ROUTE_TOKENS)
+        mailbox_tokens = "|".join(re.escape(token) for token in config.LOCAL_MAILBOX_TOKENS)
         localized_route = bool(re.search(
-            r"(?:^|/)(?:tr|tr-tr|tr_tr|turkiye|turkey)(?:/|$)", source_path,
+            rf"(?:^|/)(?:{route_tokens})(?:/|$)", source_path,
         ))
         localized_mailbox = bool(re.search(
-            r"(?:^|[._-])(?:tr|turkiye|turkey)(?:[._-]|$)", local,
+            rf"(?:^|[._-])(?:{mailbox_tokens})(?:[._-]|$)", local,
         ))
         prefix = re.split(r"[.-]", local, maxsplit=1)[0]
         try:

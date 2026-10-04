@@ -30,6 +30,11 @@ TRANSLATION_TABLE = str.maketrans(
         "\u00d6": "o",
         "\u015e": "s",
         "\u00dc": "u",
+        # Polish letters (Talimat 26); NFKD does not decompose "ł".
+        "\u0105": "a", "\u0107": "c", "\u0119": "e", "\u0142": "l", "\u0144": "n",
+        "\u00f3": "o", "\u015b": "s", "\u017a": "z", "\u017c": "z",
+        "\u0104": "a", "\u0106": "c", "\u0118": "e", "\u0141": "l", "\u0143": "n",
+        "\u00d3": "o", "\u015a": "s", "\u0179": "z", "\u017b": "z",
     }
 )
 

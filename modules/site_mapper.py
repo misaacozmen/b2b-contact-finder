@@ -9,6 +9,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+import config
 from modules import scorer
 
 
@@ -29,10 +30,18 @@ PAGE_MARKERS = {
 KIND_ORDER = ("contact", "legal", "privacy", "locations", "about", "distributors", "terms", "catalog")
 
 
+def _page_markers(kind: str) -> tuple[str, ...]:
+    extra = {
+        "contact": config.EXTRA_CONTACT_LINK_WORDS,
+        "about": config.EXTRA_ABOUT_LINK_WORDS,
+    }.get(kind, ())
+    return (*PAGE_MARKERS[kind], *extra)
+
+
 def classify(value: str) -> str:
     normalized = scorer.normalize_text(value).replace(" ", "-")
     for kind in KIND_ORDER:
-        if any(marker.replace(" ", "-") in normalized for marker in PAGE_MARKERS[kind]):
+        if any(marker.replace(" ", "-") in normalized for marker in _page_markers(kind)):
             return kind
     return ""
 

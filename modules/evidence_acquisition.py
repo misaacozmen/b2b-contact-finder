@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 
+import config
 from modules import entity_resolution, scorer
 
 
@@ -75,16 +76,16 @@ def _queries(
         f"{quoted} official website"
         if gaps & {"missing_legal_identity", "missing_relationship", "missing_identity_coherence", "ambiguous_candidates"}
         else "",
-        f"{quoted} ticari unvan KVKK"
+        f"{quoted} {config.TRADE_NAME_QUERY_WORD} {config.LEGAL_NOTICE_QUERY_WORD.upper()}"
         if gaps & {
             "missing_legal_identity", "missing_identity_coherence",
             "ambiguous_candidates",
         } else "",
-        f"{quoted} {sector} Turkiye"
+        f"{quoted} {sector} {config.COUNTRY_QUERY_NAME}"
         if sector and gaps & {"missing_context", "ambiguous_candidates"} else "",
         f"{quoted} {address}"
         if address and gaps & {"missing_country", "ambiguous_candidates"} else "",
-        f"{quoted} iletisim"
+        f"{quoted} {config.CONTACT_QUERY_WORD}"
         if gaps & {"missing_contact", "unreachable_candidates"} else "",
     ]
     return _unique(planned)[:limit]

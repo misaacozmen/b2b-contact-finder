@@ -26,7 +26,7 @@ def _split_hints(value: object, limit: int = 3) -> list[str]:
 def _city_hint(address: object) -> str:
     """Return a conservative city-like tail from a discovery address."""
     parts = _split_hints(address, limit=10)
-    ignored = {"turkiye", "turkey", "tr", "osb", "organize sanayi bolgesi"}
+    ignored = set(config.ADDRESS_COUNTRY_IGNORED_TERMS)
     for part in reversed(parts):
         normalized = scorer.normalize_text(part)
         normalized = re.sub(r"\b\d{4,6}\b", " ", normalized)
@@ -47,15 +47,29 @@ def _query_key(query: str) -> str:
 
 def query_intent(query: str) -> str:
     normalized = scorer.normalize_text(query)
-    if any(term in normalized for term in ("distributor", "temsilci", "marka resmi")):
+    official = scorer.normalize_text(config.OFFICIAL_SITE_PHRASE)
+    relationship_terms = (
+        *config.REPRESENTATIVE_QUERY_WORDS.split(),
+        " ".join(config.BRAND_OFFICIAL_QUERY_PHRASE.split()[:2]),
+    )
+    if any(scorer.normalize_text(term) in normalized for term in relationship_terms):
         return "relationship"
-    if any(term in normalized for term in ("kvkk", "ticari unvan")):
+    if any(
+        scorer.normalize_text(term) in normalized
+        for term in (config.LEGAL_NOTICE_QUERY_WORD, config.TRADE_NAME_QUERY_WORD)
+    ):
         return "legal_identity"
-    if any(term in normalized for term in ("contact", "iletisim")):
+    if any(term in normalized for term in ("contact", scorer.normalize_text(config.CONTACT_QUERY_WORD))):
         return "contact"
-    if ("official website" in normalized or "resmi web sitesi" in normalized) and "turkiye" in normalized:
+    if ("official website" in normalized or official in normalized) and scorer.normalize_text(config.COUNTRY_QUERY_NAME) in normalized:
         return "country_official"
-    if any(term in normalized for term in ("official website", "resmi sitesi", "resmi web sitesi", "web sitesi")):
+    if any(
+        term in normalized
+        for term in (
+            "official website", scorer.normalize_text(config.OFFICIAL_SITE_SHORT_PHRASE),
+            official, scorer.normalize_text(config.WEBSITE_QUERY_WORD),
+        )
+    ):
         return "official"
     return "context"
 
@@ -102,7 +116,7 @@ def adaptive_queries(
     metadata = metadata or {}
     corporate_words = {
         scorer.normalize_text(word)
-        for word in ("anonim", "limited", "sirket", "sirketi", "sanayi", "ticaret")
+        for word in config.BRAND_CORPORATE_WORDS
     }
     brand_tokens = [
         token for token in scorer.primary_brand_tokens(company_name, limit=2)
@@ -118,7 +132,8 @@ def adaptive_queries(
     representations = _split_hints(metadata.get("representations"))
     city = _city_hint(metadata.get("listed_address"))
     related = [*_split_hints(";".join(related_name_hints or []), limit=4)]
-    official_phrase = "resmi web sitesi" if config.TARGET_COUNTRY == "TR" else "official website"
+    official_phrase = config.OFFICIAL_SITE_PHRASE
+    country = config.COUNTRY_QUERY_NAME
     gaps = evidence_gaps if evidence_gaps is not None else {
         "no_candidates", "ambiguous_candidates", "missing_intrinsic_domain",
         "missing_legal_name", "missing_local_signal", "relationship_hint",
@@ -128,31 +143,31 @@ def adaptive_queries(
     # and snippet hints remain discovery-only regardless of which gap selected
     # them.
     planned = [
-        *(f'"{hint}" Turkiye {official_phrase}' for hint in related if "relationship_hint" in gaps),
-        f'"{brand}" Turkiye resmi sitesi' if gaps & {
+        *(f'"{hint}" {country} {official_phrase}' for hint in related if "relationship_hint" in gaps),
+        f'"{brand}" {country} {config.OFFICIAL_SITE_SHORT_PHRASE}' if gaps & {
             "no_candidates", "ambiguous_candidates", "missing_intrinsic_domain",
         } else "",
-        f'"{full_name}" web sitesi' if full_name != brand and gaps & {
+        f'"{full_name}" {config.WEBSITE_QUERY_WORD}' if full_name != brand and gaps & {
             "no_candidates", "ambiguous_candidates", "missing_intrinsic_domain",
         } else "",
-        f'"{brand}" kvkk' if gaps & {"no_candidates", "missing_legal_name"} else "",
-        f'"{full_name}" ticari unvan' if full_name and "missing_legal_name" in gaps else "",
-        *(f'"{item}" Turkiye distributor temsilci' for item in representations if gaps & {
+        f'"{brand}" {config.LEGAL_NOTICE_QUERY_WORD}' if gaps & {"no_candidates", "missing_legal_name"} else "",
+        f'"{full_name}" {config.TRADE_NAME_QUERY_WORD}' if full_name and "missing_legal_name" in gaps else "",
+        *(f'"{item}" {country} {config.REPRESENTATIVE_QUERY_WORDS}' for item in representations if gaps & {
             "no_candidates", "missing_intrinsic_domain", "relationship_hint",
         }),
-        *(f'"{item}" Turkiye marka resmi sitesi' for item in brands if gaps & {
+        *(f'"{item}" {country} {config.BRAND_OFFICIAL_QUERY_PHRASE}' for item in brands if gaps & {
             "no_candidates", "missing_intrinsic_domain", "relationship_hint",
         }),
         f'"{full_name}" "{city}"' if full_name and city and gaps & {
             "ambiguous_candidates", "missing_local_signal",
         } else "",
-        f'"{brand}" {contexts[0]} Turkiye' if contexts and gaps & {
+        f'"{brand}" {contexts[0]} {country}' if contexts and gaps & {
             "ambiguous_candidates", "missing_local_signal",
         } else "",
         f'"{brand}" "{metadata.get("sector", "")}"' if metadata.get("sector") and gaps & {
             "ambiguous_candidates", "missing_local_signal",
         } else "",
-        f'"{brand}" iletisim Turkiye' if gaps & {
+        f'"{brand}" {config.CONTACT_QUERY_WORD} {country}' if gaps & {
             "no_candidates", "missing_local_signal",
         } else "",
     ]

@@ -18,6 +18,7 @@ from modules import (
     company_resolvers,
     contact_decision,
     contact_publication,
+    country_profile,
     crawler,
     discovery_coverage,
     email_verifier,
@@ -210,7 +211,7 @@ def _legal_name_identity_score(company: str, pages: list[dict]) -> tuple[int, st
 def _country_identity_score(crawl_result: dict, normalized_phones: list[str]) -> tuple[int, str]:
     """Require a Turkish footprint for search-discovered non-.tr domains."""
     domain = scorer.normalize_domain(crawl_result.get("url", ""))
-    if domain.endswith(".tr"):
+    if domain.endswith(tuple(config.COUNTRY_DOMAIN_SUFFIXES)):
         return 8, "country_identity_tr_tld"
     if normalized_phones:
         return 8, "country_identity_tr_phone"
@@ -225,7 +226,7 @@ def _country_identity_score(crawl_result: dict, normalized_phones: list[str]) ->
         scorer.normalize_text(page.get("html", "")[:50000])
         for page in crawl_result.get("pages", [])
     )
-    markers = ("turkiye", "turkey", "istanbul", "ankara", "izmir", "bursa", "kocaeli", "konya", "gaziantep")
+    markers = config.COUNTRY_IDENTITY_MARKERS
     if any(re.search(rf"\b{marker}\b", text) for marker in markers):
         return 5, "country_identity_tr_text"
     return -10, "country_identity_unproven"
@@ -873,7 +874,7 @@ def _evaluate_candidate(
         and item["reason"] == "cross_domain_email_relation_unverified"
         and (
             scorer.sibling_brand_domain(item["value_domain"], crawl_result["url"])
-            or item["value_domain"] in reference_resolution.FREE_MAIL_DOMAINS
+            or item["value_domain"] in reference_resolution.free_mail_domains()
         )
     ]
     selected_email_record = eligible_email_records[0] if eligible_email_records else {}
@@ -2000,8 +2001,8 @@ def _content_evidence_records(company: str, evaluation: dict, metadata: dict | N
         records.append(record)
         country_observed = bool(
             same_site and (
-                page_domain.endswith(".tr")
-                or any(marker in text for marker in ("turkey", "türkiye", "istanbul", "ankara", "izmir", "bursa"))
+                page_domain.endswith(tuple(config.COUNTRY_DOMAIN_SUFFIXES))
+                or any(marker in text for marker in config.COUNTRY_PAGE_MARKERS)
             )
         )
         if country_observed:
@@ -2404,7 +2405,7 @@ def _complete_email_from_official_site(row: dict, evaluation: dict) -> None:
                 continue
             if tier == "SITE_SIBLING" and not scorer.sibling_brand_domain(domain, website):
                 continue
-            if tier == "SITE_FREEMAIL" and domain not in reference_resolution.FREE_MAIL_DOMAINS:
+            if tier == "SITE_FREEMAIL" and domain not in reference_resolution.free_mail_domains():
                 continue
             row["email"] = value
             row["email_source_tier"] = tier
@@ -3155,10 +3156,7 @@ def _provider_results_of(row: dict) -> list[dict]:
 
 
 def _best_hunter_email(result, website: str) -> str:
-    preferred_local_parts = (
-        "info", "iletisim", "contact", "satis", "sales", "bilgi",
-        "office", "export", "ihracat",
-    )
+    preferred_local_parts = tuple(config.CONTACT_EMAIL_LOCALS)
     preferred_order = {local_part: index for index, local_part in enumerate(preferred_local_parts)}
     candidates: list[tuple[int, int, str]] = []
     for item in result if isinstance(result, (list, tuple)) else ():
@@ -3506,6 +3504,10 @@ def _run(
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="B2B Contact Finder")
     parser.add_argument("--input", type=Path, default=config.INPUT_FILE, help="Path to firms.xlsx")
+    parser.add_argument(
+        "--country", choices=tuple(country_profile.PROFILES), default="TR",
+        help="Target country profile (TR or PL)",
+    )
     parser.add_argument("--run-dir", type=Path, default=None, help="Canonical run directory containing output/ and state/")
     parser.add_argument("--resume-run", type=Path, default=None, help="Resume an existing run directory")
     parser.add_argument("--from-run-manifest", type=Path, default=None, help="Verified completed manifest for --only-status selection")
@@ -3552,6 +3554,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def _apply_cli_options(args: argparse.Namespace) -> None:
+    country = str(getattr(args, "country", "TR") or "TR")
+    if country != country_profile.current():
+        country_profile.apply(country)
     if args.search_cache is not None:
         config.SEARCH_CACHE_MODE = args.search_cache
     if args.crawl_cache is not None:
