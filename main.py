@@ -897,7 +897,10 @@ def _evaluate_candidate(
         observed_phones=[record["value"] for record in ranked_phone_records],
     )
     reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
-    reasons.extend(tax_identity.evaluation_reasons(metadata, crawl_result["pages"]))
+    reasons.extend(tax_identity.evaluation_reasons(
+        metadata, crawl_result["pages"],
+        candidate.get("_entity_evidence_url", "") if candidate.get("query") == "tax_id_verified" else "",
+    ))
     places_phone = phone.normalize_phone(
         str(candidate.get("external_phone", "") or "")
     )
@@ -2471,6 +2474,10 @@ def _finalize_selected_evaluation(
             if evaluation["final_score"] >= config.HIGH_CONFIDENCE_SCORE
             else ("OK_MEDIUM_CONFIDENCE", "medium")
         )
+    elif resolution_reason == "candidate_resolved_by_tax_id_match":
+        # The site shows the fair list's tax identifier; it is published even
+        # when it offers no first-party email or phone (Talimat 28).
+        status, confidence = "OK_MEDIUM_CONFIDENCE", "medium"
     else:
         status, confidence = _confidence_status(
             evaluation["final_score"],

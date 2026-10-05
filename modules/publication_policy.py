@@ -1203,7 +1203,11 @@ def evaluate(
     ).startswith("candidate_resolved_by_")
     legal_or_ownership_evidence = _has_reason(reasons, ("legal_name_phrase_match:", "legal_name_full_match:", "legal_name_ownership_match:", "target_anchor_")) or bool(evaluation.get("structured_domain_relation"))
     # The fair list's tax identifier shown on the site's own pages (Talimat 27).
+    # It names one legal entity, so owner or context wording on the site does
+    # not count against it, and the site is published without contacts.
     tax_id_identity = _has_reason(reasons, ("tax_id_match:",))
+    if tax_id_identity:
+        conflicts = []
     if len(scorer.legal_identity_tokens(company)) <= 1 and not tax_id_identity and not (
         scorer.normalize_domain(candidate.get("url", ""))
         and scorer.domain_identity_match(company, candidate.get("url", ""))[0]
@@ -1220,7 +1224,7 @@ def evaluate(
         f"identity_conflict:{item.get('kind', 'unknown')}"
         for item in conflicts
     )
-    if not evaluation.get("has_contact"):
+    if not evaluation.get("has_contact") and not tax_id_identity:
         blockers.append("no_first_party_contact")
     cross_domain_email_resolved = (
         "cross_domain_email_accepted_from_verified_official_page" in reasons
@@ -1254,7 +1258,7 @@ def evaluate(
         score += 10
     if tax_id_identity:
         score += 18
-    if _has_reason(reasons, ("country_identity_tr_",)):
+    if _has_reason(reasons, ("country_identity_tr_",)) or tax_id_identity:
         score += 7
     if evaluation.get("has_contact"):
         score += 5

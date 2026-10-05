@@ -2639,6 +2639,7 @@ def _add_tax_id_candidate(
     candidates_by_domain: dict[str, dict],
     tax_id: str,
     results: list[dict],
+    company_name: str = "",
 ) -> None:
     """Add the first result site whose own pages show the firm's tax identifier.
 
@@ -2653,14 +2654,17 @@ def _add_tax_id_candidate(
             not domain
             or scorer.is_excluded_domain(domain)
             or scorer.is_public_body_domain(domain)
-            or not tax_identity.company_page(url)
+            or not tax_identity.company_host(url)
+            or tax_identity.profile_page(url, tax_id, company_name)
         ):
             continue
         if checked >= config.TAX_ID_SITE_CHECKS:
             return
         checked += 1
         site_url = _canonical_site_url(url)
-        evidence = tax_identity.site_evidence([{"url": url, "html": crawler.fetch_page(url)}], tax_id)
+        evidence = {"match_url": ""}
+        if tax_identity.company_page(url):
+            evidence = tax_identity.site_evidence([{"url": url, "html": crawler.fetch_page(url)}], tax_id)
         if not evidence["match_url"]:
             site = crawler.fetch_site(site_url, profile="identity")
             evidence = tax_identity.site_evidence(site.get("pages", []), tax_id)
@@ -3218,6 +3222,8 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
     source_health = _source_health_snapshot((metadata or {}).get("profile_url", ""))
     if source_health.get("host"):
         trace.append({"source": "exhibitor_profile_health", **source_health})
+    tax_id = tax_identity.from_metadata(metadata)
+
     def run_query(
         query: str,
         phase: str,
@@ -3329,13 +3335,13 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         )
         _add_search_results(candidates_by_domain, company_name, query, results, metadata)
         remove_mirror_candidates()
+        if tax_id and query == tax_identity.query(tax_id):
+            _add_tax_id_candidate(candidates_by_domain, tax_id, results, company_name)
         return results
 
-    tax_id = tax_identity.from_metadata(metadata)
     if tax_id and runtime.phase() != "PAID":
-        _add_tax_id_candidate(
-            candidates_by_domain, tax_id, run_query(tax_identity.query(tax_id), "primary"),
-        )
+        # The paid phase runs the same query as the first planned query.
+        run_query(tax_identity.query(tax_id), "primary")
     if runtime.phase() == "PAID" and runtime.durable_run_id() and runtime.current_item_index() >= 0:
         primary_queries = checkpoint.load_paid_query_plan(
             runtime.durable_run_id(), runtime.current_item_index(),

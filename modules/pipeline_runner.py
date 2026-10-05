@@ -41,6 +41,7 @@ from modules import (
     selection,
     scorer,
     search,
+    tax_identity,
 )
 from modules.utils import ensure_directories, setup_logging
 
@@ -778,6 +779,15 @@ def _paid_plan_queries(queries: list[str], company_name: str) -> list[str]:
         return filtered
     core = scorer.search_display_core(company_name)
     return [core] if core else []
+
+
+def _paid_plan_for(record: dict, paid_query_limit: int) -> list[str]:
+    """Planned paid queries; the fair list's tax identifier goes first (Talimat 28)."""
+    company_name = record["company"]
+    tax_id = tax_identity.from_metadata(record)
+    queries = [tax_identity.query(tax_id)] if tax_id else []
+    queries.extend(search._primary_queries(company_name, record))
+    return _paid_plan_queries(queries, company_name)[:paid_query_limit]
 
 
 def _drain_memory_outbox(run_id: str, *, replay: bool) -> None:
@@ -1851,14 +1861,10 @@ def _run_pipeline_impl_body(
             for item_index in paid_indexes:
                 existing_plan = checkpoint.load_paid_query_plan(context.run_id, item_index)
                 if not existing_plan:
-                    company_name = company_records[item_index]["company"]
                     checkpoint.freeze_paid_query_plan(
                         run_id=context.run_id,
                         item_index=item_index,
-                        queries=_paid_plan_queries(
-                            search._primary_queries(company_name, company_records[item_index]),
-                            company_name,
-                        )[:paid_query_limit],
+                        queries=_paid_plan_for(company_records[item_index], paid_query_limit),
                     )
             _prepare_provider_work_items(
                 run_id=context.run_id, company_records=company_records,

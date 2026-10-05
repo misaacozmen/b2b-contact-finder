@@ -433,9 +433,10 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
     conflicts = [signal for signal in signals if signal["polarity"] == "conflict"]
     neutral = [signal for signal in signals if signal["polarity"] == "neutral"]
     # A tax identifier from the fair list that the site itself shows names
-    # one legal entity; it needs no second source.
+    # one legal entity; it needs no second source, and owner or context
+    # wording on the site cannot contradict it.
     tax_id_supported = any(signal["kind"] == "tax_id_on_site" for signal in signals)
-    publishable = (len(support_keys) >= 2 or tax_id_supported) and not conflicts
+    publishable = tax_id_supported or (len(support_keys) >= 2 and not conflicts)
     # Multiple strong identity facts from the candidate itself are not
     # independent sources, so this remains provisional until the caller has
     # compared all plausible domains and confirmed that the candidate is
