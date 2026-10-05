@@ -58,6 +58,7 @@ from modules import (
     selection,
     secrets_store,
     stage_a_features,
+    tax_identity,
 )
 from modules.utils import close_logging, ensure_directories, random_delay, setup_logging
 
@@ -896,6 +897,7 @@ def _evaluate_candidate(
         observed_phones=[record["value"] for record in ranked_phone_records],
     )
     reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
+    reasons.extend(tax_identity.evaluation_reasons(metadata, crawl_result["pages"]))
     places_phone = phone.normalize_phone(
         str(candidate.get("external_phone", "") or "")
     )
@@ -1633,8 +1635,8 @@ def _homonym_conflict(company: str, first: dict, second: dict) -> dict:
     if not (first_party(first) and first_party(second) and first_domain_match and second_domain_match):
         return {"ambiguous": False, "reason": "insufficient_dual_first_party_identity", "family": family}
 
-    first_authority = first_candidate.get("query") in {"verified_entity", "verified_alias", "input_website"}
-    second_authority = second_candidate.get("query") in {"verified_entity", "verified_alias", "input_website"}
+    first_authority = first_candidate.get("query") in {"verified_entity", "verified_alias", "input_website", "tax_id_verified"}
+    second_authority = second_candidate.get("query") in {"verified_entity", "verified_alias", "input_website", "tax_id_verified"}
     if first_authority != second_authority:
         return {"ambiguous": False, "reason": "unique_authoritative_resolution", "family": family}
 
@@ -1664,7 +1666,7 @@ def _close_identity_margin_conflict(company: str, first: dict, second: dict) -> 
         return False
     if _official_family_evidence(first, second, company).get("identity_continuity"):
         return False
-    authoritative_queries = {"verified_entity", "verified_alias", "input_website"}
+    authoritative_queries = {"verified_entity", "verified_alias", "input_website", "tax_id_verified"}
     if (
         first_candidate.get("query") in authoritative_queries
         or second_candidate.get("query") in authoritative_queries
@@ -1727,6 +1729,9 @@ def _preferred_verified_discovery_route(evaluations: list[dict]) -> dict | None:
 
 def _unreachable_homonym_conflict(company: str, selected: dict, evaluations: list[dict]) -> dict | None:
     """Keep an inaccessible same-name domain from being silently outranked."""
+    if any(str(reason).startswith("tax_id_match:") for reason in selected.get("reasons", [])):
+        # The site shows the firm's tax identifier; a same-name domain is someone else.
+        return None
     if (
         selected.get("candidate", {}).get("_source_profile_evidence")
         and selected.get("identity_assessment", {}).get("provisionally_publishable")
@@ -2105,7 +2110,7 @@ def _reviewable_authoritative_candidate(company: str, candidate: dict) -> bool:
     domain = scorer.normalize_domain(candidate.get("url", ""))
     if not domain or scorer.is_excluded_domain(domain):
         return False
-    if candidate.get("query") in {"verified_alias", "verified_entity"}:
+    if candidate.get("query") in {"verified_alias", "verified_entity", "tax_id_verified"}:
         return True
     exact_domain = _exact_brand_domain(company, candidate)
     return bool(
@@ -2121,6 +2126,8 @@ def _unsupported_search_text_candidate(company: str, evaluation: dict) -> bool:
     reasons = evaluation.get("reasons", [])
     if candidate.get("role") in {"directory", "fair_profile", "news"}:
         return True
+    if any(reason.startswith("tax_id_match:") for reason in reasons):
+        return False
     if any(reason.startswith("structured_identity_unmatched:") for reason in reasons) and not any(
         reason.startswith("legal_name_ownership_match:") for reason in reasons
     ):
@@ -2162,6 +2169,7 @@ def _listed_domain_conflict_requires_review(
     if any(reason.startswith((
         "legal_name_full_match:",
         "legal_name_ownership_match:",
+        "tax_id_match:",
     )) for reason in reasons):
         return False
     phrase_match = any(
@@ -2179,6 +2187,7 @@ def _weak_search_identity_requires_review(company: str, evaluation: dict) -> boo
         "fair_listed_website",
         "verified_alias",
         "verified_entity",
+        "tax_id_verified",
     }:
         return False
     reasons = evaluation.get("reasons", [])
@@ -2186,6 +2195,7 @@ def _weak_search_identity_requires_review(company: str, evaluation: dict) -> boo
         "legal_name_full_match:",
         "legal_name_phrase_match:",
         "legal_name_ownership_match:",
+        "tax_id_match:",
     )) for reason in reasons):
         return False
     return bool(
@@ -2205,7 +2215,7 @@ def _authoritative_unreachable_candidate(candidates: list[dict], company: str = 
         if (
             _reviewable_authoritative_candidate(company, candidate)
             if company else (
-                candidate.get("query") in {"verified_alias", "verified_entity"}
+                candidate.get("query") in {"verified_alias", "verified_entity", "tax_id_verified"}
                 or (
                     candidate.get("_official_query_evidence", 0) >= 2
                     and candidate.get("score", 0) >= config.MEDIUM_CONFIDENCE_SCORE
@@ -2721,7 +2731,7 @@ def _process_company_core(index: int, company: str, logger, known_website: str =
     eligible_candidates.extend(
         candidate for candidate in selectable_candidates
         if (
-            candidate.get("_source_profile_evidence")
+            (candidate.get("_source_profile_evidence") or candidate.get("query") == "tax_id_verified")
             and scorer.normalize_domain(candidate.get("url", "")) not in evaluated_domains
         )
     )
@@ -3270,11 +3280,18 @@ def _apply_calibrated_acceptance(
         return stage_a_row
     if str(stage_a_row.get("status", "") or "").startswith("OK_"):
         return stage_a_row
+    if (stage_a_row.get("__evaluation") or {}).get("identity_resolution") == "candidate_resolved_by_tax_id_match":
+        # The fair list's tax identifier already settled the website.
+        return stage_a_row
     features_list = [entry.get("features", {}) for entry in entries if isinstance(entry, dict)]
     top3 = calibration.brand_prefix_top3(features_list)
     accepted = [
         entry for entry in entries
         if isinstance(entry, dict) and calibration.rule_accepts(entry.get("features", {}), top3, rule)
+        and not any(
+            str(reason).startswith("context_conflict:tax_id:")
+            for reason in (entry.get("evaluation") or {}).get("reasons", [])
+        )
     ]
     if not accepted:
         return stage_a_row

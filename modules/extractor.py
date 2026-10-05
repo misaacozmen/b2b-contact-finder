@@ -3,6 +3,7 @@ import json
 import re
 from urllib.parse import unquote, urljoin
 
+import phonenumbers
 from bs4 import BeautifulSoup
 
 import config
@@ -18,6 +19,17 @@ PHONE_RE = re.compile(
 # digits regardless of separator grouping, then let phonenumbers validate it.
 TR_PHONE_FLEX_RE = re.compile(r"(?<!\d)(?:\+?90|0)(?:[\s().-]*\d){10}(?!\d)")
 TR_SERVICE_PHONE_RE = re.compile(r"(?<!\d)(?:0[\s().-]*)?444(?:[\s().-]*\d){4}(?!\d)")
+# Outside Türkiye the phonenumbers matcher finds local numbers in any national
+# grouping (Talimat 27).  In page text a number counts only after a phone word
+# or with an international prefix; a number right after a company identifier
+# label (tax, registry, bank account) is never a phone.
+PHONE_WORD_RE = re.compile(
+    r"(?i)(?:\btel\b|\btelefon\w*|\bphone\b|\bkom\b|\bkomórk\w*|\bmobile?\b|\bmob\b|"
+    r"\bfax\b|\bfaks\b|\binfolinia\b|\bcall\b|☎|📞)[^0-9]{0,6}$"
+)
+IDENTIFIER_LABEL_RE = re.compile(
+    r"(?i)\b(?:NIP|REGON|KRS|BDO|VAT|PESEL|EORI|IBAN|konto|rachunek)\b[^0-9]{0,15}$"
+)
 AT_MARKER_RE = re.compile(r"(?i)(?<=\w)\s*(?:\[\s*(?:at|@)\s*\]|\(\s*(?:at|@)\s*\)|\{\s*(?:at|@)\s*\})\s*(?=\w)")
 DOT_MARKER_RE = re.compile(r"(?i)(?<=\w)\s*(?:\[\s*(?:dot|nokta|\.)\s*\]|\(\s*(?:dot|nokta|\.)\s*\)|\{\s*(?:dot|nokta|\.)\s*\})\s*(?=\w)")
 
@@ -462,6 +474,23 @@ def extract_emails(html_text: str) -> list[str]:
     return sorted(filtered, key=sort_key)
 
 
+def _matched_phones(text: str, *, trusted: bool) -> list[str]:
+    """Numbers the phonenumbers matcher finds for the profile country, in E.164."""
+    found = []
+    matcher = phonenumbers.PhoneNumberMatcher(
+        text, config.PHONE_DEFAULT_COUNTRY, leniency=phonenumbers.Leniency.VALID,
+    )
+    for match in matcher:
+        before = text[max(0, match.start - 25):match.start]
+        if IDENTIFIER_LABEL_RE.search(before):
+            continue
+        prefixed = match.raw_string.lstrip("(").startswith(("+", "00"))
+        if not trusted and not prefixed and not PHONE_WORD_RE.search(before):
+            continue
+        found.append(phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.E164))
+    return found
+
+
 def extract_phones(html_text: str) -> list[str]:
     html_text = redaction.normalize_unicode_scalars(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
@@ -512,6 +541,11 @@ def extract_phones(html_text: str) -> list[str]:
         *PHONE_RE.findall(text), *TR_PHONE_FLEX_RE.findall(text),
         *TR_SERVICE_PHONE_RE.findall(text),
     ]
+    if config.PHONE_DEFAULT_COUNTRY != "TR":
+        matches.extend(_matched_phones(
+            " ".join([*tel_values, *whatsapp_values, *structured_values]), trusted=True,
+        ))
+        matches.extend(_matched_phones(_visible_text(html_text), trusted=False))
     for match in matches:
         value = re.sub(r"\s+", " ", match).strip(" .,-;:()")
         digits = re.sub(r"\D", "", value)
@@ -562,6 +596,13 @@ def extract_contact_records(
         start, end = match.span()
         context = visible_text[max(0, start - 80):start]
         phone_labels.append((match.group(0), _contact_label(context)))
+    if config.PHONE_DEFAULT_COUNTRY != "TR":
+        matcher = phonenumbers.PhoneNumberMatcher(
+            visible_text, config.PHONE_DEFAULT_COUNTRY, leniency=phonenumbers.Leniency.VALID,
+        )
+        for match in matcher:
+            context = visible_text[max(0, match.start - 80):match.start]
+            phone_labels.append((match.raw_string, _contact_label(context)))
 
     structured_email_labels: dict[str, str] = {}
     structured_phone_labels: list[tuple[str, str]] = []

@@ -30,6 +30,7 @@ SETTING_NAMES = (
     "COUNTRY_OBSERVATION_VALUES", "ADDRESS_COUNTRY_IGNORED_TERMS",
     "LOCAL_ROUTE_TOKENS", "LOCAL_MAILBOX_TOKENS",
     "EXTRA_CONTACT_LINK_WORDS", "EXTRA_ABOUT_LINK_WORDS", "EXTRA_FREE_MAIL_DOMAINS",
+    "TAX_ID_FORMAT", "TAX_ID_LABELS", "CALIBRATED_DIRECTORY_DOMAINS",
 )
 
 TURKEY = {name: copy.deepcopy(getattr(config, name)) for name in SETTING_NAMES}
@@ -43,6 +44,34 @@ _POLISH_LEGAL_WORDS = [
     "sp", "z", "o", "oo", "spolka", "ograniczona", "odpowiedzialnoscia", "akcyjna",
     "jawna", "komandytowa", "cywilna", "sa", "spk", "sj", "sc", "i",
 ]
+
+# Business registries, phone lookups, portals and fair sites that showed up for
+# several different Polish firms in the calibration searches (Talimat 27).
+_POLISH_DIRECTORY_DOMAINS = (
+    "411.com", "academia.edu", "agoda.com", "alamy.com", "aleo.com", "allegro.pl", "aplikuj.pl",
+    "areacodelocator.net", "auto.ru", "autoline.com.pl", "avito.ru", "bab.la", "behance.net",
+    "bing.com", "bizintel.pl", "bizraport.pl", "booking.com", "ceginformacio.hu", "ceneo.pl",
+    "cenyrolnicze.pl", "chi-chiamato.com", "cylex-polska.pl", "detail.cz", "dreamstime.com",
+    "ebay.com", "edu.uz", "eduvulcan.pl", "egospodarka.pl", "eon.de", "equista.pl", "fakt.pl",
+    "firmania.pl", "firmbook.eu", "firmy.cz", "github.com", "godzinyotwarcia24.pl", "gov.pl",
+    "gowork.pl", "imsig.pl", "infor.pl", "interweb.spb.ru", "kim-ariyor.com", "krdf.pl",
+    "krs-online.com.pl", "krs-pobierz.pl", "kurzy.cz", "masio.pl", "misterwhat.pl",
+    "mobiletator.com", "money.pl", "monitorkrs.pl", "ngo.pl", "nipregon.pl", "numerostelefono.com",
+    "numlookup.com", "numtrace.com", "nuzle.pl", "o2.pl", "oferteo.pl", "ok.ru", "okredo.com",
+    "olx.pl", "onet.pl", "otomoto.pl", "owg.pl", "ozon.kz", "panoramafirm.pl", "parp.gov.pl",
+    "pb.pl", "pexels.com", "phonedetectivetech.com", "phonenumbers.org", "pkt.pl", "poczytaj.pl",
+    "podnikatel.cz", "podobne-firmy.pl", "portaltargowy.pl", "pracahandlowiec.pl", "pracuj.pl",
+    "prezi.com", "pwe-expoplanner.com", "pzhk.pl", "pzj.pl", "qoobus.com", "radiomaryja.pl",
+    "rejestr.io", "researchgate.net", "rp.pl", "rutracker.org", "rutube.ru", "scamcall.ru",
+    "sggw.edu.pl", "shazam.com", "shutterstock.com", "smartphonetime.altervista.org",
+    "sofascore.com", "soundcloud.com", "sprawozdaniaonline.pl", "synteza.pro", "targeo.pl",
+    "targiferma.com.pl", "teraz-otwarte.pl", "thephoneindex.com",
+    "thesmartphoneantwerpen.altervista.org", "todalocas.org", "top-wet.pl", "trojmiasto.pl",
+    "trustmate.io", "tvp.pl", "veterinaryexpopoland.com", "vk.ru", "vkvideo.ru", "vstion.site",
+    "warsawexpo.eu", "whocalls.me", "whoisphone.org", "wildberries.ru", "woblink.com",
+    "wordpress.com", "wp.pl", "wprost.pl", "wyszukiwarkakrs.pl", "xkrs.pl", "yahoo.co.jp",
+    "yandex.ru", "yellowpages.pl", "zakupowe.info", "zamantika.com", "znanylekarz.pl",
+)
 
 POLAND = {
     **copy.deepcopy(TURKEY),
@@ -114,6 +143,11 @@ POLAND = {
         "wp.pl", "o2.pl", "onet.pl", "onet.eu", "op.pl", "interia.pl", "interia.eu",
         "gazeta.pl", "tlen.pl", "poczta.fm", "vp.pl", "go2.pl",
     ),
+    "TAX_ID_FORMAT": "PL_NIP",
+    "TAX_ID_LABELS": ("NIP", "NIP-UE", "NIP UE", "VAT", "VAT-UE", "VAT UE", "VAT ID", "Tax ID"),
+    "CALIBRATED_DIRECTORY_DOMAINS": sorted({
+        *TURKEY["CALIBRATED_DIRECTORY_DOMAINS"], *_POLISH_DIRECTORY_DOMAINS,
+    }),
 }
 
 PROFILES = {"TR": TURKEY, "PL": POLAND}

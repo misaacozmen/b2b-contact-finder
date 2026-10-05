@@ -58,6 +58,7 @@ class CandidateFingerprint:
     structured_business_name_corroborated: bool
     linkedin_website_match: bool
     llm_arbiter_match: bool
+    tax_id_match: bool = False
 
     @property
     def verified_identity(self) -> bool:
@@ -268,6 +269,20 @@ class CandidateFingerprint:
         )
 
     @property
+    def safe_tax_id_route(self) -> bool:
+        """The fair list's tax identifier is shown on the site's own pages.
+
+        A tax identifier names one legal entity, so the site belongs to the
+        target even when its domain or brand differs from the company name.
+        """
+        return bool(
+            self.reachable
+            and self.eligible_role
+            and self.canonical_domain_consistent
+            and self.tax_id_match
+        )
+
+    @property
     def safe_llm_arbiter_corroborated_route(self) -> bool:
         """Use LLM semantics only as support for independent identity proof."""
         independent_identity = bool(
@@ -339,6 +354,7 @@ class CandidateFingerprint:
             and not self.safe_verified_first_party_route
             and not self.safe_linkedin_corroborated_route
             and not self.safe_llm_arbiter_corroborated_route
+            and not self.safe_tax_id_route
         )
         if weak_country_homonym:
             return False
@@ -351,7 +367,8 @@ class CandidateFingerprint:
             and self.has_contact
         )
         return bool(
-            self.safe_exact_domain_route
+            self.safe_tax_id_route
+            or self.safe_exact_domain_route
             or self.safe_exact_website_route
             or self.safe_public_contact_route
             or self.safe_legal_uniqueness_route
@@ -713,12 +730,14 @@ def fingerprint(
         llm_arbiter_match=bool(
             evaluation.get("llm_arbiter_evidence", {}).get("verdict") == "match"
         ),
+        tax_id_match=any(str(reason).startswith("tax_id_match:") for reason in reasons),
     )
 
 
 def _identity_key(item: tuple[dict, CandidateFingerprint]) -> tuple[int, ...]:
     _, value = item
     return (
+        int(value.safe_tax_id_route),
         int(value.safe_exact_domain_route),
         int(value.safe_exact_website_route),
         int(value.safe_public_contact_route),
@@ -758,6 +777,8 @@ def _dominates(
     """Pareto-style elimination with a few intrinsically decisive signals."""
     _, first = left
     _, second = right
+    if first.safe_tax_id_route != second.safe_tax_id_route:
+        return first.safe_tax_id_route
     if first.semantic_conflict != second.semantic_conflict:
         return not first.semantic_conflict
     if first.direct_entity_identity != second.direct_entity_identity:
@@ -903,6 +924,9 @@ def resolve_candidates(
             selected_fingerprint.domain, value.domain, components,
         ):
             continue
+        if selected_fingerprint.safe_tax_id_route and value.safe_tax_id_route:
+            # Two sites showing the same tax identifier belong to one company.
+            continue
         if _identity_key((item, value)) == selected_key:
             contenders.append(item)
     if contenders:
@@ -917,7 +941,9 @@ def resolve_candidates(
         selected,
         tuple(item for item, _ in ready),
         (
-            "candidate_resolved_by_exact_full_name_domain"
+            "candidate_resolved_by_tax_id_match"
+            if selected_fingerprint.safe_tax_id_route
+            else "candidate_resolved_by_exact_full_name_domain"
             if (
                 selected_fingerprint.safe_exact_domain_route
                 or selected_fingerprint.safe_exact_website_route

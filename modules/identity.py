@@ -97,6 +97,11 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
         ))
     elif query == "input_website":
         signals.append(_signal("supplied_website", "support", "input", "authority", query, "strong"))
+    elif query == "tax_id_verified":
+        signals.append(_signal(
+            "tax_id_on_site", "support", "fair_catalog", "authority",
+            candidate.get("_entity_evidence_url", "") or query, "strong",
+        ))
     elif candidate.get("_source_profile_evidence"):
         signals.append(_signal(
             "exhibitor_profile_link", "neutral", "fair_profile", "discovery_bridge",
@@ -150,6 +155,14 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
             "source_profile_metadata_match", "support", "source_profile",
             f"source_profile:{source_profile_ids[0]}",
             ",".join(source_profile_matches), "medium",
+        ))
+
+    # The fair list's tax identifier shown on the site's own pages (Talimat 27).
+    tax_id_match = next((reason for reason in reasons if reason.startswith("tax_id_match:")), "")
+    if tax_id_match and query != "tax_id_verified":
+        signals.append(_signal(
+            "tax_id_on_site", "support", "fair_catalog", "authority",
+            tax_id_match.split(":", 1)[1], "strong",
         ))
 
     page_identity_strong = _has_reason(reasons, ("page_identity_strong:",))
@@ -419,7 +432,10 @@ def assess(company: str, candidate: dict, reasons: list[str], structured_identit
     })
     conflicts = [signal for signal in signals if signal["polarity"] == "conflict"]
     neutral = [signal for signal in signals if signal["polarity"] == "neutral"]
-    publishable = len(support_keys) >= 2 and not conflicts
+    # A tax identifier from the fair list that the site itself shows names
+    # one legal entity; it needs no second source.
+    tax_id_supported = any(signal["kind"] == "tax_id_on_site" for signal in signals)
+    publishable = (len(support_keys) >= 2 or tax_id_supported) and not conflicts
     # Multiple strong identity facts from the candidate itself are not
     # independent sources, so this remains provisional until the caller has
     # compared all plausible domains and confirmed that the candidate is

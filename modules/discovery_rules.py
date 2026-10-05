@@ -655,7 +655,7 @@ def can_early_stop(company_name: str, candidate: dict, metadata: dict | None = N
         return False
     if content.get("missing_evidence"):
         return False
-    if candidate.get("query") in {"verified_alias", "verified_entity"}:
+    if candidate.get("query") in {"verified_alias", "verified_entity", "tax_id_verified"}:
         return True
     if candidate.get("query") == "source_profile":
         # Fair and directory links are discovery bridges. Continue searching so

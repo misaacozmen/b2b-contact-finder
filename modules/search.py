@@ -38,6 +38,7 @@ from modules import (
     runtime,
     scorer,
     site_mapper,
+    tax_identity,
 )
 
 DISCOVERY_ONLY_ROLES = discovery_rules.DISCOVERY_ONLY_ROLES
@@ -2079,6 +2080,9 @@ def _add_search_results(
         if _is_source_host(domain, metadata):
             continue
         existing = candidates_by_domain.get(domain)
+        if existing and existing.get("query") == "tax_id_verified":
+            # Ownership is already settled by the tax identifier on the site.
+            continue
         candidate_role = _strongest_candidate_role(
             source_role,
             existing.get("role", "") if existing else "",
@@ -2629,6 +2633,54 @@ def _add_verified_alias_candidate(candidates_by_domain: dict[str, dict], company
             "_entity_evidence_url": record.get("evidence_url", ""),
             "_entity_verified_at": record.get("verified_at", ""),
         }
+
+
+def _add_tax_id_candidate(
+    candidates_by_domain: dict[str, dict],
+    tax_id: str,
+    results: list[dict],
+) -> None:
+    """Add the first result site whose own pages show the firm's tax identifier.
+
+    The result page itself, where the search engine saw the identifier, is
+    read first; then the site's home and identity pages.
+    """
+    checked = 0
+    for rank, result in enumerate(results, start=1):
+        url = _result_url(result)
+        domain = scorer.normalize_domain(url)
+        if (
+            not domain
+            or scorer.is_excluded_domain(domain)
+            or scorer.is_public_body_domain(domain)
+            or not tax_identity.company_page(url)
+        ):
+            continue
+        if checked >= config.TAX_ID_SITE_CHECKS:
+            return
+        checked += 1
+        site_url = _canonical_site_url(url)
+        evidence = tax_identity.site_evidence([{"url": url, "html": crawler.fetch_page(url)}], tax_id)
+        if not evidence["match_url"]:
+            site = crawler.fetch_site(site_url, profile="identity")
+            evidence = tax_identity.site_evidence(site.get("pages", []), tax_id)
+        if not evidence["match_url"]:
+            continue
+        candidates_by_domain[domain] = {
+            "domain": domain,
+            "url": site_url,
+            "score": config.PRE_CRAWL_SCORE_CAP,
+            "title": result.get("title", ""),
+            "snippet": "",
+            "query": "tax_id_verified",
+            "rank": rank,
+            "reason": f"tax_id_on_site:{evidence['match_url']}",
+            "role": "verified_company",
+            "_entity_relationship": "tax_id_on_site",
+            "_entity_evidence_url": evidence["match_url"],
+        }
+        runtime.record("search.tax_id.site_verified")
+        return
 
 
 def _add_entity_memory_candidates(
@@ -3279,6 +3331,11 @@ def find_candidate_domains(company_name: str, metadata: dict | None = None) -> l
         remove_mirror_candidates()
         return results
 
+    tax_id = tax_identity.from_metadata(metadata)
+    if tax_id and runtime.phase() != "PAID":
+        _add_tax_id_candidate(
+            candidates_by_domain, tax_id, run_query(tax_identity.query(tax_id), "primary"),
+        )
     if runtime.phase() == "PAID" and runtime.durable_run_id() and runtime.current_item_index() >= 0:
         primary_queries = checkpoint.load_paid_query_plan(
             runtime.durable_run_id(), runtime.current_item_index(),

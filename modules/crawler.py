@@ -378,6 +378,15 @@ def _try_fetch(url: str) -> tuple[str | None, str | None]:
         _FETCH_STATE.retrieval_receipt = previous
 
 
+def fetch_page(url: str) -> str:
+    """One HTML page through the guarded fetcher, or "" (Talimat 27)."""
+    url = _with_scheme(url)
+    if _unresolved_template_url(url) or not _normal_html_candidate(url):
+        return ""
+    html, _error = _try_fetch(url)
+    return html or ""
+
+
 def _decoded_response_text(response: requests.Response) -> str:
     """Decode HTML without Requests' unsafe ISO-8859-1 default."""
     content_type = response.headers.get("content-type", "")

@@ -190,6 +190,11 @@ LOCAL_MAILBOX_TOKENS = ("tr", "turkiye", "turkey")
 EXTRA_CONTACT_LINK_WORDS = ()
 EXTRA_ABOUT_LINK_WORDS = ()
 EXTRA_FREE_MAIL_DOMAINS = ()
+# Company tax identifier from the fair list (Talimat 27).  An empty format
+# turns tax identifier evidence off; the Türkiye profile leaves it off.
+TAX_ID_FORMAT = ""
+TAX_ID_LABELS = ()
+TAX_ID_SITE_CHECKS = 3
 SEARCH_RESULTS_PER_QUERY = 8
 MAX_SEARCH_QUERIES_PER_COMPANY = int(os.getenv("MAX_SEARCH_QUERIES_PER_COMPANY", "0"))
 DEFAULT_PAID_SEARCH_QUERY_LIMIT = int(os.getenv("DEFAULT_PAID_SEARCH_QUERY_LIMIT", "10"))

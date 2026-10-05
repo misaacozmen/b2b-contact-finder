@@ -69,7 +69,7 @@ def evidence_vector(company: str, item: dict, *, hard_context_failure: bool) -> 
         "provisionally_publishable": int(bool(assessment.get("provisionally_publishable"))),
         "hard_context_clear": int(not hard_context_failure),
         "authoritative_registry": int(
-            candidate.get("query") in {"verified_entity", "verified_alias"}
+            candidate.get("query") in {"verified_entity", "verified_alias", "tax_id_verified"}
         ),
         "direct_candidate": int(
             "discovery_only_not_identity_authority" not in candidate_reason

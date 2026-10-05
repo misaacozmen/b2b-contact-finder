@@ -45,6 +45,10 @@ PHONE_KEYS = ("phone", "telefon", "tel", "telephone", "contactphone", "contact_p
 EMAIL_KEYS = ("email", "e_mail", "e_posta", "eposta", "mail", "contactemail", "contact_email")
 STAND_KEYS = ("stand", "stant", "booth", "standnumber", "stand_number", "boothnumber", "booth_number")
 HALL_KEYS = ("hall", "hol", "salon", "hallname", "hall_name")
+TAX_ID_KEYS = (
+    "nip", "tax_id", "taxid", "tax_number", "taxnumber", "vat_id", "vatid", "vat_number",
+    "vatnumber", "vergi_no", "vergino", "vkn",
+)
 CONTACT_KEYS = (*WEB_KEYS, *PHONE_KEYS, *EMAIL_KEYS)
 WEBSITE_VALUE_RE = re.compile(r"^(?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:[/?#]\S*)?$", re.I)
 DATA_URL_RE = re.compile(r"https?:(?:\\?/){2}[^\"'\s<>]+?\.json\b")
@@ -69,7 +73,7 @@ STAND_RE = re.compile(
 )
 HALL_RE = re.compile(r"\b(?:hall|hol|salon)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{0,5})", re.I)
 CHROME_TOKEN_RE = re.compile(r"(?:^|[-_])(?:menu|nav|navbar|navigation|footer|header|breadcrumb)(?:[-_]|$)")
-RECORD_FIELDS = ("company", "website", "phone", "email", "country", "hall", "stand", "profile_url")
+RECORD_FIELDS = ("company", "website", "phone", "email", "country", "hall", "stand", "profile_url", "tax_id")
 
 
 def fold(value: object) -> str:
@@ -217,6 +221,7 @@ def records_from_texts(texts: list[str]) -> list[dict]:
             "hall": _pick(node, HALL_KEYS),
             "stand": _pick(node, STAND_KEYS),
             "profile_url": "",
+            "tax_id": _pick(node, TAX_ID_KEYS),
         })
     return records
 
@@ -291,6 +296,7 @@ def _card_record(card, page_url: str) -> dict:
         "hall": _clean(hall.group(1)) if hall and re.search(r"\d", hall.group(1)) else "",
         "stand": _clean(stand.group(1)) if stand and re.search(r"\d", stand.group(1)) else "",
         "profile_url": profile,
+        "tax_id": "",
     }
 
 
@@ -552,7 +558,7 @@ def write_input(records: list[dict], path: Path, *, source: str, listing_url: st
     sheet = book.active
     sheet.title = "Katilimcilar"
     sheet.append([
-        "company", "listed_website", "listed_phone", "listed_email", "country",
+        "company", "listed_website", "listed_phone", "listed_email", "country", "tax_id",
         "hall", "stand", "profile_url", "listing_url", "source", "source_record_id",
     ])
     used: Counter = Counter()
@@ -563,7 +569,7 @@ def write_input(records: list[dict], path: Path, *, source: str, listing_url: st
             key = f"{key}-{used[key]}"
         sheet.append([
             record["company"], record["website"], record["phone"], record["email"],
-            record["country"], record["hall"], record["stand"], record["profile_url"],
+            record["country"], record["tax_id"], record["hall"], record["stand"], record["profile_url"],
             listing_url, source, key,
         ])
     path.parent.mkdir(parents=True, exist_ok=True)

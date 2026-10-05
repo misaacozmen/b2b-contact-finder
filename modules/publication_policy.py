@@ -1202,7 +1202,9 @@ def evaluate(
         evaluation.get("_identity_resolution", "") or ""
     ).startswith("candidate_resolved_by_")
     legal_or_ownership_evidence = _has_reason(reasons, ("legal_name_phrase_match:", "legal_name_full_match:", "legal_name_ownership_match:", "target_anchor_")) or bool(evaluation.get("structured_domain_relation"))
-    if len(scorer.legal_identity_tokens(company)) <= 1 and not (
+    # The fair list's tax identifier shown on the site's own pages (Talimat 27).
+    tax_id_identity = _has_reason(reasons, ("tax_id_match:",))
+    if len(scorer.legal_identity_tokens(company)) <= 1 and not tax_id_identity and not (
         scorer.normalize_domain(candidate.get("url", ""))
         and scorer.domain_identity_match(company, candidate.get("url", ""))[0]
         and legal_or_ownership_evidence
@@ -1250,6 +1252,8 @@ def evaluate(
         score += 18
     if assessment.get("publishable"):
         score += 10
+    if tax_id_identity:
+        score += 18
     if _has_reason(reasons, ("country_identity_tr_",)):
         score += 7
     if evaluation.get("has_contact"):

@@ -150,6 +150,11 @@ def read_company_records(path: Path) -> list[dict]:
             }
         )
         record = records[-1]
+        # A tax identifier column is optional (Talimat 27); rows without one
+        # keep exactly the fields they always had.
+        tax_id = value_for(row, ("tax_id", "nip", "vat_id", "vergi_no"), None)
+        if tax_id:
+            record["tax_id"] = tax_id
         website_value, website_status = reference_inputs.normalize_reference_url(record.get("website"))
         listed_value, listed_status = reference_inputs.normalize_reference_url(record.get("listed_website"))
         phone_value, phone_status = reference_inputs.normalize_reference_phone(record.get("listed_phone"))
