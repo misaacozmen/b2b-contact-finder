@@ -44,8 +44,15 @@ def normalize_text(value: str) -> str:
 
 
 def tr_lower(value: str) -> str:
-    """Turkish-aware lowercase that never emits combining dots."""
-    return str(value or "").replace("I", "ı").replace("İ", "i").lower()
+    """Lowercase that never emits combining dots.
+
+    Only Turkish lowers a dotless capital I to a dotless ı; in any other
+    country profile "KINGSPAN" must stay "kingspan" (Talimat 29).
+    """
+    text = str(value or "").replace("İ", "i")
+    if config.TARGET_COUNTRY == "TR":
+        text = text.replace("I", "ı")
+    return text.lower()
 
 
 def search_display_core(company_name: str, max_tokens: int = 4) -> str:
@@ -54,12 +61,15 @@ def search_display_core(company_name: str, max_tokens: int = 4) -> str:
         normalize_text(word).strip(".")
         for word in (*config.LEGAL_COMPANY_WORDS, *config.QUERY_ABBREVIATION_STOPWORDS)
     }
+    ends = {normalize_text(word).strip(".") for word in config.NAME_END_LEGAL_WORDS}
     kept: list[str] = []
     for raw in re.split(r"[\s,;/()]+", str(company_name or "")):
         token = raw.strip(".-'\"&")
         if not token:
             continue
         key = normalize_text(token).replace(".", "")
+        if kept and key in ends:
+            break
         if key in stop or (raw.endswith(".") and len(key) <= 4):
             continue
         if not re.search(r"[0-9A-Za-zÇĞİÖŞÜçğıöşü]", token):

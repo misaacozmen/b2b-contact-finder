@@ -24,7 +24,7 @@ SETTING_NAMES = (
     "FOREIGN_COUNTRY_TLDS", "COUNTRY_TLD_BONUSES", "DOMAIN_GUESS_TLDS", "COUNTRY_DOMAIN_SUFFIXES",
     "BRIGHTDATA_GOOGLE_GL", "BRIGHTDATA_GOOGLE_HL", "BRIGHTDATA_COUNTRY",
     "CONTACT_PAGE_PATHS", "IDENTITY_PAGE_PATHS",
-    "LEGAL_COMPANY_WORDS", "QUERY_ABBREVIATION_STOPWORDS", "BRAND_CORPORATE_WORDS",
+    "LEGAL_COMPANY_WORDS", "QUERY_ABBREVIATION_STOPWORDS", "NAME_END_LEGAL_WORDS", "BRAND_CORPORATE_WORDS",
     "EMAIL_PRIORITY_PREFIXES", "CONTACT_EMAIL_LOCALS",
     "COUNTRY_CITY_MARKERS", "COUNTRY_IDENTITY_MARKERS", "COUNTRY_PAGE_MARKERS",
     "COUNTRY_OBSERVATION_VALUES", "ADDRESS_COUNTRY_IGNORED_TERMS",
@@ -114,6 +114,9 @@ POLAND = {
         *TURKEY["QUERY_ABBREVIATION_STOPWORDS"], *_POLISH_LEGAL_WORDS,
         "o.o", "o.o.", "s.a", "s.a.", "sp.k", "sp.k.", "sp.j", "sp.j.", "s.c", "s.c.",
     ],
+    # Polish names often continue after the legal form with the partners'
+    # names ("... SPÓŁKA CYWILNA JAN KOWALSKI") (Talimat 29).
+    "NAME_END_LEGAL_WORDS": ("spolka", "sp", "sc", "sa", "sj", "spk"),
     "BRAND_CORPORATE_WORDS": (
         *TURKEY["BRAND_CORPORATE_WORDS"], "spolka", "akcyjna", "jawna", "komandytowa",
         "ograniczona", "odpowiedzialnoscia",

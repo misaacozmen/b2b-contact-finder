@@ -111,7 +111,9 @@ def profile_page(url: str, tax_id: str, company: str = "") -> bool:
     """A page about the company on someone else's site (Talimat 28).
 
     Registries and directories put the tax identifier, or the company's name,
-    in the page address; a company's own pages do not.
+    in the page address; a company's own pages do not.  A one-word name
+    counts when the address also carries the legal form ("firma-sp-z-o-o")
+    (Talimat 29).
     """
     path = unquote(urlsplit(str(url or "")).path)
     if tax_id and _shows(path, tax_id):
@@ -119,7 +121,11 @@ def profile_page(url: str, tax_id: str, company: str = "") -> bool:
     tokens = [token for token in scorer.distinctive_tokens(company) if len(token) >= 4]
     slug = set(re.split(r"[^a-z0-9]+", scorer.normalize_text(path)))
     core = scorer.compact_domain_core(url)
-    return sum(token in slug for token in tokens) >= 2 and not any(token in core for token in tokens)
+    if any(token in core for token in tokens):
+        return False
+    hits = sum(token in slug for token in tokens)
+    legal_form = bool(slug & set(config.NAME_END_LEGAL_WORDS))
+    return hits >= 2 or bool(tokens) and hits == len(tokens) and legal_form
 
 
 def site_evidence(pages: list[dict], tax_id: str) -> dict:

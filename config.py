@@ -729,6 +729,9 @@ QUERY_ABBREVIATION_STOPWORDS = [
     "urt", "mlz", "malz", "end", "elk", "otom", "dis", "ic", "gida", "kuy", "hayv",
     "sanayi", "ticaret", "limited", "sirketi", "sirket", "anonim", "tic.", "san.",
 ]
+# Legal-form words that end the company name in search text; what follows
+# them (partners' names, "in organisation") is not part of the name.
+NAME_END_LEGAL_WORDS: tuple[str, ...] = ()
 
 SECTOR_GENERIC_WORDS = [
     "demir",
