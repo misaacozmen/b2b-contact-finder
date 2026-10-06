@@ -195,6 +195,14 @@ EXTRA_FREE_MAIL_DOMAINS = ()
 TAX_ID_FORMAT = ""
 TAX_ID_LABELS = ()
 TAX_ID_SITE_CHECKS = 5
+# Address words of legal and contact pages where firms print their tax
+# identifier; empty turns the extra page reading off (Talimat 32).
+TAX_ID_PAGE_WORDS: tuple[str, ...] = ()
+TAX_ID_PAGE_CHECKS = 4
+# Directory pages from the identifier search whose outbound links are checked,
+# and the most linked sites checked per firm.
+TAX_ID_DIRECTORY_PAGES = 2
+TAX_ID_DIRECTORY_SITES = 4
 SEARCH_RESULTS_PER_QUERY = 8
 MAX_SEARCH_QUERIES_PER_COMPANY = int(os.getenv("MAX_SEARCH_QUERIES_PER_COMPANY", "0"))
 DEFAULT_PAID_SEARCH_QUERY_LIMIT = int(os.getenv("DEFAULT_PAID_SEARCH_QUERY_LIMIT", "10"))

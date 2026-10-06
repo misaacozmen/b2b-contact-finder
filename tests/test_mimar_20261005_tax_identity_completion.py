@@ -122,4 +122,5 @@ def test_directory_profile_pages_of_the_firm_are_not_checked(monkeypatch, poland
     search._add_tax_id_candidate(
         candidates, NIP, [{"href": "https://miasto.pl/przyklad-maszyny-kowalski-sp-z-o-o"}], company,
     )
-    assert fetched == [] and candidates == {}
+    # Talimat 32: the profile page is read for links to the firm's site, never crawled as its site.
+    assert fetched == ["https://miasto.pl/przyklad-maszyny-kowalski-sp-z-o-o"] and candidates == {}

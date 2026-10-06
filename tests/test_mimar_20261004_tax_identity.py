@@ -157,7 +157,9 @@ def test_search_adds_the_first_result_site_that_shows_the_identifier(monkeypatch
     pages.clear()
     candidates = {}
     search._add_tax_id_candidate(candidates, NIP, results)
-    assert pages == ["https://inna.pl/"] and candidates == {}
+    # Talimat 32: the two directory pages are read for links; they are never crawled as sites.
+    assert pages == ["https://inna.pl/", "https://rejestr.io/krs/1/przyklad", "https://przyklad.katalog.pl/"]
+    assert candidates == {}
 
 
 def _evaluation(url: str, reasons: list[str], query: str = '"przyklad" kontakt') -> dict:

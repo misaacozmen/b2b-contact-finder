@@ -30,7 +30,7 @@ SETTING_NAMES = (
     "COUNTRY_OBSERVATION_VALUES", "ADDRESS_COUNTRY_IGNORED_TERMS",
     "LOCAL_ROUTE_TOKENS", "LOCAL_MAILBOX_TOKENS",
     "EXTRA_CONTACT_LINK_WORDS", "EXTRA_ABOUT_LINK_WORDS", "EXTRA_FREE_MAIL_DOMAINS",
-    "TAX_ID_FORMAT", "TAX_ID_LABELS", "CALIBRATED_DIRECTORY_DOMAINS",
+    "TAX_ID_FORMAT", "TAX_ID_LABELS", "TAX_ID_PAGE_WORDS", "CALIBRATED_DIRECTORY_DOMAINS",
 )
 
 TURKEY = {name: copy.deepcopy(getattr(config, name)) for name in SETTING_NAMES}
@@ -148,6 +148,11 @@ POLAND = {
     ),
     "TAX_ID_FORMAT": "PL_NIP",
     "TAX_ID_LABELS": ("NIP", "NIP-UE", "NIP UE", "VAT", "VAT-UE", "VAT UE", "VAT ID", "Tax ID"),
+    "TAX_ID_PAGE_WORDS": (
+        "regulamin", "polityka", "prywatn", "rodo", "kontakt", "contact", "o-nas", "o-firmie",
+        "onas", "dane", "impressum", "nota-prawna", "informacj", "terms", "privacy", "cookies",
+        "warunki",
+    ),
     "CALIBRATED_DIRECTORY_DOMAINS": sorted({
         *TURKEY["CALIBRATED_DIRECTORY_DOMAINS"], *_POLISH_DIRECTORY_DOMAINS,
     }),

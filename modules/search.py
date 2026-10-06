@@ -2646,7 +2646,8 @@ def _add_tax_id_candidate(
     The result page itself, where the search engine saw the identifier, is
     read first; then the site's home and identity pages.
     """
-    checked = 0
+    checked: set[str] = set()
+    directory_pages: list[str] = []
     for rank, result in enumerate(results, start=1):
         url = _result_url(result)
         domain = scorer.normalize_domain(url)
@@ -2657,34 +2658,64 @@ def _add_tax_id_candidate(
             or not tax_identity.company_host(url)
             or tax_identity.profile_page(url, tax_id, company_name)
         ):
+            # Registry and directory pages about the firm often link its site (Talimat 32).
+            if domain and not scorer.is_public_body_domain(domain) and not _listed_domain(domain, config.EXCLUDED_DOMAINS):
+                directory_pages.append(url)
             continue
-        if checked >= config.TAX_ID_SITE_CHECKS:
-            return
-        checked += 1
+        if len(checked) >= config.TAX_ID_SITE_CHECKS:
+            break
+        checked.add(scorer.registrable_domain(url))
         site_url = _canonical_site_url(url)
         evidence = {"match_url": ""}
         if tax_identity.company_page(url):
             evidence = tax_identity.site_evidence([{"url": url, "html": crawler.fetch_page(url)}], tax_id)
         if not evidence["match_url"]:
-            site = crawler.fetch_site(site_url, profile="identity")
-            evidence = tax_identity.site_evidence(site.get("pages", []), tax_id)
+            evidence = _tax_id_site_evidence(site_url, tax_id)
         if not evidence["match_url"]:
             continue
-        candidates_by_domain[domain] = {
-            "domain": domain,
-            "url": site_url,
-            "score": config.PRE_CRAWL_SCORE_CAP,
-            "title": result.get("title", ""),
-            "snippet": "",
-            "query": "tax_id_verified",
-            "rank": rank,
-            "reason": f"tax_id_on_site:{evidence['match_url']}",
-            "role": "verified_company",
-            "_entity_relationship": "tax_id_on_site",
-            "_entity_evidence_url": evidence["match_url"],
-        }
+        candidates_by_domain[domain] = _tax_id_candidate(domain, site_url, result.get("title", ""), rank, evidence["match_url"])
         runtime.record("search.tax_id.site_verified")
         return
+    sites: list[str] = []
+    for page_url in directory_pages[: config.TAX_ID_DIRECTORY_PAGES]:
+        for site_url in tax_identity.directory_sites(crawler.fetch_page(page_url), page_url, config.TAX_ID_DIRECTORY_SITES):
+            if scorer.registrable_domain(site_url) not in checked and site_url not in sites:
+                sites.append(site_url)
+    for site_url in sites[: config.TAX_ID_DIRECTORY_SITES]:
+        evidence = _tax_id_site_evidence(site_url, tax_id)
+        if not evidence["match_url"]:
+            continue
+        domain = scorer.normalize_domain(site_url)
+        candidates_by_domain[domain] = _tax_id_candidate(domain, site_url, "", 0, evidence["match_url"])
+        runtime.record("search.tax_id.directory_site_verified")
+        return
+
+
+def _listed_domain(domain: str, names) -> bool:
+    return any(domain == name or domain.endswith(f".{name}") for name in names)
+
+
+def _tax_id_site_evidence(site_url: str, tax_id: str) -> dict:
+    """Identity pages of a site, then its legal and contact pages (Talimat 32)."""
+    pages = crawler.fetch_site(site_url, profile="identity").get("pages", [])
+    pages = pages + tax_identity.more_pages(pages, tax_id, crawler.fetch_page)
+    return tax_identity.site_evidence(pages, tax_id)
+
+
+def _tax_id_candidate(domain: str, site_url: str, title: str, rank: int, evidence_url: str) -> dict:
+    return {
+        "domain": domain,
+        "url": site_url,
+        "score": config.PRE_CRAWL_SCORE_CAP,
+        "title": title,
+        "snippet": "",
+        "query": "tax_id_verified",
+        "rank": rank,
+        "reason": f"tax_id_on_site:{evidence_url}",
+        "role": "verified_company",
+        "_entity_relationship": "tax_id_on_site",
+        "_entity_evidence_url": evidence_url,
+    }
 
 
 def _add_entity_memory_candidates(

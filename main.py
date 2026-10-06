@@ -897,8 +897,12 @@ def _evaluate_candidate(
         observed_phones=[record["value"] for record in ranked_phone_records],
     )
     reasons.extend(_fair_phone_reference_reasons(metadata, crawl_result["url"], normalized_phones))
+    # Legal and contact pages are read too when the crawl did not show the identifier (Talimat 32).
+    tax_pages = crawl_result["pages"] + tax_identity.more_pages(
+        crawl_result["pages"], tax_identity.from_metadata(metadata), crawler.fetch_page,
+    )
     reasons.extend(tax_identity.evaluation_reasons(
-        metadata, crawl_result["pages"],
+        metadata, tax_pages,
         candidate.get("_entity_evidence_url", "") if candidate.get("query") == "tax_id_verified" else "",
     ))
     places_phone = phone.normalize_phone(
