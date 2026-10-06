@@ -1,355 +1,163 @@
-# B2B Contact Finder
+# B2B Fuar İletişim Bulucu
 
-Mevcut ürün kapsamı Türkiye içindeki firmalardır (`TARGET_COUNTRY=TR`); sorgu, telefon ve domain kuralları bu kapsam için optimize edilir.
+Bir fuarın katılımcı listesinden her firmanın **resmi web sitesini, e-postasını ve telefonunu** bulan ve sonucu Excel olarak veren Windows aracı.
 
-Firmalardan resmi web sitesi, e-posta ve telefon bulup Excel çıktısı üreten CLI aracı.
+- Fuar sitesindeki katılımcı listesini kendisi çeker ya da hazır bir Excel listesini okur.
+- Firmaların sitelerini bulur, sitenin gerçekten o firmaya ait olduğunu doğrular ve iletişim bilgilerini siteden alır.
+- **Türkiye** ve **Polonya** fuarları için ayarlıdır. Polonya'da fuar kataloğundaki vergi numarası (NIP) ile siteyi kesin doğrular.
+- Masaüstü paneliyle terminal kullanmadan çalışır.
+- Ücretsiz çalışır. İsterseniz ücretli kaynaklarla (Bright Data, Google Places, Hunter) eksikleri tamamlar.
 
-## Kurulum
+Ayrıntılı kullanım: [docs/KULLANIM_KILAVUZU.md](docs/KULLANIM_KILAVUZU.md)
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+---
 
-Test/geliştirme ortamı için:
+## 1. Gereksinimler
 
-```powershell
-pip install -r requirements-dev.txt
-python -m pytest -q
-```
+- Windows 10 ya da 11 (64 bit)
+- İnternet bağlantısı
+- Yaklaşık 2 GB boş disk (Python ortamı, paketler ve tarayıcı)
 
-893 firmalık özel incident reconciliation testleri, Git'e eklenmeyen input,
-recovery/remaining SQLite ve V2 çıktıları gerektirir. Normal test koşusunda bu
-dört test açık gerekçeyle atlanır. Kaynakları bulunan yerel ortamda çalıştırmak
-için `B2B_RUN_INCIDENT_RECONCILIATION=1` ayarlanmalıdır; açıkça etkinleştirilen
-testlerde eksik kaynaklar hata sayılır. Bu testlerin üretim kaynaklarını
-doğrulaması yaklaşık 15 dakika sürebilir; normal CI doğrulamasına dahil değildir.
+Bilgisayarda Python kurulu olması gerekmez; kurulum, projeye özel bir Python ortamını proje klasörünün içine kurar.
 
-### Brandfetch ve Hunter resolver kurulumu
+## 2. Kurulum
 
-Firma adindan domain kesfi icin Brandfetch Brand Search ve Hunter Domain Finder
-istege bagli olarak kullanilabilir. Bunlar yalnizca aday kesfi yapar; resmi site
-kimlik dogrulamasi ve yayin esikleri degismez.
+1. Depoyu indirin:
+   ```powershell
+   git clone <depo adresi> b2b
+   cd b2b
+   ```
+   Git yoksa GitHub'daki **Code → Download ZIP** ile indirip bir klasöre açın. Klasör yolunda Türkçe karakter olmaması önerilir. Depo özelse GitHub hesabınıza depo sahibi tarafından erişim verilmiş olmalıdır.
+2. Klasördeki **`KURULUM.cmd`** dosyasına çift tıklayın. Ya da PowerShell'de:
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File kurulum.ps1
+   ```
+3. Kurulum 5–15 dakika sürer:
+   - Proje klasöründeki `.runtime` klasörüne conda-forge'dan Python 3.14 ve SQLite (en az 3.51.3) kurar. İndirme micromamba ile yapılır.
+   - Python paketlerini (`requirements*.txt`) kurar.
+   - Bazı fuar siteleri için Chromium tarayıcısını kurar (Playwright).
+   - Paneli dener ve `PANEL_OK` yazar.
+   - Masaüstüne **Fuar Koşu Paneli** kısayolunu koyar.
 
-Anahtarlari komut satirina veya `.env` dosyasina yazmak yerine tek seferlik
-guvenli kurulum aracini calistirin:
+Kurulum tekrar çalıştırılabilir; kurulu olanları atlar. Bilgisayardaki başka Python kurulumlarına dokunmaz.
 
-```powershell
-python setup_company_resolvers.py
-```
+> **Neden özel Python?** Sistem, koşuyu kaldığı yerden devam ettirebilmek için SQLite veritabanı kullanır ve SQLite 3.51.3 ya da daha yeni bir sürüm ister. Python'un resmi Windows kurulumundaki SQLite daha eskidir. Kurulum bu yüzden conda-forge'daki Python'u kullanır.
 
-Brandfetch icin Developer Dashboard'daki `Client ID`, Hunter icin Dashboard >
-API sayfasindaki gizli API key istenir. Giris gorunmez yapilir ve Windows'ta
-kullanici hesabina bagli DPAPI ile `state/api_keys.json` icinde sifrelenir.
-Etkin/pasif secimleri gizli bilgi icermeyen `state/company_resolvers.json`
-dosyasinda tutulur. Kurulumu yeniden calistirarak anahtari degistirebilir veya
-bir resolver'i kapatabilirsiniz.
+## 3. Hızlı başlangıç
 
-## Mimari
+1. Masaüstündeki **Fuar Koşu Paneli** kısayolunu açın.
+2. Fuar sitesindeki katılımcı listesinin adresini kutuya yapıştırıp **Listeyi çek**'e basın. Hazır bir Excel'iniz varsa **Seç…** ile seçin.
+3. Firmaların ülkesini seçin: **Türkiye** ya da **Polonya**.
+4. Koşu türü olarak **Ücretsiz** seçip **Koşuyu başlat**'a basın.
+5. Bitince **Sonuçları aç** ile `sonuclar.xlsx` açılır. Kullanacağınız liste **İletişim** sayfasıdır.
 
-Proje, bağımlılıkları sadeleştiren, döngüsel bağımlılıkları engelleyen ve fail-closed güvenlik ilkelerine dayanan modüler bir mimari üzerine kuruludur:
+Süre: firma başına yaklaşık 20–40 saniye; 150 firmalık bir fuar yaklaşık 1–1,5 saat sürer. Koşu sürerken pencereyi kapatmayın.
 
-- `main.py`: CLI argüman ayrıştırma, genel orkestrasyon ve tekil firma işleme (`process_company`).
-- `modules/runtime_paths.py`: Çalışma zamanı dinamik çıktı (`output/`) ve durum (`state/`) dizini yönetimi.
-- `modules/api_configuration.py`: API anahtarlarının DPAPI ile güvenli saklanması, interaktif ayar yönetimi ve resolver yapılandırması.
-- `modules/run_budget.py`: Çalışma bütçesi hesaplamaları ve sağlayıcı istek tavanı ölçeklendirmesi.
-- `modules/result_factory.py`: Boş/başarısız firma sonuç satırlarının tek ve kanonik üretim noktası (`empty_result`).
-- `modules/pipeline_runner.py`: Toplu iş akışı yürütümü, tekrarlı firma kayıtlarını tekilleştirme, SQLite checkpoint yönetimi ve iki aşamalı (ücretsiz/ücretli) yürütme.
-- `modules/resolution_orchestrator.py`: Çok aşamalı hedefli arama/tarama ve aday çözümleme orkestrasyonu (`complete_resolution_evidence`).
-- `modules/output_artifacts.py`: Çıktı finalizasyonu, Excel (`contacts.xlsx`, `review_queue.xlsx`, vb.), JSONL kanıtları, kalite denetimi ve özet rapor üretimi.
-- `modules/discovery_rules.py`: `search.py` ve ağdan bağımsız saf arama kuralları, sorgu önceliklendirme, aday rolü sınıflandırma ve erken durma kuralları.
-- `modules/publication_policy.py`: Tüm yayın yüzeylerinin tek ve fail-closed karar kaynağı olan merkezi yayın kapısı (`is_publishable_row`).
-- `modules/redaction.py`: Kalıcı artifact'ler (Excel, JSONL, SQLite checkpoint, rapor) ve log yüzeylerinde credential/token sızıntılarını engelleyen özyinelemeli maskeleme (`sanitize`, `redact_text`).
+## 4. Ne kadar sonuç beklenir?
 
-### CI ve Profil Yapısı
+Aşağıdaki oranlar gerçek fuar listeleri üzerinde ölçüldü. Fuara ve sektöre göre değişir.
 
-- **Base CI**: Python 3.12 üzerinde `compileall`, çevrimdışı (`B2B_TEST_OFFLINE=1`) test paketi, benchmark doğrulama, `pip check` ve CLI yardım kontrolleri.
-- **Browser Smoke**: `requirements-browser.txt` ve Chromium ile dinamik sayfa kurtarma testi.
-- **OCR Smoke**: `requirements-ocr.txt` ve Tesseract OCR motoru (İngilizce/Türkçe dil paketleri) ile PDF/görsel metin kurtarma testi.
+**Ücretsiz koşu, Türkiye**
 
-## Kullanım
+| Liste | Web sitesi | E-posta | Telefon |
+|---|---|---|---|
+| Listede site ve telefon var (162 firma) | %86 | %76 | %97 |
+| Listede yalnız firma adı var (5 fuar, 443 firma) | %70–80 bulunur; bulunanların yaklaşık %90'ı doğru | | |
 
-`input/firms.xlsx` dosyasına tek sütun halinde firma adlarını koyun. İlk satır `company` olabilir.
+**Ücretsiz koşu, Polonya**
 
-```powershell
-python main.py
-```
+| Ölçüm | Sonuç |
+|---|---|
+| Teslim dosyası (194 firma, katalogda sitelerin yaklaşık yarısı yazılı) | site %85, e-posta %79, telefon %74 |
+| Site bilinmeyen firmalarda kesin doğru site (3 fuar, sistem katalogdaki siteyi görmeden aradı) | %72–80; bulunanların %94–96'sı doğru |
 
-Otomasyon/CI ortamlarında soru sormadan çalıştırmak için API seçimlerini ortam
-değişkenleriyle verip `--non-interactive` kullanın:
+**Ücretli tamamlama** yalnız ücretsiz koşudan sonra eksik kalan firmalar için çalışır:
 
-```powershell
-python main.py --non-interactive
-```
+| Kaynak | Ne ekler | Ölçülen katkı | Maliyet |
+|---|---|---|---|
+| **Bright Data** (Google araması) | Bulunamayan web siteleri | Türkiye: ücretsizin bulamadığı firmaların %28'ine yeni site; kalibre kuralla kabul edilenlerin %96'sı doğru. Polonya: kesin doğru oranına +5 puan. | Üst sınır 1000 sorgu başına yaklaşık 3 $; başarısız sorgular ücretlendirilmez. Ölçüm: 194 firmalık fuarda yaklaşık 180 ücretli sorgu, yaklaşık 0,55 $. |
+| **Google Places** | Eksik telefonlar | 162 firmalık fuarda +1 telefon (listede telefon zaten vardı) | Google Cloud fiyat listesine göre; panel çağrı üst sınırını gösterir |
+| **Hunter** | Eksik e-postalar | Aynı fuarda +4 e-posta | Hunter planınızın kredileri |
 
-Golden 30 firma testini başlatmak için her zaman şu komutu kullanın:
+Öneri: Önce ücretsiz koşun. Listede site yoksa ya da çok site eksikse Bright Data'yı, e-posta eksikleri önemliyse Places + Hunter'ı kullanın.
 
-```powershell
-python run_golden.py
-```
+## 5. Ücretli API'ler
 
-Normal golden koşusu arama ve site sayfalarını `state/search_cache` ile
-`state/crawl_cache` altında saklar. Aynı kayıtları hiçbir arama veya crawl
-isteği yapmadan yeniden puanlamak için:
+Sistem şu API'lerle uyumludur:
 
-```powershell
-python run_golden.py --rerank-cache
-```
+| Sağlayıcı | Kullanılan hizmet | Anahtar nereden alınır |
+|---|---|---|
+| Bright Data | SERP API (Google arama sonuçları) | brightdata.com → yeni bir **SERP API** zone oluşturun ve adını `serp_api1` koyun → Account settings → API key |
+| Google Places | Places API (New), Text Search | Google Cloud Console → proje → **Places API (New)**'i etkinleştirin → Credentials → API key (faturalandırma açık olmalı) |
+| Hunter | Domain Search (e-posta) | hunter.io → Dashboard → API → API key |
 
-Yalnızca belirli firmaları çalıştırmak için:
+Bright Data zone'unuzun adı farklıysa `BRIGHTDATA_ZONE` ortam değişkenini ayarlayın:
 
 ```powershell
-python run_golden.py --companies "AYSAN,KULA,MATRIX"
+setx BRIGHTDATA_ZONE "zone_adiniz"
 ```
 
-API ve site kayıtlarını bilinçli olarak yenilemek gerektiğinde:
+**Anahtarları kaydetmek** (bir kez):
 
 ```powershell
-python run_golden.py --search-cache refresh --crawl-cache refresh
+.\.runtime\python3147-sqlite3534\python.exe tools\api_anahtarlari.py
 ```
 
-Her başlangıçta Google Places ve Bright Data için `y/n` soruları sorulur.
-Kayıtlı API anahtarını kullanmak için `y`, yeni anahtarla değiştirmek için
-`n` yazın. Yeni anahtar gizli olarak alınır ve sonraki koşulara kaydedilir.
+- Anahtar görünmeden yazılır.
+- `state\api_keys.json` dosyasına, Windows'un kullanıcı hesabına bağlı şifrelemesiyle (DPAPI) kaydedilir. Başka bir kullanıcı ya da başka bir bilgisayar bu dosyayı çözemez.
+- Anahtar hiçbir zaman ekrana, günlüğe ya da sonuç dosyalarına yazılmaz.
+- Komutu yeniden çalıştırarak anahtarı değiştirebilirsiniz.
 
-Farklı bir dosya ile çalıştırmak için:
+Panelde ücretli bir koşu türü seçildiğinde panel, başlamadan önce her sağlayıcı için en çok kaç çağrı yapılacağını gösterir ve onay ister. Sistem bu sınırları aşmaz. Places ve Hunter yalnız anahtarları kayıtlıysa çağrılır. Bright Data'yı seçmeden önce anahtarını kaydedin.
+
+## 6. Güvenlik ve gizlilik
+
+- **API anahtarları depoya girmez.** `state\` klasörü `.gitignore` ile dışarıda tutulur. `tests\test_mimar_20261006_repo_hygiene.py` testi her test koşusunda takip edilen dosyalarda anahtar olmadığını denetler.
+- **İş verisi depoya girmez.** Girdi listeleri (`input\*.xlsx`), koşu klasörleri (`runs\`), teslim dosyaları (`teslim\`) ve doğruluk setleri (`data\truth\`) yerelde kalır.
+- Sistem firmaların kendi sitelerinde yayımladığı iletişim bilgilerini alır; kişi adı ya da kişisel profil çıkarmaz.
+- Şifreli formun arkasındaki listeleri sistem kendisi doldurmaz. Formu siz doldurup sayfayı kaydedersiniz; sistem kaydedilen sayfayı okur (bkz. kılavuz).
+
+## 7. Terminal ile kullanım
+
+Panel açılmazsa ya da toplu çalıştırma için:
 
 ```powershell
-python main.py --input C:\path\to\firms.xlsx
+.\.runtime\python3147-sqlite3534\python.exe main.py --input input\FUAR.xlsx --no-allow-paid --finalize-without-paid --non-interactive
 ```
 
-## Fuar Katılımcı Sitelerinden Firma Çekme
+- Polonya fuarı için sona `--country PL` ekleyin.
+- Fuar listesini terminalden çekmek için:
+  ```powershell
+  .\.runtime\python3147-sqlite3534\python.exe tools\liste_cek.py --url "https://fuar-sitesi/katilimcilar" --name "FUAR"
+  ```
+- Ücretli komutlar ve tüm ayrıntılar: [docs/KULLANIM_KILAVUZU.md](docs/KULLANIM_KILAVUZU.md).
 
-Desteklenen kaynaklardan Türkiye katılımcılarını çekip `input/firms.xlsx` üretmek için:
+## 8. Klasör yapısı
+
+| Yol | İçerik |
+|---|---|
+| `main.py` | Koşuyu yürüten ana program |
+| `config.py` | Ayarlar |
+| `modules\` | Arama, tarama, doğrulama, ülke profilleri, çıktı |
+| `tools\kosu_paneli.py` | Masaüstü paneli |
+| `tools\liste_cek.py` | Fuar sitesinden katılımcı listesi çekici |
+| `tools\api_anahtarlari.py` | Ücretli API anahtarlarını kaydetme |
+| `tools\eski\` | Eski, tek seferlik betikler (arşiv) |
+| `input\` | Girdi listeleri (git'e girmez) |
+| `runs\` | Her koşunun klasörü; sonuçlar `runs\<koşu>\output\` altında (git'e girmez) |
+| `tests\` | Otomatik testler |
+| `docs\` | Kullanım kılavuzu ve eski proje belgeleri |
+
+## 9. Geliştirici notları
+
+Testler internete çıkmadan çalışır:
 
 ```powershell
-python scrape_exhibitors.py --source all
+$env:B2B_TEST_OFFLINE = "1"
+.\.runtime\python3147-sqlite3534\python.exe -m pytest -q -p no:cacheprovider
+Remove-Item Env:\B2B_TEST_OFFLINE
 ```
 
-Tek kaynak çekmek için:
-
-```powershell
-python scrape_exhibitors.py --source ifco
-python scrape_exhibitors.py --source idos
-python scrape_exhibitors.py --source beauty
-python scrape_exhibitors.py --source texhibition
-python scrape_exhibitors.py --source zuchex
-```
-
-Oluşan Excel kolonları:
-
-- `company`
-- `website`
-- `source`
-- `country`
-- `profile_url`
-- `sector`
-- `description`
-
-`website` doluysa `python main.py` ikinci aşamada bu siteyi doğrudan kullanır; web sitesi araması yapmadan mail ve telefon çıkarmayı dener.
-
-## Bright Data ile Sorunlu Kayıtları Tekrar Deneme
-
-Önce mevcut sonuçlardan tekrar denenecek listeyi üretin:
-
-```powershell
-python make_review_input.py
-```
-
-Sonra Bright Data SERP API ile sadece bu listeyi ayrı çıktı klasörüne çalıştırın:
-
-```powershell
-$env:SEARCH_PROVIDER="brightdata"
-$env:BRIGHTDATA_API_KEY="BRIGHT_DATA_API_KEYINIZ"
-$env:MAX_SEARCH_QUERIES_PER_COMPANY="8"
-python main.py --input output\review_retry_input.xlsx --output-dir output\brightdata_review
-```
-
-Bright Data zone adınız farklıysa:
-
-```powershell
-$env:BRIGHTDATA_ZONE="serp_api1"
-```
-
-Deneme bitince normal ücretsiz DDGS moduna dönmek için:
-
-```powershell
-Remove-Item Env:\SEARCH_PROVIDER
-Remove-Item Env:\BRIGHTDATA_API_KEY
-```
-
-## Çıktılar
-
-- `output/all_results.xlsx`: tüm kaynak kayıtları ve statüleri için kanonik yüzey
-- `output/contacts.xlsx`: yalnızca yayınlanabilir `OK_HIGH_CONFIDENCE` / `OK_MEDIUM_CONFIDENCE` kayıtları
-- `output/review_queue.xlsx`: yayınlanamayan veya manuel inceleme gereken kayıtlar
-- `output/verified_contacts.xlsx`: `contacts.xlsx` ile aynı geçici uyumluluk alias'ı; deprecated
-- `output/failed.xlsx`: bulunamayan ya da eksik kalan kayıtlar
-- `output/website_candidates.xlsx`: her firma için ilk 3 website adayı, skor ve seçim gerekçesi
-- `output/report.txt`: özet rapor
-- `output/logs.txt`: işlem logları
-- `output/evidence.jsonl`: sorgu, aday, taranan sayfa ve alan bazlı kaynak kanıtları
-- `output/entity_relationships.jsonl`: otomatik güven listesine alınmayan şirket–marka–domain gözlemleri
-- `output/telemetry.json`: API, HTTP ve cache kullanım sayaçları
-- `runs/<run_id>/output`, `runs/<run_id>/state`: koşuya özel atomik çıktı, cache ve checkpoint alanı
-- `state/progress.sqlite3`: eski koşular için salt okunur legacy checkpoint
-- `state/progress.json`: aktif SQLite koşusunu gösteren küçük işaret dosyası
-
-Ücretli sağlayıcılar yalnızca açık `--allow-paid` ile kullanılır. İşlem yarıda kalırsa önce immutable run bundle handoff hazırlanır; yetkilendirme dosyası doğrulandıktan sonra yeni child continuation oluşturulur ve yalnız child run devam eder. Replay export yalnızca ayrı `export_replay.py` komutuyla üretilir.
-
-API anahtarları Windows DPAPI ile mevcut kullanıcı hesabına bağlı biçimde şifrelenir. Yalnız Bright Data, Google Places ve Hunter bütçeleri firma nüfusu ile sırasıyla 3.9, 0.25 ve 0.10 oranlarıyla ölçeklenir; ilgili ortam/CLI `*_REQUEST_BUDGET` değerleri başlangıç bütçesi değil hard cap'tir, `0` sağlayıcıyı kapatır. Brandfetch popülasyona göre ölçeklenmez; varsayılan hard cap'i 100 olarak kalır. Ana komutta tavanlar değiştirilebilir:
-
-```powershell
-python main.py --brightdata-budget 300 --google-places-budget 50
-```
-
-## GitHub Paylaşım Notları
-
-Gerçek firma listeleri ve üretilen çıktılar repoya eklenmez. Kendi listenizi `input/firms.xlsx` olarak koyup programı çalıştırın.
-
-Repoya dahil edilmeyen klasörler/dosyalar:
-
-- `.venv/`
-- `input/*.xlsx`
-- `output/`
-- `state/`
-- `artifact_work/`
-
-## Discovery and Verification
-
-Website discovery first uses the normal search queries. If no candidate reaches the
-acceptance threshold, it runs a small fallback set with the quoted full company name
-and then tries conservative `.com.tr`, `.com`, and `.tr` domain candidates. These
-candidates still go through the existing page identity, sector context, and contact
-checks before they can be accepted.
-
-Publication uses an auditable support/conflict/neutral identity model. Search
-snippets, a mailbox on the candidate site, and a phone on that site are discovery
-or contact evidence; they do not independently prove ownership. Automatic
-publication requires at least two independent identity roots (for example,
-intrinsic domain identity plus first-party company identity) and no unresolved
-owner, country, transport, or business-context conflict. Explicit first-party
-brand/legal-owner statements can resolve an otherwise contradictory structured
-organization name.
-
-Candidate crawling is staged. Up to `MAX_CANDIDATE_EVALUATIONS` candidates receive
-a light homepage/corporate identity crawl, while only the best
-`MAX_FULL_CANDIDATE_EVALUATIONS` candidates receive the full contact, sitemap and
-document crawl. Fair-profile hosts are preflighted once and a repeated-5xx circuit
-breaker prevents the same failing catalogue host from delaying every company.
-Relevant controls are `MAX_IDENTITY_PAGES`, `MAX_FULL_CANDIDATE_EVALUATIONS`, and
-`SOURCE_PROFILE_MAX_SERVER_ERRORS`.
-
-`report.txt` and `telemetry.json` separate candidate discovery, identity crawl,
-full contact crawl, source availability, abstention, and HTTP/API cost. Golden XLSX
-validation can also report stage metrics:
-
-```powershell
-python validate_golden_xlsx.py --expected EXPECTED.xlsx --actual contacts.xlsx --candidates website_candidates.xlsx --all-results ALL_RESULTS.xlsx --json-output REPORT.json
-```
-
-The contacts output also includes `email_verification` and
-`email_verification_reason`. MX records are checked by default; when no MX is
-published, the SMTP-standard A/AAAA implicit-MX fallback is checked. Temporary
-DNS failures are retained as `unverified`.
-
-## Optional Google Places and Hunter Enrichment
-
-Google Places is used only when normal web search cannot produce a safe website
-candidate. Its returned website still passes the domain, page-identity, and
-sector checks. Places phone numbers are evidence only and are never published.
-
-```powershell
-$env:GOOGLE_PLACES_API_KEY="GOOGLE_MAPS_API_KEYINIZ"
-# Optional: set 0 to disable Places even when an API key is available.
-$env:ENABLE_GOOGLE_PLACES="1"
-```
-
-Hunter remains optional discovery evidence, but Hunter e-mails are never
-published. Contact output is restricted to pages and documents on independently
-validated official company domains.
-
-```powershell
-$env:HUNTER_API_KEY="HUNTER_API_KEYINIZ"
-$env:ENABLE_HUNTER_FALLBACK="1"
-$env:HUNTER_MIN_CONFIDENCE="80"
-```
-
-`contacts.xlsx` includes field-level source URLs, contact roles and alternatives.
-
-## Human-Verified Aliases and Golden Tests
-
-Basit doğrulanmış eşleşmeler `data/company_aliases.json` içinde tutulabilir. Bir tüzel kişilik, birden fazla marka ve resmî domain ilişkisi için `data/entity_registry.json` kullanılır. Yalnızca `confidence: verified` kayıtları güvenilir aday olur; otomatik gözlemler kendilerini bu dosyaya eklemez.
-
-```json
-{
-  "LEGAL COMPANY NAME": {
-    "aliases": ["Public Brand"],
-    "website": "https://www.example.com"
-  }
-}
-```
-
-An alias website is still crawled and validated; it is not blindly exported.
-
-Golden XLSX doğrulaması `present`, `absent` ve `unknown` durumlarını destekler. `unknown` tamamlanmış manuel inceleme sayılır fakat precision/recall hesabına girmez. Dev/Validation/Blind ayrımı ve firma çakışması kontrolü:
-
-```powershell
-python validate_benchmark_suite.py
-```
-
-Golden 3, 15 yeni firma iceren holdout setidir. Manuel dosya tamamen
-doldurulmadan kosu API kullanmadan durur. Dogrulama tamamlandiktan sonra:
-
-```powershell
-python run_golden_3.py --brightdata-budget 200 --google-places-budget 25
-```
-
-Golden 4, daha önce kullanılmamış WIN EURASIA 2026 fuarından seçilmiş 15
-Türkiye katılımcısını içeren kör settir. Mevcut `input/firms.xlsx` ve Golden
-1–3 firmalarıyla çakışmaz. Körlük protokolü:
-
-1. Önce `outputs/golden_4_20260715/golden_4_manual_validation_15.xlsx`
-   dosyasını pipeline/cache sonuçlarını açmadan bağımsız doldurun.
-2. Manuel doğrulama bitmeden kodu Golden 4 firmalarına göre değiştirmeyin.
-3. Ardından ücretli koşuyu başlatın; eksik doğrulama varsa script API çağrısından
-   önce durur:
-
-```powershell
-python run_golden_4.py --brightdata-budget 200 --google-places-budget 25
-```
-
-Golden 4 sonuçları görüldükten sonra firma-özel alias/domain düzeltmesi
-eklenmemelidir. Genel bir iyileştirme gerekiyorsa Golden 4 skoru değiştirilmeden
-sonraki geliştirme setinde ele alınmalıdır.
-
-Mevcut Golden 1 yalnız geliştirme verisidir, Golden 2 validation setidir,
-Golden 3 holdout ve Golden 4 blind settir.
-
-For regression measurement, copy `data/golden_contacts_template.csv`, fill in
-human-verified expected fields, then compare a run:
-
-```powershell
-python validate_golden.py --expected data\golden_contacts.csv --actual output\contacts.xlsx
-```
-
-For JavaScript-only websites, optional rendering can be enabled after installing
-Playwright and its Chromium runtime:
-
-```powershell
-pip install -r requirements-browser.txt
-playwright install chromium
-$env:ENABLE_JS_FALLBACK="1"
-```
-
-Rendering is used only when a page appears to be an empty JavaScript application
-shell or a normal HTTP fetch fails.
-
-Taranmış PDF'lerde OCR isteğe bağlıdır. Sistem Tesseract uygulamasını ve
-`tur`/`eng` dil paketlerini kurup `PATH` üzerinden erişilebilir yaptıktan sonra:
-
-```powershell
-pip install -r requirements-ocr.txt
-$env:ENABLE_PDF_OCR="1"
-```
+- Tam paket 10–15 dakika sürer. Üç uzun test (H01, K09, P11) toplam yaklaşık 30 dakika daha sürer; CI'da ayrı çalışır.
+- Bir koşu sürerken aynı klasörde test çalıştırmayın; testler `runs\` ve `state\` klasörlerinde değişiklik görürse hata verir.
+- Türkiye profilinin davranışı referans kabul edilir; ülke profilleri `modules\country_profile.py` içindedir.
