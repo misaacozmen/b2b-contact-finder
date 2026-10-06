@@ -1,9 +1,10 @@
 """Extract exhibitor lists from fair websites or saved list pages.
 
 The extractor does not know any particular fair.  On a list page it looks
-for repeated exhibitor cards and for embedded JSON records, keeps the richer
-result, follows numbered pagination on the same path and, when the cards carry
-no website, reads each exhibitor's profile page on the fair site.
+for repeated exhibitor cards, embedded JSON records and tables with a header
+row, keeps the richest result, follows numbered pagination on the same path
+and, when the cards carry no website, reads each exhibitor's profile page on
+the fair site.  A page that only frames another page is read through its frame.
 """
 from __future__ import annotations
 
@@ -49,6 +50,7 @@ TAX_ID_KEYS = (
     "nip", "tax_id", "taxid", "tax_number", "taxnumber", "vat_id", "vatid", "vat_number",
     "vatnumber", "vergi_no", "vergino", "vkn",
 )
+BRAND_KEYS = ("brands", "brand", "marka", "markalar", "marka_adi", "brand_name", "brandname")
 CONTACT_KEYS = (*WEB_KEYS, *PHONE_KEYS, *EMAIL_KEYS)
 WEBSITE_VALUE_RE = re.compile(r"^(?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:[/?#]\S*)?$", re.I)
 DATA_URL_RE = re.compile(r"https?:(?:\\?/){2}[^\"'\s<>]+?\.json\b")
@@ -73,7 +75,23 @@ STAND_RE = re.compile(
 )
 HALL_RE = re.compile(r"\b(?:hall|hol|salon)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{0,5})", re.I)
 CHROME_TOKEN_RE = re.compile(r"(?:^|[-_])(?:menu|nav|navbar|navigation|footer|header|breadcrumb)(?:[-_]|$)")
-RECORD_FIELDS = ("company", "website", "phone", "email", "country", "hall", "stand", "profile_url", "tax_id")
+RECORD_FIELDS = ("company", "website", "phone", "email", "country", "hall", "stand", "profile_url", "tax_id", "brands")
+# Header cell names of exhibitor tables (folded), per record field (Talimat 31).
+TABLE_COLUMNS = (
+    ("company", ("firma", "firma adi", "firma unvani", "unvan", "company", "company name", "exhibitor", "katilimci")),
+    ("brands", ("marka", "marka adi", "markalar", "brand", "brands", "brand name")),
+    ("website", ("web", "web sitesi", "website", "web site", "internet", "url", "www")),
+    ("phone", ("telefon", "tel", "phone", "telephone")),
+    ("email", ("e posta", "eposta", "email", "e mail", "mail")),
+    ("country", ("ulke", "country")),
+    ("hall", ("hall", "hall no", "salon", "salon no", "hol")),
+    ("stand", ("stand", "stand no", "stant", "stant no", "booth")),
+)
+# Embedded frames that never hold an exhibitor list.
+FRAME_SKIP_HOSTS = (
+    "googletagmanager.", "google.", "youtube.", "youtu.be", "vimeo.", "facebook.",
+    "doubleclick.", "recaptcha", "hotjar.",
+)
 
 
 def fold(value: object) -> str:
@@ -222,6 +240,7 @@ def records_from_texts(texts: list[str]) -> list[dict]:
             "stand": _pick(node, STAND_KEYS),
             "profile_url": "",
             "tax_id": _pick(node, TAX_ID_KEYS),
+            "brands": _pick(node, BRAND_KEYS),
         })
     return records
 
@@ -259,7 +278,17 @@ def _card_name(card) -> str:
     if image is not None and _clean(image.get("alt")):
         return _clean(image.get("alt"))
     link = card.find("a")
-    return _clean(link.get_text(" ")) if link is not None else ""
+    if link is not None:
+        return _clean(link.get_text(" "))
+    # A card without heading or link: its first text that is not a field label.
+    for text in card.stripped_strings:
+        text = _clean(text)
+        if (
+            2 <= len(text) <= 150 and re.search(r"[^\W\d_]", text) and not text.endswith(":")
+            and not STAND_RE.match(text) and not HALL_RE.match(text)
+        ):
+            return text
+    return ""
 
 
 def _card_record(card, page_url: str) -> dict:
@@ -297,6 +326,7 @@ def _card_record(card, page_url: str) -> dict:
         "stand": _clean(stand.group(1)) if stand and re.search(r"\d", stand.group(1)) else "",
         "profile_url": profile,
         "tax_id": "",
+        "brands": "",
     }
 
 
@@ -362,17 +392,83 @@ def card_records(soup: BeautifulSoup, page_url: str) -> list[dict]:
     return best
 
 
+def _table_columns(cells: list[str]) -> dict[str, int]:
+    """Column index per field when the cells are an exhibitor table header."""
+    columns: dict[str, int] = {}
+    for index, text in enumerate(cells):
+        key = fold(text)
+        for field, names in TABLE_COLUMNS:
+            if field not in columns and any(key == name or key.startswith(f"{name} ") for name in names):
+                columns[field] = index
+                break
+    # One matching cell may be a company name such as "Firma X"; a header names two fields.
+    return columns if "company" in columns and len(columns) >= 2 else {}
+
+
+def table_records(soup: BeautifulSoup, page_url: str) -> list[dict]:
+    """Records from the largest table whose header row names the company column."""
+    best: list[dict] = []
+    for table in soup.find_all("table"):
+        columns: dict[str, int] = {}
+        records = []
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+            texts = [_clean(cell.get_text(" ")) for cell in cells]
+            header = _table_columns(texts)
+            if header:
+                columns = columns or header
+                continue
+            if not columns or columns["company"] >= len(texts) or not texts[columns["company"]]:
+                continue
+
+            def value(field: str) -> str:
+                index = columns.get(field)
+                return texts[index] if index is not None and index < len(texts) else ""
+
+            website = ""
+            if columns.get("website") is not None and columns["website"] < len(cells):
+                link = cells[columns["website"]].find("a", href=True)
+                website = external_website(link["href"], page_url) if link else _website_value(value("website"))
+            records.append({
+                "company": value("company"),
+                "website": website,
+                "phone": value("phone"),
+                "email": value("email"),
+                "country": value("country"),
+                "hall": value("hall"),
+                "stand": value("stand"),
+                "profile_url": "",
+                "tax_id": "",
+                "brands": value("brands"),
+            })
+        if len(records) >= MIN_RECORDS and len(records) > len(best):
+            best = records
+    return best
+
+
 def parse_records(html: str, page_url: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
-    from_json = json_records(soup)
-    from_cards = card_records(soup, page_url)
-    if not from_json:
-        return from_cards
-    if not from_cards:
-        return from_json
-    json_score = sum(_record_score(record) for record in from_json)
-    card_score = sum(_record_score(record) for record in from_cards)
-    return from_json if json_score >= card_score else from_cards
+    from_tables = table_records(soup, page_url)
+    scored = [
+        (sum(_record_score(record) for record in records), records)
+        for records in (json_records(soup), card_records(soup, page_url), from_tables)
+    ]
+    score, best = max(scored, key=lambda item: item[0])
+    # A table with a recognised header is a list even when it holds only names.
+    return from_tables if score == 0 and from_tables else best
+
+
+def frame_urls(html: str, page_url: str) -> list[str]:
+    """Pages embedded with an iframe, except analytics, video and map frames."""
+    urls: list[str] = []
+    for frame in BeautifulSoup(html, "html.parser").find_all("iframe", src=True):
+        url = urljoin(page_url, str(frame.get("src", "")).strip())
+        parts = urlsplit(url)
+        host = (parts.hostname or "").casefold()
+        if parts.scheme in {"http", "https"} and host and not any(skip in host for skip in FRAME_SKIP_HOSTS):
+            if url not in urls:
+                urls.append(url)
+    return urls
 
 
 def page_urls(html: str, page_url: str) -> list[str]:
@@ -450,7 +546,7 @@ def dedupe(records: list[dict]) -> list[dict]:
             merged[key] = dict(record)
             continue
         for field in RECORD_FIELDS:
-            merged[key][field] = merged[key][field] or record[field]
+            merged[key][field] = merged[key].get(field) or record.get(field, "")
     return list(merged.values())
 
 
@@ -474,11 +570,14 @@ def make_fetcher(delay: float = REQUEST_DELAY_SEC):
     return fetch_html
 
 
-def extract(*, url: str = "", html_files: list[Path] | None = None, fetch_html=None, progress=None) -> dict:
+def extract(
+    *, url: str = "", html_files: list[Path] | None = None, fetch_html=None, progress=None, _depth: int = 0,
+) -> dict:
     """Return {"records": [...], "pages": n, "profiles": n} for a URL or saved pages.
 
     With saved files nothing is fetched; ``url`` is then only the page address,
-    used to tell the fair's own links from exhibitor websites.
+    used to tell the fair's own links from exhibitor websites.  A page without
+    a list that embeds exactly one other page is read through that frame.
     """
     records: list[dict] = []
     pages = 0
@@ -510,6 +609,11 @@ def extract(*, url: str = "", html_files: list[Path] | None = None, fetch_html=N
         if len(records) >= MIN_RECORDS:
             records = dedupe(records)
             return {"records": records, "pages": pages, "profiles": 0}
+        frames = frame_urls(first, url) if _depth == 0 else []
+        if len(frames) == 1:
+            if progress:
+                progress("Çerçevedeki liste sayfası")
+            return extract(url=frames[0], fetch_html=fetch_html, progress=progress, _depth=1)
     others = page_urls(first, url)
     for number, other in enumerate(others, start=2):
         if progress:
@@ -559,7 +663,7 @@ def write_input(records: list[dict], path: Path, *, source: str, listing_url: st
     sheet.title = "Katilimcilar"
     sheet.append([
         "company", "listed_website", "listed_phone", "listed_email", "country", "tax_id",
-        "hall", "stand", "profile_url", "listing_url", "source", "source_record_id",
+        "hall", "stand", "profile_url", "listing_url", "source", "source_record_id", "brands",
     ])
     used: Counter = Counter()
     for record in records:
@@ -570,7 +674,7 @@ def write_input(records: list[dict], path: Path, *, source: str, listing_url: st
         sheet.append([
             record["company"], record["website"], record["phone"], record["email"],
             record["country"], record["tax_id"], record["hall"], record["stand"], record["profile_url"],
-            listing_url, source, key,
+            listing_url, source, key, record.get("brands", ""),
         ])
     path.parent.mkdir(parents=True, exist_ok=True)
     book.save(path)
