@@ -40,6 +40,8 @@ Her firma bir satırdır; ilk satır başlıktır. Dosya `.xlsx` olmalıdır.
 
 Sayfalara bölünmüş listelerde ve firma bilgilerinin ayrı firma sayfalarında durduğu sitelerde birkaç dakika sürebilir.
 
+Liste çekici firma kartlarını ve tablo biçimindeki listeleri okur. Liste sayfası firmaları bir çerçeve (iframe) içinde gösteriyorsa çerçeveyi kendisi açar. Katalogda marka bilgisi varsa `brands` sütununa yazar.
+
 ### 2.2 Terminalden
 
 ```powershell
@@ -54,7 +56,6 @@ python tools\liste_cek.py --url "https://fuar-sitesi/katilimcilar" --name "FUAR"
   1. Sayfayı tarayıcıda açın; gerekiyorsa formu kendiniz doldurun.
   2. Firmalar görününce **Ctrl+S** ile "Web sayfası, tamamı" olarak kaydedin.
   3. Panelde adres kutusunda sayfanın adresi dururken **Kayıtlı sayfa…** ile kaydettiğiniz dosyayı seçin.
-- **Liste sayfası başka bir sayfayı çerçeve içinde gösteriyorsa** (sayfa kaynağında tek bir `<iframe src="…">` vardır): çerçevenin adresini açıp onu deneyin.
 - Yine çekilemezse listeyi kendiniz Excel'e alın ve bölüm 1'deki başlıklarla kaydedin.
 
 Çekilen listede yabancı katılımcılar da olur. Yalnız bir ülkenin firmalarını istiyorsanız listeyi koşudan önce `country` sütununa göre süzün.
@@ -131,6 +132,9 @@ Referans profildir. Aramalar Türkçe yapılır, telefonlar Türkiye biçiminde 
 
 - Liste çekici, Varşova (Ptak Expo) kataloglarındaki vergi numarasını (NIP) `tax_id` sütununa kendisi yazar.
 - Sistem NIP'i aratır. Firmanın sitesinde aynı NIP'i görürse siteyi kesin kabul eder; başka bir firmanın NIP'ini gösteren siteyi reddeder. Böylece firma adından tahmin edilemeyen marka siteleri de bulunur. Rehber ve firma profili siteleri sayılmaz.
+- NIP ana sayfada görünmüyorsa sitenin yasal ve iletişim sayfalarına da bakılır (`regulamin`, `polityka prywatności`, `rodo`, `kontakt` …).
+- NIP aramasında yalnız rehber siteleri çıkarsa (bizraport, targeo …), o sayfaların bağlantı verdiği firma siteleri de NIP ile kontrol edilir.
+- Çok sayıda numara listeleyen sayfalar ve telefon numarası sorgu siteleri NIP kanıtı sayılmaz.
 - NIP ile doğrulanan sitede e-posta ya da telefon bulunamazsa web sitesi yine teslim edilir (orta güven).
 - Ücretli Bright Data koşusunda NIP önce Google'da aranır.
 - NIP'i olmayan yabancı katılımcılarda bu kanıt yoktur; onların siteleri daha az bulunur.
