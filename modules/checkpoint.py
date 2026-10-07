@@ -2109,6 +2109,61 @@ def claim_item(*, run_id: str, item_index: int, phase: str) -> bool:
         return cursor.rowcount == 1
 
 
+def _release_interrupted_free_usage(connection: sqlite3.Connection, run_id: str) -> None:
+    """Give an interrupted free item its search allowance back (Talimat 35).
+
+    The item's search results died with the stopped process, so its retry
+    starts from nothing; keeping the spent allowance left it without a single
+    search.  The released ledger rows are kept in free_usage_recovery_receipts.
+    """
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS free_usage_recovery_receipts (run_id TEXT NOT NULL, item_index INTEGER NOT NULL, "
+        "recovered_at TEXT NOT NULL, usage_json TEXT NOT NULL, attempts_json TEXT NOT NULL, blocks_json TEXT NOT NULL, "
+        "PRIMARY KEY(run_id,item_index,recovered_at))"
+    )
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+    def rows(sql: str, item_index: int) -> list[dict[str, Any]]:
+        cursor = connection.execute(sql, (run_id, item_index))
+        names = [column[0] for column in cursor.description]
+        return [dict(zip(names, row)) for row in cursor.fetchall()]
+
+    interrupted = [int(row[0]) for row in connection.execute(
+        "SELECT item_index FROM run_items WHERE run_id=? AND free_state='RUNNING'", (run_id,),
+    ).fetchall()]
+    for item_index in interrupted:
+        usage = rows("SELECT * FROM free_query_usage WHERE run_id=? AND item_index=?", item_index)
+        attempts = rows("SELECT * FROM free_provider_attempts WHERE run_id=? AND item_index=? ORDER BY reserved_at,attempt_id", item_index)
+        blocks = rows("SELECT * FROM provider_budget_blocks WHERE run_id=? AND item_index=? AND provider='ddgs'", item_index)
+        linked = connection.execute(
+            "SELECT 1 FROM paid_attempt_block_links WHERE block_id IN (SELECT block_id FROM provider_budget_blocks WHERE run_id=? AND item_index=? AND provider='ddgs' AND block_id<>'') LIMIT 1",
+            (run_id, item_index),
+        ).fetchone()
+        if linked or not (usage or attempts or blocks):
+            continue
+        connection.execute(
+            "INSERT INTO free_usage_recovery_receipts(run_id,item_index,recovered_at,usage_json,attempts_json,blocks_json) VALUES(?,?,?,?,?,?)",
+            (run_id, item_index, now, json.dumps(usage, sort_keys=True), json.dumps(attempts, sort_keys=True), json.dumps(blocks, sort_keys=True)),
+        )
+        connection.execute("DELETE FROM free_provider_attempts WHERE run_id=? AND item_index=?", (run_id, item_index))
+        connection.execute("DELETE FROM provider_budget_blocks WHERE run_id=? AND item_index=? AND provider='ddgs'", (run_id, item_index))
+        connection.execute("DELETE FROM free_query_usage WHERE run_id=? AND item_index=?", (run_id, item_index))
+
+
+def free_usage_recovery_receipts(run_id: str) -> list[dict[str, Any]]:
+    with closing(_connect()) as connection:
+        if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='free_usage_recovery_receipts'").fetchone():
+            return []
+        rows = connection.execute(
+            "SELECT item_index,recovered_at,usage_json,attempts_json,blocks_json FROM free_usage_recovery_receipts WHERE run_id=? ORDER BY recovered_at,item_index",
+            (run_id,),
+        ).fetchall()
+    return [
+        {"item_index": int(item_index), "recovered_at": str(recovered_at), "usage": json.loads(usage), "attempts": json.loads(attempts), "blocks": json.loads(blocks)}
+        for item_index, recovered_at, usage, attempts, blocks in rows
+    ]
+
+
 def recover_interrupted_items(run_id: str) -> dict[str, int]:
     """Recover interrupted work only when its durable transport marker permits it."""
     recovery_receipts_before = len(provider_call_recovery_receipts(run_id))
@@ -2116,6 +2171,7 @@ def recover_interrupted_items(run_id: str) -> dict[str, int]:
     recovery_receipts_after = len(provider_call_recovery_receipts(run_id))
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        _release_interrupted_free_usage(connection, run_id)
         free_reset = connection.execute("UPDATE run_items SET free_state='PENDING' WHERE run_id=? AND free_state='RUNNING'", (run_id,)).rowcount
         paid_rows = connection.execute(
             "SELECT item_index FROM run_items WHERE run_id=? AND paid_state IN ('RUNNING','RESERVED')",
