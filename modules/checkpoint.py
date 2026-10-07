@@ -3681,8 +3681,11 @@ def reserve_provider_dispatch_round(
                 connection.rollback()
                 raise ResumeInvariant("provider dispatch round drift")
         else:
+            # A round whose unfinished calls all have an unknown outcome is
+            # closed for scheduling: those calls are never retried, and the
+            # other firms' work continues in the next round (Talimat 37).
             open_rows = connection.execute(
-                "SELECT round_ordinal,state FROM provider_dispatch_rounds WHERE run_id=? AND provider=? AND state IN ('RESERVED','IN_PROGRESS','BLOCKED_UNKNOWN')",
+                "SELECT round_ordinal,state FROM provider_dispatch_rounds WHERE run_id=? AND provider=? AND state IN ('RESERVED','IN_PROGRESS')",
                 (str(run_id), str(provider)),
             ).fetchall()
             if open_rows:
@@ -3893,7 +3896,7 @@ def provider_dispatch_remaining_capacity(run_id: str, provider: str) -> int:
 def open_provider_dispatch_rounds(run_id: str, providers: list[str] | tuple[str, ...] | None = None) -> dict[str, int]:
     with closing(_connect()) as connection:
         rows = connection.execute(
-            "SELECT provider,MIN(round_ordinal) FROM provider_dispatch_rounds WHERE run_id=? AND state IN ('RESERVED','IN_PROGRESS','BLOCKED_UNKNOWN') GROUP BY provider",
+            "SELECT provider,MIN(round_ordinal) FROM provider_dispatch_rounds WHERE run_id=? AND state IN ('RESERVED','IN_PROGRESS') GROUP BY provider",
             (str(run_id),),
         ).fetchall()
     allowed = {str(value) for value in providers} if providers is not None else None
@@ -3931,7 +3934,7 @@ def next_provider_dispatch_round(run_id: str, provider: str | None = None) -> in
         if provider is not None:
             where += " AND provider=?"; params.append(str(provider))
         open_row = connection.execute(
-            f"SELECT MIN(round_ordinal) FROM provider_dispatch_rounds WHERE {where} AND state IN ('RESERVED','IN_PROGRESS','BLOCKED_UNKNOWN')",
+            f"SELECT MIN(round_ordinal) FROM provider_dispatch_rounds WHERE {where} AND state IN ('RESERVED','IN_PROGRESS')",
             tuple(params),
         ).fetchone()
         if open_row and open_row[0] is not None:

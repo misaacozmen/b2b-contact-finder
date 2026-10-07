@@ -2027,7 +2027,7 @@ def test_p11_real_137_company_pipeline_worker_1_and_3(tmp_path):
             f"petzoo:A:{ordinal:03d}" for ordinal in range(14, 20)
         }
         assert all(row["paid_state"] == "DONE" for row in group_a_items[:14])
-        assert all(row["paid_state"] == "BLOCKED_BUDGET" for row in group_a_items[14:])
+        assert all(row["paid_state"] == "FAILED" for row in group_a_items[14:])
         group_a_attempts = [row for row in result["attempts"] if row["item_index"] in group_a_indexes]
         assert Counter(row["result"] for row in group_a_attempts) == {
             "COMPLETED": 14, "BLOCKED_BUDGET": 12,
