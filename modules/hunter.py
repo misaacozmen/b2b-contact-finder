@@ -35,9 +35,13 @@ def is_enabled() -> bool:
 
 
 def email_gap_fill_enabled() -> bool:
+    # The paid scheduler dispatches Hunter work only while the Hunter switch is
+    # on; a call without it left planned work that no round ever sent and the
+    # paid phase stalled (Talimat 38).
     return (
         bool(getattr(config, "PAID_ENABLED", True))
         and config.ENABLE_HUNTER_EMAIL_GAP_FILL
+        and config.ENABLE_HUNTER_DOMAIN_FINDER
         and bool(config.HUNTER_API_KEY)
     )
 
