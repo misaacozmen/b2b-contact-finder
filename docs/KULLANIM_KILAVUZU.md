@@ -160,6 +160,7 @@ explorer "$((Get-ChildItem runs -Directory | Sort-Object CreationTime -Descendin
 - **Sarı hücre** güveni düşük bilgidir; kullanmadan önce kontrol edin.
 - E-posta firmanın kendi sitesinde yazıyorsa, alan adı siteden farklı olsa da alınır (ör. site `firma.com.tr`, e-posta `info@firma.com`).
 - Sitede yalnız gmail, hotmail gibi bir adres varsa o yazılır ve sarı işaretlenir. KEP adresleri yazılmaz.
+- Yalnız firmanın genel e-posta adresi yazılır (info@, biuro@, satis@ gibi). Kişi adı taşıyan adresler (ad@, ad.soyad@, a.soyad@) ve kişisel veri adresleri (rodo@, kvkk@, privacy@ gibi) yazılmaz; sitede firmanın genel adresi varsa onun yerine o yazılır.
 - **"Aday web sitesi (kontrol edin)"** sütunu (Detaylar): sistem siteyi doğrulayamadığında aramada bulduğu en iyi adayı buraya yazar. Adaylar doğrulanmamıştır; yaklaşık yarısı doğrudur. Kullanmadan önce açıp kontrol edin.
 
 ### Ret listesi

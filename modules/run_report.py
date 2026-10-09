@@ -15,7 +15,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 import config
-from modules import excel, field_merge, opt_out, redaction, runtime, scorer
+from modules import email_kind, excel, field_merge, opt_out, redaction, runtime, scorer
 
 
 logger = logging.getLogger(__name__)
@@ -280,6 +280,7 @@ def _write_summary_sheet(
         "Detaylar: aynı firmalar aynı sırada; aday web sitesi, kaynak, güven ve fuar listesi bilgileri.",
         "Detaylar sayfasındaki gri başlıklı teknik sütunlar gizlidir; sütun başlıklarının üstündeki + işaretiyle açılır.",
         "Ret listesi: paneldeki \"Ret listesi\" düğmesiyle açılan dosyadaki firmalar bu dosyaya hiç alınmaz.",
+        "E-posta: yalnız firmanın genel adresi yazılır; kişi adı taşıyan adresler ve kişisel veri (RODO/KVKK) adresleri yazılmaz.",
     )
     for offset, text in enumerate(notes, start=1):
         sheet.cell(row=note_row + offset, column=1, value=text)
@@ -567,6 +568,8 @@ def write_run_report(
     target_root = Path(output_root)
     normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
     for row in normalized_rows:
+        # A delivery file names no person (Talimat 40).
+        email_kind.keep_generic_email(row)
         field_merge.annotate(row, None)
     table_rows = [_table_row(row) for row in normalized_rows]
     # Firms on the opt-out list never reach a delivery file (Talimat 39).
