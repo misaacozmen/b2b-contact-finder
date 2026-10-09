@@ -1,4 +1,4 @@
-"""Desktop panel that starts and watches fair runs without the terminal (Talimat 21, 23, 26)."""
+"""Desktop panel that starts and watches fair runs without the terminal (Talimat 21, 23, 26, 39)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from modules import country_profile, list_extractor, run_launcher  # noqa: E402
+import config  # noqa: E402
+from modules import country_profile, list_extractor, opt_out, run_launcher  # noqa: E402
 
 
 POLL_MS = 2000
@@ -115,6 +116,8 @@ class Panel:
         self.open_folder_button.pack(side="left", padx=(8, 0))
         self.archive_button = ttk.Button(results, text="Arşive kopyala", command=self.archive, state="disabled")
         self.archive_button.pack(side="left", padx=(8, 0))
+        self.opt_out_button = ttk.Button(results, text="Ret listesi", command=self.open_opt_out)
+        self.opt_out_button.pack(side="right")
         self.refresh_limits()
 
     def log(self, message: str) -> None:
@@ -346,6 +349,14 @@ class Panel:
     def open_folder(self) -> None:
         if self.finished_dir:
             os.startfile(self.finished_dir / "output")
+
+    def open_opt_out(self) -> None:
+        try:
+            path = opt_out.ensure_file(config.OPT_OUT_FILE)
+        except OSError as exc:
+            messagebox.showerror("Ret listesi", str(exc))
+            return
+        os.startfile(path)
 
     def archive(self) -> None:
         if not self.finished_dir:

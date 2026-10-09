@@ -14,7 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from modules import checkpoint, field_merge, run_report  # noqa: E402
+import config  # noqa: E402
+from modules import checkpoint, field_merge, opt_out, run_report  # noqa: E402
 
 
 def _read_json(path: Path, *, required: bool = True) -> dict:
@@ -76,6 +77,9 @@ def _load_database(db_path: Path, run_id: str) -> tuple[list[dict], dict, dict, 
                 "publication_blockers": record["publication_blockers"] or "",
                 "listed_website_status": snapshot.get("listed_website_status", ""),
                 "website_input_status": snapshot.get("website_input_status", ""),
+                "listing_source": snapshot.get("source", ""),
+                "listing_hall": snapshot.get("hall", ""),
+                "listing_stand": snapshot.get("stand", ""),
             })
             stage_a = row.get("stage_a")
             if isinstance(stage_a, dict):
@@ -126,6 +130,7 @@ def main() -> int:
             status_detail=status_detail,
             elapsed_seconds=elapsed,
             telemetry=telemetry,
+            opt_out_entries=opt_out.load(config.OPT_OUT_FILE),
         )
     if errors:
         print(json.dumps({"run_id": run_id, "out": str(out_dir), "errors": errors}, ensure_ascii=False))

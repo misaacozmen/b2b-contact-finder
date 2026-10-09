@@ -153,7 +153,7 @@ explorer "$((Get-ChildItem runs -Directory | Sort-Object CreationTime -Descendin
 
 | Sayfa | İçerik |
 |---|---|
-| **İletişim** | Firma, web sitesi, e-posta, telefon; bütün firmalar girdi sırasıyla. Kullanacağınız liste budur. |
+| **İletişim** | Firma, web sitesi, e-posta, telefon; fuar listesinde varsa fuar adı, salon ve stant. Bütün firmalar girdi sırasıyla. Kullanacağınız liste budur. |
 | Özet | Kaç firmada web sitesi, e-posta ve telefon bulunduğu ve oranlar. |
 | Detaylar | Aynı firmalar: yayına hazır mı, eksik alanlar, aday web sitesi, her bilginin kaynağı ve güveni, fuar listesindeki bilgiler. |
 
@@ -161,6 +161,17 @@ explorer "$((Get-ChildItem runs -Directory | Sort-Object CreationTime -Descendin
 - E-posta firmanın kendi sitesinde yazıyorsa, alan adı siteden farklı olsa da alınır (ör. site `firma.com.tr`, e-posta `info@firma.com`).
 - Sitede yalnız gmail, hotmail gibi bir adres varsa o yazılır ve sarı işaretlenir. KEP adresleri yazılmaz.
 - **"Aday web sitesi (kontrol edin)"** sütunu (Detaylar): sistem siteyi doğrulayamadığında aramada bulduğu en iyi adayı buraya yazar. Adaylar doğrulanmamıştır; yaklaşık yarısı doğrudur. Kullanmadan önce açıp kontrol edin.
+
+### Ret listesi
+
+Listelerde yer almak istemeyen firmalar için panelde **Ret listesi** düğmesine basın. `state\ret_listesi.txt` dosyası Not Defteri'nde açılır; dosya yoksa açıklamasıyla oluşturulur. Her satıra bir tane yazıp kaydedin:
+
+- alan adı: `firma.com.tr`
+- e-posta: `biuro@firma.pl`
+- bütün bir e-posta alanı: `@firma.pl`
+- firma adı: fuar listesindeki gibi, tam haliyle
+
+Bundan sonra üretilen her `sonuclar.xlsx` dosyasında bu firmalar yer almaz; Özet sayfası kaç firmanın çıkarıldığını gösterir. Daha önce üretilmiş dosyalar değişmez.
 
 ### `rapor.md`
 

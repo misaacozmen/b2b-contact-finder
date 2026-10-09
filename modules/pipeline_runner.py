@@ -30,6 +30,7 @@ from modules import (
     google_places,
     hunter,
     linkedin_company,
+    opt_out,
     output_artifacts,
     replay_snapshot,
     report,
@@ -725,6 +726,29 @@ def _durable_output_rows(run_id: str, fallback: dict[int, dict] | None = None) -
     return rows
 
 
+def _with_listing_fields(run_id: str, rows: list[dict]) -> list[dict]:
+    """Copy each row with the fair, hall and stand of its input row (Talimat 39)."""
+    try:
+        snapshots = checkpoint.load_input_snapshots(run_id)
+    except Exception:
+        logging.getLogger(__name__).exception("input snapshots could not be loaded for report run_id=%s", run_id)
+        return rows
+    by_source = {
+        str(snapshot.get("source_record_id", "")): snapshot
+        for snapshot in snapshots.values() if snapshot.get("source_record_id")
+    }
+    listed = []
+    for row in rows:
+        snapshot = by_source.get(str(row.get("source_record_id", "")), {})
+        listed.append({
+            **row,
+            "listing_source": snapshot.get("source", ""),
+            "listing_hall": snapshot.get("hall", ""),
+            "listing_stand": snapshot.get("stand", ""),
+        })
+    return listed
+
+
 def _write_run_report(
     *, run_id: str, output_root: Path, fallback: dict[int, dict] | None,
     run_status: str, status_detail: str, elapsed_seconds: float | None,
@@ -737,6 +761,7 @@ def _write_run_report(
     except Exception:
         logger.exception("durable output rows could not be loaded for report run_id=%s", run_id)
         rows = list((fallback or {}).values())
+    rows = _with_listing_fields(run_id, rows)
     if telemetry is None:
         try:
             telemetry = checkpoint.derive_telemetry(run_id)
@@ -755,7 +780,7 @@ def _write_run_report(
         return run_report.write_run_report(
             rows, output_root=output_root, run_status=run_status,
             status_detail=status_detail, elapsed_seconds=elapsed_seconds,
-            telemetry=telemetry,
+            telemetry=telemetry, opt_out_entries=opt_out.load(config.OPT_OUT_FILE),
         )
     except Exception:
         # The report writer's contract is never to raise; preserve pipeline

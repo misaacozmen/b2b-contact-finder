@@ -15,7 +15,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 import config
-from modules import excel, field_merge, redaction, runtime, scorer
+from modules import excel, field_merge, opt_out, redaction, runtime, scorer
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ CANDIDATE_WEBSITE_HEADER = "Aday web sitesi (kontrol edin)"
 HEADERS = [
     "Firma", "Web sitesi", "Web kaynağı", "Web güven", CANDIDATE_WEBSITE_HEADER, "E-posta",
     "E-posta kaynağı", "E-posta güven", "Telefon", "Telefon kaynağı",
-    "Telefon güven", "Diğer telefonlar", "Referans web sitesi",
+    "Telefon güven", "Fuar", "Salon", "Stant", "Diğer telefonlar", "Referans web sitesi",
     "Referans durumu", "Referans sinyalleri", "Referans telefonu",
     "Girdi web durumu", "Eksik alanlar", "Yayına hazır", "Durum",
     "Ücretli durum", "Not",
@@ -32,7 +32,7 @@ HEADERS = [
 CONTACT_SHEET = "İletişim"
 SUMMARY_SHEET = "Özet"
 DETAIL_SHEET = "Detaylar"
-CONTACT_HEADERS = ["Firma", "Web sitesi", "E-posta", "Telefon"]
+CONTACT_HEADERS = ["Firma", "Web sitesi", "E-posta", "Telefon", "Fuar", "Salon", "Stant"]
 CONTACT_HEADER_FILL = "DDEBF7"
 LOW_CONFIDENCE_FILL = "FFF2CC"
 CONFIDENCE_COLUMNS = {"Web sitesi": "Web güven", "E-posta": "E-posta güven", "Telefon": "Telefon güven"}
@@ -46,7 +46,7 @@ DETAIL_HEADERS = [header for _fill, headers in DETAIL_GROUPS for header in heade
 TECHNICAL_HEADERS = DETAIL_GROUPS[-1][1]
 COLUMN_WIDTHS = {
     "Firma": 45, "Web sitesi": 38, "E-posta": 36, "Telefon": 22, CANDIDATE_WEBSITE_HEADER: 38,
-    "Referans web sitesi": 34, "Ücretli durum": 40, "Not": 60,
+    "Referans web sitesi": 34, "Ücretli durum": 40, "Not": 60, "Fuar": 28, "Salon": 10, "Stant": 12,
 }
 DEFAULT_COLUMN_WIDTH = 18
 
@@ -115,6 +115,13 @@ def _safe(value: object) -> object:
     if isinstance(value, (str, int, float, bool)):
         return excel._safe_cell_value(value)
     return excel._safe_cell_value(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def _fair_name(source: object) -> str:
+    # The list extractor names its source "<fair> katılımcı listesi" (Talimat 23).
+    value = " ".join(str(source or "").split())
+    suffix = " katılımcı listesi"
+    return value[: -len(suffix)].strip() if value.endswith(suffix) else value
 
 
 def _candidate_website(row: dict) -> str:
@@ -218,6 +225,7 @@ def _write_detail_sheet(sheet, table_rows: list[dict]) -> None:
 
 def _write_summary_sheet(
     sheet, table_rows: list[dict], stage_rows: list[dict], *, run_status: str, generated_at: str,
+    opted_out: int = 0,
 ) -> None:
     total = len(table_rows)
 
@@ -239,7 +247,10 @@ def _write_summary_sheet(
     sheet["A1"] = "Sonuç özeti"
     sheet["A1"].font = Font(bold=True, size=14)
     for row_number, (label, value) in enumerate(
-        (("Firma sayısı", total), ("Koşu durumu", run_status), ("Rapor tarihi", _display_time(generated_at))),
+        (
+            ("Firma sayısı", total), ("Koşu durumu", run_status), ("Rapor tarihi", _display_time(generated_at)),
+            ("Ret listesiyle çıkarılan firma", opted_out),
+        ),
         start=3,
     ):
         sheet.cell(row=row_number, column=1, value=label).font = bold
@@ -268,6 +279,7 @@ def _write_summary_sheet(
         "Sarı hücre: düşük güvenli bilgi. Kullanmadan önce kontrol edin; yukarıdaki sayılara dahil değildir.",
         "Detaylar: aynı firmalar aynı sırada; aday web sitesi, kaynak, güven ve fuar listesi bilgileri.",
         "Detaylar sayfasındaki gri başlıklı teknik sütunlar gizlidir; sütun başlıklarının üstündeki + işaretiyle açılır.",
+        "Ret listesi: paneldeki \"Ret listesi\" düğmesiyle açılan dosyadaki firmalar bu dosyaya hiç alınmaz.",
     )
     for offset, text in enumerate(notes, start=1):
         sheet.cell(row=note_row + offset, column=1, value=text)
@@ -277,6 +289,7 @@ def _write_summary_sheet(
 
 def write_results_workbook(
     path: Path, table_rows: list[dict], stage_rows: list[dict], *, run_status: str, generated_at: str,
+    opted_out: int = 0,
 ) -> None:
     """Write the three-sheet sonuclar.xlsx atomically."""
     book = Workbook()
@@ -285,7 +298,7 @@ def write_results_workbook(
     _write_contact_sheet(contact, table_rows)
     _write_summary_sheet(
         book.create_sheet(SUMMARY_SHEET), table_rows, stage_rows,
-        run_status=run_status, generated_at=generated_at,
+        run_status=run_status, generated_at=generated_at, opted_out=opted_out,
     )
     _write_detail_sheet(book.create_sheet(DETAIL_SHEET), table_rows)
     book.active = 0
@@ -319,6 +332,9 @@ def _table_row(row: dict) -> dict[str, object]:
         "Telefon": row.get("phone", ""),
         "Telefon kaynağı": row.get("phone_source_tier", row.get("phone_source", "")),
         "Telefon güven": row.get("phone_confidence", ""),
+        "Fuar": _fair_name(row.get("listing_source", "")),
+        "Salon": row.get("listing_hall", ""),
+        "Stant": row.get("listing_stand", ""),
         "Diğer telefonlar": row.get("alternative_phones", row.get("alternative_phone", "")),
         "Referans web sitesi": row.get("reference_website", ""),
         "Referans durumu": row.get("reference_tier", ""),
@@ -542,6 +558,7 @@ def write_run_report(
     status_detail: str,
     elapsed_seconds: float | None,
     telemetry: dict | None = None,
+    opt_out_entries: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Write all available summary files; collect every filesystem error."""
     errors: dict[str, str] = {}
@@ -552,6 +569,13 @@ def write_run_report(
     for row in normalized_rows:
         field_merge.annotate(row, None)
     table_rows = [_table_row(row) for row in normalized_rows]
+    # Firms on the opt-out list never reach a delivery file (Talimat 39).
+    kept_rows = [
+        row for row in table_rows
+        if not opt_out.matches(opt_out_entries, company=row["Firma"], website=row["Web sitesi"], email=row["E-posta"])
+    ]
+    opted_out = len(table_rows) - len(kept_rows)
+    table_rows = kept_rows
     try:
         target_root.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -563,7 +587,7 @@ def write_run_report(
     try:
         write_results_workbook(
             workbook_path, table_rows, _stage_summary(normalized_rows),
-            run_status=safe_status, generated_at=generated_at,
+            run_status=safe_status, generated_at=generated_at, opted_out=opted_out,
         )
         files[workbook_path.name] = hashlib.sha256(workbook_path.read_bytes()).hexdigest()
     except Exception as exc:

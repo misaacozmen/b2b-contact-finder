@@ -24,6 +24,8 @@ PROGRESS_FILE = STATE_DIR / "progress.json"
 PROGRESS_DB_FILE = STATE_DIR / "progress.sqlite3"
 SAVED_API_KEYS_FILE = STATE_DIR / "api_keys.json"
 RESOLVER_SETTINGS_FILE = STATE_DIR / "company_resolvers.json"
+# Firms that asked to stay out of every delivery file, one per line (Talimat 39).
+OPT_OUT_FILE = STATE_DIR / "ret_listesi.txt"
 SEARCH_CACHE_DIR = STATE_DIR / "search_cache"
 CRAWL_CACHE_DIR = STATE_DIR / "crawl_cache"
 EMAIL_CACHE_DIR = STATE_DIR / "email_cache"
