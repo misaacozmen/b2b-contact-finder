@@ -555,6 +555,39 @@ def _build_report(
     return redaction.redact_text("\n".join(lines))
 
 
+def prepare_rows(rows: list[dict]) -> list[dict]:
+    """Copies of the run rows as every delivery file shows them."""
+    normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    for row in normalized_rows:
+        # A delivery file names no person (Talimat 40).
+        email_kind.keep_generic_email(row)
+        field_merge.annotate(row, None)
+    return normalized_rows
+
+
+def deliver(
+    normalized_rows: list[dict], *, opt_out_entries: tuple[str, ...] = (), keep_firm=None,
+) -> tuple[list[tuple[dict, dict]], int | None, int]:
+    """Pair each source row with its table row and drop the firms a delivery file leaves out.
+
+    Returns the kept pairs, the number left out by ``keep_firm`` (None without a rule) and the
+    number left out by the opt-out list.
+    """
+    # Each firm keeps its source row so the stage table counts the delivered firms only.
+    delivered = [(row, _table_row(row)) for row in normalized_rows]
+    left_out = None
+    if keep_firm is not None:
+        firms = [pair for pair in delivered if keep_firm(pair[1]["Firma"])]
+        left_out = len(delivered) - len(firms)
+        delivered = firms
+    # Firms on the opt-out list never reach a delivery file (Talimat 39).
+    kept = [
+        (source, row) for source, row in delivered
+        if not opt_out.matches(opt_out_entries, company=row["Firma"], website=row["Web sitesi"], email=row["E-posta"])
+    ]
+    return kept, left_out, len(delivered) - len(kept)
+
+
 def write_run_report(
     rows: list[dict],
     *,
@@ -571,25 +604,12 @@ def write_run_report(
     files: dict[str, str] = {}
     safe_status = str(run_status) if str(run_status) in ALLOWED_STATUSES else "KISMI_KOSU_HATASI"
     target_root = Path(output_root)
-    normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
-    for row in normalized_rows:
-        # A delivery file names no person (Talimat 40).
-        email_kind.keep_generic_email(row)
-        field_merge.annotate(row, None)
-    # Each firm keeps its source row so the stage table counts the delivered firms only.
-    delivered = [(row, _table_row(row)) for row in normalized_rows]
-    sole_traders = None
-    if companies_only:
+    normalized_rows = prepare_rows(rows)
+    kept, sole_traders, opted_out = deliver(
+        normalized_rows, opt_out_entries=opt_out_entries,
         # Sole traders and civil partnerships stay out where the profile asks (Talimat 41).
-        companies = [pair for pair in delivered if legal_form.is_company(pair[1]["Firma"])]
-        sole_traders = len(delivered) - len(companies)
-        delivered = companies
-    # Firms on the opt-out list never reach a delivery file (Talimat 39).
-    kept = [
-        (source, row) for source, row in delivered
-        if not opt_out.matches(opt_out_entries, company=row["Firma"], website=row["Web sitesi"], email=row["E-posta"])
-    ]
-    opted_out = len(delivered) - len(kept)
+        keep_firm=legal_form.is_company if companies_only else None,
+    )
     delivered_sources = [source for source, _row in kept]
     table_rows = [row for _source, row in kept]
     try:

@@ -4,12 +4,18 @@ A sole trader (Polish JDG) or a civil partnership (spółka cywilna) is a person
 doing business; their name and contacts are personal data. Where the country
 profile asks for it, a delivery file holds only firms whose name shows a
 company form. A name without any form counts as a sole trader.
+
+Turkish catalogues often list a brand without any form, so a Turkish customer
+file keeps such names and leaves out only those that show a person: a person
+form (adi ortaklık) or a name ending in a first name and a surname (Talimat 43).
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
+
+from modules.email_kind import FIRST_NAMES as MAILBOX_FIRST_NAMES
 
 
 # Company forms written out or abbreviated; matched as whole words anywhere in the name.
@@ -23,17 +29,47 @@ COMPANY_FORMS = (
     "zwiazek", "zwiazku", "izba", "uniwersytet", "politechnika", "ltda", "oddzial w polsce",
     "societa per azioni", "mbh", "sdn bhd", "bhd", "cooperative", "consorzio", "konfederacja",
     "automobilklub", "centrum kultury", "osrodek kultury", "gminne", "gminny",
+    "kooperatifi", "dernegi", "vakfi", "odasi", "birligi", "universitesi", "belediyesi", "holding",
+    "mudurlugu", "baskanligi",
 )
 # French forms written before the name (SAS JOUANEL INDUSTRIE).
 START_COMPANY_FORMS = ("sas", "sarl", "s a s", "s a r l")
 # Short company forms that are ordinary letters elsewhere; matched only as the name's last word(s).
 END_COMPANY_FORMS = (
     "s a", "sa", "sp", "ag", "kg", "ohg", "se", "bv", "b v", "nv", "n v", "sas", "spa", "as", "ab",
-    "oy", "oyj", "sia", "aps", "sl", "s l", "lda", "ad", "tov", "ou", "s a c", "co",
+    "oy", "oyj", "sia", "aps", "sl", "s l", "lda", "ad", "tov", "ou", "s a c", "co", "sti",
 )
 # Forms of a person doing business; they win over any company word.
-PERSON_FORMS = ("spolka cywilna", "sp cywilna")
+PERSON_FORMS = ("spolka cywilna", "sp cywilna", "adi ortakligi", "adi ortaklik")
 END_PERSON_FORMS = ("s c", "sc", "e k", "ek")
+# Turkish first names the mailbox name list lacks.
+EXTRA_FIRST_NAMES = frozenset({
+    "abdulkadir", "abdurrahman", "akif", "alev", "alp", "altan", "arif", "asli", "atakan", "aydin", "aysenur",
+    "bekir", "berat", "beyza", "buse", "cagla", "cagri", "celal", "cihan", "cuneyt", "dogukan", "efe",
+    "egemen", "emin", "emrah", "emrullah", "ender", "erol", "ertan", "ertugrul", "esat", "evren", "fahri",
+    "feyza", "fuat", "gokce", "gulsah", "gurcan", "harun", "hayati", "hikmet", "idris", "ihsan", "ilyas",
+    "irfan", "ismet", "kamil", "koray", "kubilay", "lutfi", "mehtap", "melek", "melih", "mine", "muammer",
+    "muhammed", "muhammet", "musa", "nail", "namik", "nazim", "necdet", "nevzat", "nihal", "nilufer",
+    "nurettin", "oktay", "onder", "ozcan", "ozkan", "rahmi", "rasim", "riza", "sadik", "sait", "sami",
+    "savas", "seckin", "sefa", "selahattin", "selma", "semra", "sevgi", "sevket", "seyma", "sezer",
+    "sezgin", "soner", "sukran", "sule", "tahir", "talha", "tayfun", "tevfik", "tufan", "tugrul", "tuncer",
+    "turan", "ulas", "unal", "utku", "vedat", "veli", "yalcin", "yasar", "yener", "yesim", "yigit",
+    "yucel", "yuksel", "zekeriya", "zuhal",
+})
+PERSON_FIRST_NAMES = MAILBOX_FIRST_NAMES | EXTRA_FIRST_NAMES
+# Trade words that end a firm name; a first name before one of them is a brand, not an owner.
+BUSINESS_WORDS = frozenset({
+    "sanayi", "sanayii", "san", "ticaret", "tic", "insaat", "yapi", "gida", "tekstil", "mobilya", "makina",
+    "makine", "otomotiv", "elektrik", "elektronik", "enerji", "plastik", "metal", "kimya", "tasarim",
+    "mimarlik", "dizayn", "design", "reklam", "ajans", "medya", "media", "expo", "fuar", "fuarcilik",
+    "organizasyon", "group", "grup", "global", "international", "turkey", "turkiye", "istanbul", "ankara",
+    "izmir", "export", "import", "pazarlama", "lojistik", "turizm", "otel", "ambalaj", "kalip", "mutfak",
+    "sogutma", "showroom", "studio", "atolye", "atolyesi", "market", "danismanlik", "muhendislik",
+    "teknoloji", "technology", "yazilim", "sistem", "sistemleri", "urunleri", "ekipmanlari", "cihazlari",
+    "aksesuar", "hirdavat", "boya", "cam", "ahsap", "mermer", "seramik", "kozmetik", "saglik", "medikal",
+    "tarim", "yayincilik", "dergi", "dergisi", "matbaa", "baski", "promosyon", "imalat", "imalati", "uretim",
+    "stand", "exhibition", "exhibitions", "architecture", "services", "solutions", "sut",
+})
 
 
 def _fold(name: str, *, drop_brackets: bool = False) -> str:
@@ -63,3 +99,20 @@ def is_company(name: str) -> bool:
         or _ends(outside, END_COMPANY_FORMS)
         or any(outside.startswith(f"{form} ") for form in START_COMPANY_FORMS)
     )
+
+
+def names_a_person(name: str) -> bool:
+    """Whether a firm name shows a person doing business: a person form, or an owner's name at the end."""
+    words = _fold(name)
+    if not words:
+        return False
+    if _has(words, PERSON_FORMS) or _ends(_fold(name, drop_brackets=True), END_PERSON_FORMS):
+        return True
+    if is_company(name):
+        return False
+    # The owner's name ends the name or the part after a dash: "ORNEK HEDİYELİK - ALİ YILMAZ".
+    tail = re.split(r"\s[-–]\s", str(name))[-1]
+    tokens = _fold(tail, drop_brackets=True).split()
+    if len(tokens) < 2 or tokens[-1] in BUSINESS_WORDS or tokens[-1].isdigit():
+        return False
+    return tokens[-2] in PERSON_FIRST_NAMES

@@ -181,6 +181,21 @@ Koşunun özeti: kaç firmada web sitesi, e-posta ve telefon bulunduğu, bilgile
 
 Klasördeki diğer dosyalar teknik kayıtlardır.
 
+### Müşteri dosyası
+
+Müşteriye `sonuclar.xlsx` gönderilmez; içinde teknik sayfalar ve kaynak bilgileri vardır. Müşteri için ayrı bir dosya üretin:
+
+```powershell
+python tools\musteri_dosyasi.py --run-dir runs\<koşu kimliği> --out teslim\musteri\FUAR.xlsx
+```
+
+- Dosyada tek sayfa firma listesi (Firma, Fuar, Salon, Stant, Web sitesi, E-posta, Telefon) ve kısa bir bilgi sayfası olur. Yanına aynı adla bir `.csv` kopyası yazılır.
+- Yalnız güvenilir bilgiler yazılır; sarı (düşük güvenli) bilgiler boş kalır.
+- Polonya koşusunda yalnız şirketler kalır. Öteki koşularda adında kişi adı ve soyadı görünen firmalar (şahıs firmaları) ve adi ortaklıklar çıkarılır. Ret listesindeki firmalar hiç alınmaz.
+- Birkaç fuar tek dosyada: `--run-dir` seçeneğini her koşu için tekrarlayın. Fuar adını değiştirmek için yolun sonuna `="Fuar adı"` ekleyin.
+- Başlık dili Polonya koşusunda Lehçe, ötekilerde Türkçedir; `--lang en` ile İngilizce olur.
+- Ücretsiz örnek için `--sample 20` ekleyin: iletişim bilgisi tam olan ilk 20 firma, e-posta ve telefon kısmen gizli yazılır.
+
 ### Arşivleme
 
 Panelde **Arşive kopyala** sonuç, rapor ve girdi dosyalarını `Belgeler\FUAR_SONUCLARI\<yıl-ay> <fuar adı>` klasörüne kopyalar. Aynı adlı dosya varsa üzerine yazmaz.
