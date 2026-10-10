@@ -15,7 +15,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 import config
-from modules import email_kind, excel, field_merge, opt_out, redaction, runtime, scorer
+from modules import email_kind, excel, field_merge, legal_form, opt_out, redaction, runtime, scorer
 
 
 logger = logging.getLogger(__name__)
@@ -225,7 +225,7 @@ def _write_detail_sheet(sheet, table_rows: list[dict]) -> None:
 
 def _write_summary_sheet(
     sheet, table_rows: list[dict], stage_rows: list[dict], *, run_status: str, generated_at: str,
-    opted_out: int = 0,
+    opted_out: int = 0, sole_traders: int | None = None,
 ) -> None:
     total = len(table_rows)
 
@@ -282,6 +282,10 @@ def _write_summary_sheet(
         "Ret listesi: paneldeki \"Ret listesi\" düğmesiyle açılan dosyadaki firmalar bu dosyaya hiç alınmaz.",
         "E-posta: yalnız firmanın genel adresi yazılır; kişi adı taşıyan adresler ve kişisel veri (RODO/KVKK) adresleri yazılmaz.",
     )
+    if sole_traders is not None:
+        notes += (
+            f"Yalnız şirketler: şahıs firması ya da adi ortaklık olduğu için çıkarılan firma: {sole_traders}.",
+        )
     for offset, text in enumerate(notes, start=1):
         sheet.cell(row=note_row + offset, column=1, value=text)
     for letter, width in (("A", 50), ("B", 24), ("C", 12), ("D", 12), ("E", 16)):
@@ -290,7 +294,7 @@ def _write_summary_sheet(
 
 def write_results_workbook(
     path: Path, table_rows: list[dict], stage_rows: list[dict], *, run_status: str, generated_at: str,
-    opted_out: int = 0,
+    opted_out: int = 0, sole_traders: int | None = None,
 ) -> None:
     """Write the three-sheet sonuclar.xlsx atomically."""
     book = Workbook()
@@ -299,7 +303,7 @@ def write_results_workbook(
     _write_contact_sheet(contact, table_rows)
     _write_summary_sheet(
         book.create_sheet(SUMMARY_SHEET), table_rows, stage_rows,
-        run_status=run_status, generated_at=generated_at, opted_out=opted_out,
+        run_status=run_status, generated_at=generated_at, opted_out=opted_out, sole_traders=sole_traders,
     )
     _write_detail_sheet(book.create_sheet(DETAIL_SHEET), table_rows)
     book.active = 0
@@ -560,6 +564,7 @@ def write_run_report(
     elapsed_seconds: float | None,
     telemetry: dict | None = None,
     opt_out_entries: tuple[str, ...] = (),
+    companies_only: bool = False,
 ) -> dict[str, str]:
     """Write all available summary files; collect every filesystem error."""
     errors: dict[str, str] = {}
@@ -571,14 +576,22 @@ def write_run_report(
         # A delivery file names no person (Talimat 40).
         email_kind.keep_generic_email(row)
         field_merge.annotate(row, None)
-    table_rows = [_table_row(row) for row in normalized_rows]
+    # Each firm keeps its source row so the stage table counts the delivered firms only.
+    delivered = [(row, _table_row(row)) for row in normalized_rows]
+    sole_traders = None
+    if companies_only:
+        # Sole traders and civil partnerships stay out where the profile asks (Talimat 41).
+        companies = [pair for pair in delivered if legal_form.is_company(pair[1]["Firma"])]
+        sole_traders = len(delivered) - len(companies)
+        delivered = companies
     # Firms on the opt-out list never reach a delivery file (Talimat 39).
-    kept_rows = [
-        row for row in table_rows
+    kept = [
+        (source, row) for source, row in delivered
         if not opt_out.matches(opt_out_entries, company=row["Firma"], website=row["Web sitesi"], email=row["E-posta"])
     ]
-    opted_out = len(table_rows) - len(kept_rows)
-    table_rows = kept_rows
+    opted_out = len(delivered) - len(kept)
+    delivered_sources = [source for source, _row in kept]
+    table_rows = [row for _source, row in kept]
     try:
         target_root.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -589,8 +602,9 @@ def write_run_report(
     workbook_path = target_root / "sonuclar.xlsx"
     try:
         write_results_workbook(
-            workbook_path, table_rows, _stage_summary(normalized_rows),
+            workbook_path, table_rows, _stage_summary(delivered_sources),
             run_status=safe_status, generated_at=generated_at, opted_out=opted_out,
+            sole_traders=sole_traders,
         )
         files[workbook_path.name] = hashlib.sha256(workbook_path.read_bytes()).hexdigest()
     except Exception as exc:

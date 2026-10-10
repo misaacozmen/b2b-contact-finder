@@ -742,6 +742,9 @@ QUERY_ABBREVIATION_STOPWORDS = [
 # Legal-form words that end the company name in search text; what follows
 # them (partners' names, "in organisation") is not part of the name.
 NAME_END_LEGAL_WORDS: tuple[str, ...] = ()
+# Deliver only firms whose name shows a company form; the Polish profile turns
+# this on so sole traders' personal data stay out of delivery files (Talimat 41).
+DELIVERY_COMPANIES_ONLY = False
 
 SECTOR_GENERIC_WORDS = [
     "demir",

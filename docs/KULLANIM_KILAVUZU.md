@@ -161,6 +161,7 @@ explorer "$((Get-ChildItem runs -Directory | Sort-Object CreationTime -Descendin
 - E-posta firmanın kendi sitesinde yazıyorsa, alan adı siteden farklı olsa da alınır (ör. site `firma.com.tr`, e-posta `info@firma.com`).
 - Sitede yalnız gmail, hotmail gibi bir adres varsa o yazılır ve sarı işaretlenir. KEP adresleri yazılmaz.
 - Yalnız firmanın genel e-posta adresi yazılır (info@, biuro@, satis@ gibi). Kişi adı taşıyan adresler (ad@, ad.soyad@, a.soyad@) ve kişisel veri adresleri (rodo@, kvkk@, privacy@ gibi) yazılmaz; sitede firmanın genel adresi varsa onun yerine o yazılır.
+- Polonya profilinde teslim dosyasına yalnız şirketler alınır. Adında şirket türü (sp. z o.o., S.A., sp.j., GmbH, Ltd vb.) olmayan firmalar şahıs firması sayılır ve adi ortaklıklar (s.c.) da yazılmaz; kaç firmanın çıkarıldığı Özet sayfasının açıklamasında görünür. Türkiye profilinde bu kural kapalıdır.
 - **"Aday web sitesi (kontrol edin)"** sütunu (Detaylar): sistem siteyi doğrulayamadığında aramada bulduğu en iyi adayı buraya yazar. Adaylar doğrulanmamıştır; yaklaşık yarısı doğrudur. Kullanmadan önce açıp kontrol edin.
 
 ### Ret listesi

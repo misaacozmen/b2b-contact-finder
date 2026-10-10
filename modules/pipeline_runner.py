@@ -781,6 +781,7 @@ def _write_run_report(
             rows, output_root=output_root, run_status=run_status,
             status_detail=status_detail, elapsed_seconds=elapsed_seconds,
             telemetry=telemetry, opt_out_entries=opt_out.load(config.OPT_OUT_FILE),
+            companies_only=bool(config.DELIVERY_COMPANIES_ONLY),
         )
     except Exception:
         # The report writer's contract is never to raise; preserve pipeline

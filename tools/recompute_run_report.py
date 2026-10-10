@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
-from modules import checkpoint, field_merge, opt_out, run_report  # noqa: E402
+from modules import checkpoint, country_profile, field_merge, opt_out, run_report  # noqa: E402
 
 
 def _read_json(path: Path, *, required: bool = True) -> dict:
@@ -112,6 +112,9 @@ def main() -> int:
 
     status_payload = _read_json(run_dir / "output" / "run_status.json")
     telemetry = _read_json(run_dir / "output" / "telemetry.json", required=False)
+    manifest = _read_json(run_dir / "manifest.json", required=False)
+    settings = (manifest.get("run_config") or {}).get("effective_settings") or {}
+    profile = country_profile.PROFILES.get(str(settings.get("target_country") or "TR"), {})
     run_status = str(status_payload.get("run_status") or "")
     status_detail = str(status_payload.get("status_detail") or "recomputed")
     if not run_status:
@@ -131,6 +134,7 @@ def main() -> int:
             elapsed_seconds=elapsed,
             telemetry=telemetry,
             opt_out_entries=opt_out.load(config.OPT_OUT_FILE),
+            companies_only=bool(profile.get("DELIVERY_COMPANIES_ONLY", False)),
         )
     if errors:
         print(json.dumps({"run_id": run_id, "out": str(out_dir), "errors": errors}, ensure_ascii=False))
