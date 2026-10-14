@@ -65,7 +65,7 @@ python tools\liste_cek.py --url "https://fuar-sitesi/katilimcilar" --name "FUAR"
 ### 3.1 Panelden (önerilen)
 
 1. Listeyi çekin ya da hazır Excel'i **Seç…** ile seçin. Dosya `input` klasöründe olmak zorunda değildir. Panel firma sayısını ve hangi sütunların dolu olduğunu gösterir; sorun varsa kırmızı uyarı çıkar.
-2. **Firmaların ülkesini** seçin: **Türkiye** ya da **Polonya**. Seçim aramaların dilini, telefon biçimini ve karar kurallarını ayarlar.
+2. **Firmaların ülkesini** seçin: **Türkiye**, **Polonya** ya da **Birleşik Krallık**. Seçim aramaların dilini, telefon biçimini ve karar kurallarını ayarlar.
 3. **Koşu türünü** seçin:
    - **Ücretsiz (önerilen)**
    - **Ücretli: Places + Hunter**: eksik telefon ve e-posta için
@@ -84,7 +84,7 @@ Panel aynı anda ikinci bir koşu başlatmaz. Koşu sürerken bilgisayar uykuya 
 python main.py --input input\FUAR.xlsx --no-allow-paid --finalize-without-paid --non-interactive
 ```
 
-Polonya fuarında sona `--country PL` ekleyin.
+Polonya fuarında sona `--country PL`, İngiltere fuarında `--country GB` ekleyin.
 
 Ücretli, Places + Hunter (bloğun tamamını bir kerede yapıştırın):
 
@@ -139,6 +139,14 @@ Referans profildir. Aramalar Türkçe yapılır, telefonlar Türkiye biçiminde 
 - Ücretli Bright Data koşusunda NIP önce Google'da aranır.
 - NIP'i olmayan yabancı katılımcılarda bu kanıt yoktur; onların siteleri daha az bulunur.
 
+### Birleşik Krallık
+
+- Aramalar İngilizce yapılır. Telefonlar İngiltere biçiminde okunur (+44, 020 …, 0113 …); `.co.uk` uzantıları öne çıkar.
+- İngiltere'nin rehber, şirket sicili kopyası, yorum, iş ilanı ve pazar yeri siteleri ile fuar merkezleri firma sitesi sayılmaz (yell, endole, companycheck, trustpilot, thenec, excel.london …).
+- İngiliz kataloglarında vergi numarası olmadığı için NIP benzeri bir kanıt kullanılmaz.
+- İngiltere hukuku şirketlere (Ltd, PLC, LLP) izinsiz iş e-postası gönderilmesine izin verir; şahıs firmalarına ve ortaklıklara izin vermez. Bu yüzden teslim dosyasında yalnız şirketler kalır (5. bölüm). Müşteri dosyasında adı şirket türü göstermeyen firmalar ayrıca kontrol edilir.
+- Ölçüm henüz yapılmadı; ilk İngiltere koşusunun sonuçları kontrol edilmeden müşteriye gönderilmemelidir.
+
 ## 5. Sonuçlar
 
 Her koşunun dosyaları `runs\<koşu kimliği>\output\` klasöründedir. Panelde **Klasörü aç** bu klasörü açar. Terminalden en son koşunun klasörünü açmak için:
@@ -161,7 +169,7 @@ explorer "$((Get-ChildItem runs -Directory | Sort-Object CreationTime -Descendin
 - E-posta firmanın kendi sitesinde yazıyorsa, alan adı siteden farklı olsa da alınır (ör. site `firma.com.tr`, e-posta `info@firma.com`).
 - Sitede yalnız gmail, hotmail gibi bir adres varsa o yazılır ve sarı işaretlenir. KEP adresleri yazılmaz.
 - Yalnız firmanın genel e-posta adresi yazılır (info@, biuro@, satis@ gibi). Kişi adı taşıyan adresler (ad@, ad.soyad@, a.soyad@) ve kişisel veri adresleri (rodo@, kvkk@, privacy@ gibi) yazılmaz; sitede firmanın genel adresi varsa onun yerine o yazılır.
-- Polonya profilinde teslim dosyasına yalnız şirketler alınır. Adında şirket türü (sp. z o.o., S.A., sp.j., GmbH, Ltd vb.) olmayan firmalar şahıs firması sayılır ve adi ortaklıklar (s.c.) da yazılmaz; kaç firmanın çıkarıldığı Özet sayfasının açıklamasında görünür. Türkiye profilinde bu kural kapalıdır.
+- Polonya ve Birleşik Krallık profillerinde teslim dosyasına yalnız şirketler alınır. Adında şirket türü (sp. z o.o., S.A., sp.j., GmbH, Ltd, Limited, PLC, LLP vb.) olmayan firmalar şahıs firması sayılır; adi ortaklıklar (s.c., "& Co" ile biten adlar) da yazılmaz. Kaç firmanın çıkarıldığı Özet sayfasının açıklamasında görünür. Türkiye profilinde bu kural kapalıdır.
 - **"Aday web sitesi (kontrol edin)"** sütunu (Detaylar): sistem siteyi doğrulayamadığında aramada bulduğu en iyi adayı buraya yazar. Adaylar doğrulanmamıştır; yaklaşık yarısı doğrudur. Kullanmadan önce açıp kontrol edin.
 
 ### Ret listesi
@@ -191,9 +199,11 @@ python tools\musteri_dosyasi.py --run-dir runs\<koşu kimliği> --out teslim\mus
 
 - Dosyada tek sayfa firma listesi (Firma, Fuar, Salon, Stant, Web sitesi, E-posta, Telefon) ve kısa bir bilgi sayfası olur. Yanına aynı adla bir `.csv` kopyası yazılır.
 - Yalnız güvenilir bilgiler yazılır; sarı (düşük güvenli) bilgiler boş kalır.
-- Polonya koşusunda yalnız şirketler kalır. Öteki koşularda adında kişi adı ve soyadı görünen firmalar (şahıs firmaları) ve adi ortaklıklar çıkarılır. Ret listesindeki firmalar hiç alınmaz.
+- Polonya ve Birleşik Krallık koşularında yalnız şirketler kalır. Öteki koşularda adında kişi adı ve soyadı görünen firmalar (şahıs firmaları) ve adi ortaklıklar çıkarılır. Ret listesindeki firmalar hiç alınmaz.
+- Birleşik Krallık koşusunda adı şirket türü göstermeyen firma (ör. yalnız marka adı) iki durumda kalır: firmanın kendi sitesinde yazan şirket numarası Companies House'ta faal bir şirkete aitse ve o şirketin adı firmanın adıyla ya da alan adıyla örtüşüyorsa ya da numaranın yazdığı sayfada geçiyorsa ("Marka, X Ltd'nin markasıdır" gibi); ya da Companies House'ta firmanın adını birebir taşıyan faal bir şirket varsa. Companies House anahtarı kayıtlı değilse (6. bölüm), sitenin aynı sayfasında şirket numarası ve firmanın adını taşıyan "… Ltd" ya da "… Limited" yazısı aranır.
+- Bu kontrol için firmaların sitelerine yeniden bağlanılır; 150 firma birkaç dakika sürer. Sonuçlar `state\company_checks.json` dosyasında 30 gün saklanır, örnek ve tam liste aynı sonucu kullanır. Araç çıktısındaki `company_check` satırı kaç firmanın hangi yolla kaldığını (`name`, `register_number`, `register_name`, `site`) ve kaçının çıkarıldığını (`left_out`) gösterir.
 - Birkaç fuar tek dosyada: `--run-dir` seçeneğini her koşu için tekrarlayın. Fuar adını değiştirmek için yolun sonuna `="Fuar adı"` ekleyin.
-- Başlık dili Polonya koşusunda Lehçe, ötekilerde Türkçedir; `--lang en` ile İngilizce olur.
+- Başlık dili Polonya koşusunda Lehçe, Birleşik Krallık koşusunda İngilizce, ötekilerde Türkçedir; `--lang tr|pl|en` ile değişir. Polonya ve Birleşik Krallık dosyalarının bilgi sayfasında "yalnız şirketler" satırı da bulunur.
 - Ücretsiz örnek için `--sample 20` ekleyin: iletişim bilgisi tam olan ilk 20 firma, e-posta ve telefon kısmen gizli yazılır.
 
 ### Arşivleme
@@ -209,6 +219,15 @@ python tools\api_anahtarlari.py
 ```
 
 Bright Data, Google Places ve Hunter anahtarları görünmeden yazılır ve `state\api_keys.json` dosyasına Windows kullanıcı hesabına bağlı şifreyle kaydedilir. Bu dosya git'e girmez.
+
+**Companies House (ücretsiz):** İngiltere müşteri dosyasındaki şirket kontrolü için kullanılır.
+
+1. developer.company-information.service.gov.uk adresinde **Sign in / Register** ile hesap açın.
+2. Bir uygulama oluşturun: ad ve açıklama yazın, ortam olarak **Live** seçin, **Create**'e basın.
+3. Uygulamada **Create new key** → anahtar adı yazın, tür olarak **API key** seçin → **Create**.
+4. `python tools\api_anahtarlari.py` komutunda Companies House sorusuna `e` yazıp anahtarı yapıştırın.
+
+Companies House 5 dakikada en çok 600 sorguya izin verir; araç sorguları buna göre yavaşlatır.
 
 ## 7. Sorun giderme
 

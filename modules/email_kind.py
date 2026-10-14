@@ -32,6 +32,7 @@ ROLE_WORDS = frozenset({
     "logistyka", "logistics", "lojistik", "zakupy", "satinalma", "purchasing", "produkcja", "uretim",
     "kalite", "quality", "jakosc", "projekt", "projects", "proje", "design", "commerce", "customer",
     "obsluga", "dzial", "pl", "tr", "en", "de", "biuro1", "info1",
+    "enquiry", "accounts", "events", "bookings", "reception", "studio", "hire",
 })
 FIRST_NAMES = frozenset({
     # Polish
@@ -77,6 +78,22 @@ FIRST_NAMES = frozenset({
     "pascal", "paul", "peter", "philippe", "pierre", "robert", "roman", "sandra", "sara", "sarah",
     "sergey", "sergio", "stefan", "stefano", "stephan", "svetlana", "tatiana", "thomas", "uwe",
     "viktor", "vladimir", "wolfgang",
+    # British (Talimat 44)
+    "aaron", "abigail", "alan", "alastair", "alfie", "alison", "alistair", "amelia", "amy", "andrew",
+    "andy", "angela", "angus", "anne", "archie", "barry", "becky", "ben", "beth", "callum", "carl",
+    "carol", "charlie", "charlotte", "chloe", "chris", "claire", "colin", "connor", "craig", "dan",
+    "danielle", "darren", "dave", "debbie", "donna", "duncan", "dylan", "edward", "ellie", "elliot",
+    "emily", "emma", "ethan", "euan", "fiona", "fraser", "freddie", "gareth", "gary", "gavin", "gemma",
+    "georgia", "gordon", "graham", "hamish", "hannah", "harriet", "harry", "harvey", "heather", "helen",
+    "henry", "hugh", "ian", "isla", "jack", "jacob", "jake", "jamie", "jane", "jason", "jennifer",
+    "jenny", "jess", "jessica", "joanne", "joe", "joel", "jon", "jonathan", "jordan", "josh", "joshua",
+    "julie", "karen", "kate", "katie", "keith", "kelly", "kevin", "kieran", "kirsty", "lauren", "leah",
+    "lewis", "liam", "linda", "lisa", "liz", "louise", "lucy", "luke", "malcolm", "mark", "matt",
+    "matthew", "megan", "melanie", "michelle", "mike", "natalie", "nathan", "neil", "nick", "nicola",
+    "nigel", "olivia", "oscar", "owen", "patrick", "paula", "phil", "rachel", "rebecca", "rhys",
+    "richard", "rob", "rory", "ross", "russell", "ryan", "sally", "sam", "samantha", "scott", "sean",
+    "sharon", "simon", "sophie", "stephen", "steve", "steven", "stuart", "susan", "terry", "theo", "tim",
+    "toby", "tom", "tony", "tracy", "trevor", "victoria", "vicky", "wayne", "william", "zoe",
 })
 
 

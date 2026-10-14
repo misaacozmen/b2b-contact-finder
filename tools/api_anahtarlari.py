@@ -1,4 +1,5 @@
-"""Save the paid API keys once: Bright Data, Google Places and Hunter (Talimat 30).
+"""Save the API keys once: Bright Data, Google Places, Hunter (Talimat 30) and the
+free Companies House key for British company checks (Talimat 44).
 
 Keys are typed hidden and stored encrypted for this Windows user in
 state/api_keys.json (DPAPI); they never appear on screen, in logs or in git.
@@ -23,6 +24,7 @@ PROVIDERS = (
     ("brightdata", "Bright Data (SERP API)"),
     ("google_places", "Google Places (Places API - New)"),
     ("hunter", "Hunter"),
+    ("companies_house", "Companies House (ücretsiz, İngiltere şirket sicili)"),
 )
 YES = {"e", "evet", "y", "yes"}
 NO = {"h", "hayir", "hayır", "n", "no", ""}

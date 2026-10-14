@@ -3534,7 +3534,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=config.INPUT_FILE, help="Path to firms.xlsx")
     parser.add_argument(
         "--country", choices=tuple(country_profile.PROFILES), default="TR",
-        help="Target country profile (TR or PL)",
+        help="Target country profile (TR, PL or GB)",
     )
     parser.add_argument("--run-dir", type=Path, default=None, help="Canonical run directory containing output/ and state/")
     parser.add_argument("--resume-run", type=Path, default=None, help="Resume an existing run directory")

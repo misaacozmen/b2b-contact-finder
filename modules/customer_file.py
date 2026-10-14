@@ -51,6 +51,12 @@ INFO_LINES = {
         "Companies that object are left out of later lists.",
     ),
 }
+# Polish and British lists hold companies only (Talimat 41, 44).
+COMPANIES_ONLY_LINE = {
+    "tr": "Yalnız şirketler vardır; şahıs firmaları ve ortaklıklar listeye alınmaz.",
+    "pl": "Tylko spółki i inne osoby prawne; bez jednoosobowych działalności i spółek cywilnych.",
+    "en": "Companies only; sole traders and partnerships are left out.",
+}
 DATE_LABEL = {"tr": "Tarih", "pl": "Data", "en": "Date"}
 COUNT_LABEL = {"tr": "Firma sayısı", "pl": "Liczba firm", "en": "Companies"}
 SAMPLE_NOTE = {
@@ -89,6 +95,12 @@ def customer_rows(
     return [customer_row(table_row, fair=fair) for _source, table_row in kept], left_out or 0, opted_out
 
 
+def firm_sites(rows: list[dict]) -> list[tuple[str, str]]:
+    """Each firm's name and its website where the system is confident (Talimat 44)."""
+    table_rows = (customer_row(run_report._table_row(row)) for row in run_report.prepare_rows(rows))
+    return [(row["Firma"], row["Web sitesi"]) for row in table_rows]
+
+
 def mask_email(value: str) -> str:
     if "@" not in value:
         return ""
@@ -109,6 +121,7 @@ def sample_rows(rows: list[dict[str, str]], size: int) -> list[dict[str, str]]:
 
 def write_customer_file(
     path: Path, rows: list[dict[str, str]], *, lang: str, sample: bool = False, today: date | None = None,
+    companies_only: bool = False,
 ) -> list[Path]:
     """Write the customer workbook (and a CSV for a full list) atomically; return the written paths."""
     if lang not in LANGUAGES:
@@ -132,7 +145,8 @@ def write_customer_file(
     sheet.auto_filter.ref = sheet.dimensions
     info = book.create_sheet(info_name)
     lines = [f"{DATE_LABEL[lang]}: {(today or date.today()).strftime('%d.%m.%Y')}", f"{COUNT_LABEL[lang]}: {len(rows)}"]
-    lines += list(INFO_LINES[lang]) + ([SAMPLE_NOTE[lang]] if sample else [])
+    lines += list(INFO_LINES[lang]) + ([COMPANIES_ONLY_LINE[lang]] if companies_only else [])
+    lines += [SAMPLE_NOTE[lang]] if sample else []
     for index, line in enumerate(lines, start=1):
         info.cell(row=index, column=1, value=line)
     info.column_dimensions["A"].width = 100

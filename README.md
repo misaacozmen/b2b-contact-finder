@@ -4,7 +4,7 @@ Bir fuarın katılımcı listesinden her firmanın **resmi web sitesini, e-posta
 
 - Fuar sitesindeki katılımcı listesini kendisi çeker ya da hazır bir Excel listesini okur.
 - Firmaların sitelerini bulur, sitenin gerçekten o firmaya ait olduğunu doğrular ve iletişim bilgilerini siteden alır.
-- **Türkiye** ve **Polonya** fuarları için ayarlıdır. Polonya'da fuar kataloğundaki vergi numarası (NIP) ile siteyi kesin doğrular.
+- **Türkiye**, **Polonya** ve **Birleşik Krallık** fuarları için ayarlıdır. Polonya'da fuar kataloğundaki vergi numarası (NIP) ile siteyi kesin doğrular. Birleşik Krallık'ta müşteri dosyasına yalnız şirketleri alır ve gerekirse Companies House'ta kontrol eder.
 - Masaüstü paneliyle terminal kullanmadan çalışır.
 - Ücretsiz çalışır. İsterseniz ücretli kaynaklarla (Bright Data, Google Places, Hunter) eksikleri tamamlar.
 
@@ -47,7 +47,7 @@ Kurulum tekrar çalıştırılabilir; kurulu olanları atlar. Bilgisayardaki ba�
 
 1. Masaüstündeki **Fuar Koşu Paneli** kısayolunu açın.
 2. Fuar sitesindeki katılımcı listesinin adresini kutuya yapıştırıp **Listeyi çek**'e basın. Hazır bir Excel'iniz varsa **Seç…** ile seçin.
-3. Firmaların ülkesini seçin: **Türkiye** ya da **Polonya**.
+3. Firmaların ülkesini seçin: **Türkiye**, **Polonya** ya da **Birleşik Krallık**.
 4. Koşu türü olarak **Ücretsiz** seçip **Koşuyu başlat**'a basın.
 5. Bitince **Sonuçları aç** ile `sonuclar.xlsx` açılır. Kullanacağınız liste **İletişim** sayfasıdır.
 
@@ -90,6 +90,7 @@ Sistem şu API'lerle uyumludur:
 | Bright Data | SERP API (Google arama sonuçları) | brightdata.com → yeni bir **SERP API** zone oluşturun ve adını `serp_api1` koyun → Account settings → API key |
 | Google Places | Places API (New), Text Search | Google Cloud Console → proje → **Places API (New)**'i etkinleştirin → Credentials → API key (faturalandırma açık olmalı) |
 | Hunter | Domain Search (e-posta) | hunter.io → Dashboard → API → API key |
+| Companies House (ücretsiz) | İngiltere şirket sicili | developer.company-information.service.gov.uk → **Sign in / Register** → uygulama oluşturun (**Live**) → **Create new key** → tür **API key** |
 
 Bright Data zone'unuzun adı farklıysa `BRIGHTDATA_ZONE` ortam değişkenini ayarlayın:
 
@@ -125,7 +126,7 @@ Panel açılmazsa ya da toplu çalıştırma için:
 .\.runtime\python3147-sqlite3534\python.exe main.py --input input\FUAR.xlsx --no-allow-paid --finalize-without-paid --non-interactive
 ```
 
-- Polonya fuarı için sona `--country PL` ekleyin.
+- Polonya fuarı için sona `--country PL`, İngiltere fuarı için `--country GB` ekleyin.
 - Fuar listesini terminalden çekmek için:
   ```powershell
   .\.runtime\python3147-sqlite3534\python.exe tools\liste_cek.py --url "https://fuar-sitesi/katilimcilar" --name "FUAR"
@@ -141,7 +142,7 @@ Panel açılmazsa ya da toplu çalıştırma için:
 | `modules\` | Arama, tarama, doğrulama, ülke profilleri, çıktı |
 | `tools\kosu_paneli.py` | Masaüstü paneli |
 | `tools\liste_cek.py` | Fuar sitesinden katılımcı listesi çekici |
-| `tools\api_anahtarlari.py` | Ücretli API anahtarlarını kaydetme |
+| `tools\api_anahtarlari.py` | API anahtarlarını kaydetme (ücretli sağlayıcılar ve Companies House) |
 | `tools\eski\` | Eski, tek seferlik betikler (arşiv) |
 | `input\` | Girdi listeleri (git'e girmez) |
 | `runs\` | Her koşunun klasörü; sonuçlar `runs\<koşu>\output\` altında (git'e girmez) |

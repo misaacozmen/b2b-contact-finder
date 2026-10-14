@@ -7,6 +7,8 @@ Examples:
 
 Run databases are only read. A Polish run keeps only firms whose name shows a
 company form; any other run leaves out firms whose name shows a person.
+A British run keeps a firm without a company form in its name only when its
+website or Companies House shows it is a company (Talimat 44).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
-from modules import country_profile, customer_file, legal_form, opt_out  # noqa: E402
+from modules import company_register, country_profile, crawler, customer_file, legal_form, opt_out  # noqa: E402
 from tools.recompute_run_report import _load_database, _read_json  # noqa: E402
 
 
@@ -31,8 +33,12 @@ def _split_run(value: str) -> tuple[Path, str]:
     return Path(path.strip().strip('"')), fair.strip().strip('"')
 
 
-def _keep_firm(country: str):
-    if country_profile.PROFILES.get(country, {}).get("DELIVERY_COMPANIES_ONLY"):
+def _keep_firm(country: str, checks: dict[str, dict] | None = None):
+    profile = country_profile.PROFILES.get(country, {})
+    if profile.get("COMPANY_REGISTER"):
+        checks = checks or {}
+        return lambda name: bool(checks.get(name, {}).get("company"))
+    if profile.get("DELIVERY_COMPANIES_ONLY"):
         return legal_form.is_company
     return lambda name: not legal_form.names_a_person(name)
 
@@ -43,7 +49,7 @@ def main() -> int:
                         help="run folder; add =\"Fair name\" when the run has no fair name")
     parser.add_argument("--out", required=True, type=Path, help="customer .xlsx file to write")
     parser.add_argument("--lang", choices=customer_file.LANGUAGES,
-                        help="header language; default pl for a Polish first run, otherwise tr")
+                        help="header language; default pl for a Polish and en for a British first run, otherwise tr")
     parser.add_argument("--sample", type=int, help="write a sample of this many firms with contacts partly hidden")
     args = parser.parse_args()
 
@@ -51,6 +57,7 @@ def main() -> int:
     rows: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     summary = []
+    company_checks = []
     first_country = ""
     for value in args.run_dir:
         run_dir, fair = _split_run(value)
@@ -62,8 +69,15 @@ def main() -> int:
         country = str(settings.get("target_country") or "TR")
         first_country = first_country or country
         run_rows, _context, _output, _elapsed = _load_database(run_dir / "state" / "progress.sqlite3", run_dir.name)
+        checks = None
+        if country_profile.PROFILES.get(country, {}).get("COMPANY_REGISTER"):
+            key = company_register.api_key()
+            checks = company_register.check_firms(
+                customer_file.firm_sites(run_rows), fetch_page=crawler.fetch_page, key=key,
+            )
+            company_checks.append({"run_id": run_dir.name, **company_register.summary(checks, register_on=bool(key))})
         firms, left_out, opted_out = customer_file.customer_rows(
-            run_rows, keep_firm=_keep_firm(country), opt_out_entries=entries, fair=fair,
+            run_rows, keep_firm=_keep_firm(country, checks), opt_out_entries=entries, fair=fair,
         )
         added = 0
         for firm in firms:
@@ -77,10 +91,13 @@ def main() -> int:
             "run_id": run_dir.name, "country": country, "firms": added,
             "left_out_by_name": left_out, "left_out_by_opt_out": opted_out,
         })
-    lang = args.lang or ("pl" if first_country == "PL" else "tr")
+    lang = args.lang or {"PL": "pl", "GB": "en"}.get(first_country, "tr")
     if args.sample:
         rows = customer_file.sample_rows(rows, args.sample)
-    written = customer_file.write_customer_file(args.out, rows, lang=lang, sample=bool(args.sample))
+    companies_only = bool(country_profile.PROFILES.get(first_country, {}).get("DELIVERY_COMPANIES_ONLY"))
+    written = customer_file.write_customer_file(
+        args.out, rows, lang=lang, sample=bool(args.sample), companies_only=companies_only,
+    )
     print(json.dumps({
         "files": [str(path) for path in written],
         "firms": len(rows),
@@ -88,6 +105,7 @@ def main() -> int:
         "email": sum(1 for row in rows if row["E-posta"]),
         "phone": sum(1 for row in rows if row["Telefon"]),
         "runs": summary,
+        **({"company_check": company_checks} if company_checks else {}),
     }, ensure_ascii=False))
     return 0
 

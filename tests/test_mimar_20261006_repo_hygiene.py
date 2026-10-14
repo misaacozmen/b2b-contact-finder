@@ -71,9 +71,9 @@ def test_api_key_tool_saves_keys_encrypted_and_never_prints_them(capsys):
     from tools import api_anahtarlari
 
     secret = "synthetic-key-0123456789abcdef"
-    answers = iter(["e", "h", "e"])
+    answers = iter(["e", "h", "e", "h"])
     result = api_anahtarlari.configure(input_fn=lambda _: next(answers), secret_fn=lambda _: secret)
-    assert result == {"brightdata": True, "google_places": False, "hunter": True}
+    assert result == {"brightdata": True, "google_places": False, "hunter": True, "companies_house": False}
     assert api_configuration.load_saved_api_keys() == {"brightdata": secret, "hunter": secret}
     assert secret not in config.SAVED_API_KEYS_FILE.read_text(encoding="utf-8")
     assert secret not in capsys.readouterr().out

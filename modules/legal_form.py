@@ -8,6 +8,9 @@ company form. A name without any form counts as a sole trader.
 Turkish catalogues often list a brand without any form, so a Turkish customer
 file keeps such names and leaves out only those that show a person: a person
 form (adi ortaklık) or a name ending in a first name and a surname (Talimat 43).
+
+British companies end in Ltd, Limited, PLC, LLP, CIC (Welsh: Cyf, CCC, PAC).
+A name ending in "& Co" is a partnership, not a company (Talimat 44).
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ COMPANY_FORMS = (
     "automobilklub", "centrum kultury", "osrodek kultury", "gminne", "gminny",
     "kooperatifi", "dernegi", "vakfi", "odasi", "birligi", "universitesi", "belediyesi", "holding",
     "mudurlugu", "baskanligi",
+    "public limited company", "limited liability partnership", "community interest company",
+    "charitable incorporated organisation", "cyfyngedig", "university",
 )
 # French forms written before the name (SAS JOUANEL INDUSTRIE).
 START_COMPANY_FORMS = ("sas", "sarl", "s a s", "s a r l")
@@ -38,7 +43,10 @@ START_COMPANY_FORMS = ("sas", "sarl", "s a s", "s a r l")
 END_COMPANY_FORMS = (
     "s a", "sa", "sp", "ag", "kg", "ohg", "se", "bv", "b v", "nv", "n v", "sas", "spa", "as", "ab",
     "oy", "oyj", "sia", "aps", "sl", "s l", "lda", "ad", "tov", "ou", "s a c", "co", "sti",
+    "p l c", "l l p", "cic", "cio", "cyf", "ccc", "pac",
 )
+# "& Co" or "and Company" ends the name of a British partnership.
+PARTNERSHIP_END_RE = re.compile(r"(?:&|\band)\s*co(?:mpany)?\W*$", re.IGNORECASE)
 # Forms of a person doing business; they win over any company word.
 PERSON_FORMS = ("spolka cywilna", "sp cywilna", "adi ortakligi", "adi ortaklik")
 END_PERSON_FORMS = ("s c", "sc", "e k", "ek")
@@ -93,6 +101,8 @@ def is_company(name: str) -> bool:
     # A bracketed brand after the name hides an end form: "Malion BV (MARKA)".
     outside = _fold(name, drop_brackets=True)
     if not words or _has(words, PERSON_FORMS) or _ends(outside, END_PERSON_FORMS):
+        return False
+    if PARTNERSHIP_END_RE.search(re.sub(r"\([^)]*\)", " ", str(name)).strip()):
         return False
     return (
         _has(words, COMPANY_FORMS)

@@ -745,6 +745,17 @@ NAME_END_LEGAL_WORDS: tuple[str, ...] = ()
 # Deliver only firms whose name shows a company form; the Polish profile turns
 # this on so sole traders' personal data stay out of delivery files (Talimat 41).
 DELIVERY_COMPANIES_ONLY = False
+# The register a customer file asks whether a firm without a company form in
+# its name is a company; the British profile uses Companies House (Talimat 44).
+COMPANY_REGISTER = ""
+COMPANIES_HOUSE_API_URL = "https://api.company-information.service.gov.uk"
+COMPANIES_HOUSE_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
+# Companies House allows 600 requests in five minutes.
+COMPANIES_HOUSE_MIN_INTERVAL_SEC = 0.6
+COMPANY_CHECK_CACHE_FILE = STATE_DIR / "company_checks.json"
+COMPANY_CHECK_MAX_AGE_DAYS = 30
+# Legal and contact pages read per firm when its home page shows no company number.
+COMPANY_NUMBER_PAGE_CHECKS = 3
 
 SECTOR_GENERIC_WORDS = [
     "demir",

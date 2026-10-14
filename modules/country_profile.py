@@ -31,7 +31,7 @@ SETTING_NAMES = (
     "LOCAL_ROUTE_TOKENS", "LOCAL_MAILBOX_TOKENS",
     "EXTRA_CONTACT_LINK_WORDS", "EXTRA_ABOUT_LINK_WORDS", "EXTRA_FREE_MAIL_DOMAINS",
     "TAX_ID_FORMAT", "TAX_ID_LABELS", "TAX_ID_PAGE_WORDS", "CALIBRATED_DIRECTORY_DOMAINS",
-    "DELIVERY_COMPANIES_ONLY",
+    "DELIVERY_COMPANIES_ONLY", "COMPANY_REGISTER",
 )
 
 TURKEY = {name: copy.deepcopy(getattr(config, name)) for name in SETTING_NAMES}
@@ -161,8 +161,119 @@ POLAND = {
     "DELIVERY_COMPANIES_ONLY": True,
 }
 
-PROFILES = {"TR": TURKEY, "PL": POLAND}
-LABELS = {"TR": "Türkiye", "PL": "Polonya"}
+# Place names matched inside page text; short or common words (uk, york,
+# reading, bath) would also match other countries or ordinary words.
+_BRITISH_PLACES = (
+    "united kingdom", "great britain", "england", "scotland", "wales", "northern ireland",
+    "london", "birmingham", "manchester", "leeds", "glasgow", "edinburgh", "liverpool", "bristol",
+    "sheffield", "newcastle upon tyne", "nottingham", "leicester", "coventry", "cardiff", "belfast",
+    "southampton", "brighton", "milton keynes", "peterborough", "aberdeen", "northampton",
+    "wolverhampton", "portsmouth", "bradford", "huddersfield", "swindon", "norwich", "ipswich",
+)
+_BRITISH_LEGAL_WORDS = ["plc", "llp", "cic", "uk"]
+
+# Business directories, registry copies, review and job sites, marketplaces,
+# venues and organisers that are never an exhibitor's own website (Talimat 44).
+_BRITISH_DIRECTORY_DOMAINS = (
+    "10times.com", "192.com", "amazon.co.uk", "applegate.co.uk", "bark.com", "bing.com", "bizdb.co.uk",
+    "bizstats.co.uk", "brownbook.net", "check-business.co.uk", "checkatrade.com", "clarionevents.com",
+    "companieshouse.gov.uk", "companiesintheuk.co.uk", "companieslist.co.uk", "companycheck.co.uk",
+    "cv-library.co.uk", "cylex-uk.co.uk", "dnb.co.uk", "duedil.com", "easyfairs.com", "ebay.co.uk",
+    "endole.co.uk", "eventbrite.co.uk", "eventbrite.com", "eventcity.co.uk", "excel.london",
+    "expodatabase.com", "find-open.co.uk", "freeindex.co.uk", "glassdoor.co.uk", "gov.uk", "gumtree.com",
+    "harrogateconventioncentre.co.uk", "hotfrog.co.uk", "houzz.co.uk", "hub.biz", "indeed.co.uk",
+    "indeed.com", "lusha.com", "manchestercentral.co.uk", "misterwhat.co.uk", "mybuilder.com",
+    "northdata.com", "northdata.de", "olympia.london", "opencorporates.com", "opengovuk.com",
+    "owler.com", "ratedpeople.com", "reed.co.uk", "rocketreach.co", "rxglobal.com", "scoot.co.uk",
+    "sec.co.uk", "signalhire.com", "tellows.co.uk", "theicc.co.uk", "thenec.co.uk", "thomsonlocal.com",
+    "totaljobs.com", "tradefairdates.com", "trustpilot.com", "tuugo.co.uk", "uk-companies.info",
+    "ukbusinessforums.co.uk", "ukdata.com", "who-called.co.uk", "yably.co.uk", "yell.com", "yelp.co.uk",
+)
+
+UNITED_KINGDOM = {
+    **copy.deepcopy(TURKEY),
+    "TARGET_COUNTRY": "GB",
+    "TARGET_COUNTRY_QUERY_TERMS": ["UK"],
+    "LOCALE": "en-GB",
+    "SEARCH_QUERY_TEMPLATES": ["{company} official website", "{company} contact", "{company} contact us"],
+    "SEARCH_COUNTRY_QUERY_TEMPLATES": ["{company} {country} official website"],
+    "COUNTRY_QUERY_NAME": "UK",
+    "OFFICIAL_SITE_PHRASE": "official website",
+    "OFFICIAL_SITE_SHORT_PHRASE": "official site",
+    "WEBSITE_QUERY_WORD": "website",
+    "CONTACT_QUERY_WORD": "contact",
+    "CONTACT_QUERY_WORD_NATIVE": "contact us",
+    "REPRESENTATIVE_QUERY_WORDS": "distributor reseller",
+    "BRAND_OFFICIAL_QUERY_PHRASE": "brand official website",
+    "LEGAL_NOTICE_QUERY_WORD": "privacy",
+    "TRADE_NAME_QUERY_WORD": "company number",
+    "DDGS_REGION": "uk-en",
+    "PHONE_DEFAULT_COUNTRY": "GB",
+    # Guernsey, Jersey and the Isle of Man share +44 but are regions of their own.
+    "PHONE_ALLOWED_COUNTRIES": ["GB", "GG", "JE", "IM"],
+    "FOREIGN_COUNTRY_TLDS": sorted({*TURKEY["FOREIGN_COUNTRY_TLDS"], "tr"} - {"uk"}),
+    "COUNTRY_TLD_BONUSES": {".co.uk": 8, ".org.uk": 5, ".uk": 5},
+    "DOMAIN_GUESS_TLDS": [".co.uk", ".com", ".uk"],
+    "COUNTRY_DOMAIN_SUFFIXES": (".uk",),
+    "BRIGHTDATA_GOOGLE_GL": "uk",
+    "BRIGHTDATA_GOOGLE_HL": "en",
+    "BRIGHTDATA_COUNTRY": "gb",
+    "CONTACT_PAGE_PATHS": [
+        "/contact", "/contact/", "/contact-us", "/contact-us/", "/contactus", "/contact.html",
+        "/contact-us.html", "/get-in-touch", "/get-in-touch/", "/about/contact", "/pages/contact",
+        "/pages/contact-us", "/about", "/about-us",
+    ],
+    "IDENTITY_PAGE_PATHS": [
+        "/about", "/about-us", "/company-information", "/privacy", "/privacy-policy", "/privacy-notice",
+        "/cookie-policy", "/terms", "/terms-and-conditions", "/terms-of-use", "/legal", "/legal-notice",
+        "/imprint",
+    ],
+    "LEGAL_COMPANY_WORDS": [*TURKEY["LEGAL_COMPANY_WORDS"], *_BRITISH_LEGAL_WORDS],
+    "QUERY_ABBREVIATION_STOPWORDS": [
+        *TURKEY["QUERY_ABBREVIATION_STOPWORDS"], *_BRITISH_LEGAL_WORDS, "ltd.", "plc.", "l.l.p", "l.l.p.",
+    ],
+    # What follows the legal form ("ACME LTD T/A ACME STANDS") is not part of the name.
+    "NAME_END_LEGAL_WORDS": ("ltd", "limited", "plc", "llp"),
+    "BRAND_CORPORATE_WORDS": (
+        *TURKEY["BRAND_CORPORATE_WORDS"], "ltd", "plc", "llp", "company", "group", "holdings",
+    ),
+    "EMAIL_PRIORITY_PREFIXES": ["sales", "enquiries", "info", "hello", "office", "contact", "marketing"],
+    "CONTACT_EMAIL_LOCALS": (
+        "info", "enquiries", "enquiry", "hello", "contact", "sales", "office", "admin", "mail", "general",
+    ),
+    "COUNTRY_CITY_MARKERS": _BRITISH_PLACES,
+    "COUNTRY_IDENTITY_MARKERS": _BRITISH_PLACES,
+    "COUNTRY_PAGE_MARKERS": _BRITISH_PLACES,
+    "COUNTRY_OBSERVATION_VALUES": (
+        "gb", "uk", "united kingdom", "great britain", "england", "scotland", "wales", "northern ireland",
+    ),
+    "ADDRESS_COUNTRY_IGNORED_TERMS": ("united kingdom", "great britain", "uk", "gb", "england"),
+    "LOCAL_ROUTE_TOKENS": ("uk", "gb", "en-gb", "en_gb", "united-kingdom"),
+    "LOCAL_MAILBOX_TOKENS": ("uk", "gb"),
+    "EXTRA_CONTACT_LINK_WORDS": ("contact-us", "contact us", "get-in-touch", "get in touch"),
+    "EXTRA_ABOUT_LINK_WORDS": (
+        "about-us", "about us", "privacy-policy", "privacy policy", "terms-and-conditions", "company-information",
+    ),
+    "EXTRA_FREE_MAIL_DOMAINS": (
+        "btinternet.com", "btopenworld.com", "btconnect.com", "sky.com", "virginmedia.com", "ntlworld.com",
+        "blueyonder.co.uk", "talktalk.net", "tiscali.co.uk", "yahoo.co.uk", "hotmail.co.uk", "live.co.uk",
+        "aol.co.uk", "aol.com", "plus.com", "orange.net", "tesco.net", "fsmail.net",
+    ),
+    # British catalogues carry no tax identifier; company numbers are checked
+    # for the customer file instead (modules/company_register.py).
+    "TAX_ID_FORMAT": "",
+    "TAX_ID_LABELS": (),
+    "TAX_ID_PAGE_WORDS": (),
+    "CALIBRATED_DIRECTORY_DOMAINS": sorted({
+        *TURKEY["CALIBRATED_DIRECTORY_DOMAINS"], *_BRITISH_DIRECTORY_DOMAINS,
+    }),
+    # UK law lets a business e-mail a company without consent, not a sole trader or a partnership.
+    "DELIVERY_COMPANIES_ONLY": True,
+    "COMPANY_REGISTER": "companies_house",
+}
+
+PROFILES = {"TR": TURKEY, "PL": POLAND, "GB": UNITED_KINGDOM}
+LABELS = {"TR": "Türkiye", "PL": "Polonya", "GB": "Birleşik Krallık"}
 
 
 def apply(code: str) -> None:

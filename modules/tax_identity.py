@@ -143,13 +143,13 @@ def profile_page(url: str, tax_id: str, company: str = "") -> bool:
     return hits >= 2 or bool(tokens) and hits == len(tokens) and legal_form
 
 
-def legal_links(pages: list[dict], limit: int) -> list[str]:
+def legal_links(pages: list[dict], limit: int, words: tuple[str, ...] | None = None) -> list[str]:
     """Own-site links whose address names a legal or contact page (Talimat 32).
 
     They come from the first crawled pages (the home page); pages already
-    read are skipped.
+    read are skipped.  ``words`` replaces the profile's page words (Talimat 44).
     """
-    words = tuple(config.TAX_ID_PAGE_WORDS)
+    words = tuple(config.TAX_ID_PAGE_WORDS if words is None else words)
     if not words or limit <= 0:
         return []
     read = {str(page.get("url") or "").rstrip("/") for page in pages}
