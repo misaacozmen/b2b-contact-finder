@@ -144,6 +144,7 @@ Panel açılmazsa ya da toplu çalıştırma için:
 | `tools\liste_cek.py` | Fuar sitesinden katılımcı listesi çekici |
 | `tools\api_anahtarlari.py` | API anahtarlarını kaydetme (ücretli sağlayıcılar, Companies House, Zoho uygulama şifresi) |
 | `tools\eposta_gonder.py` | Takip dosyasındaki firmalara yavaş ve kontrollü soğuk e-posta gönderimi |
+| `tools\hedef_bul.py` | Fuar hizmet firmalarını (müşteri adaylarını) ücretsiz aramayla bulma |
 | `tools\eski\` | Eski, tek seferlik betikler (arşiv) |
 | `input\` | Girdi listeleri (git'e girmez) |
 | `runs\` | Her koşunun klasörü; sonuçlar `runs\<koşu>\output\` altında (git'e girmez) |

@@ -283,3 +283,17 @@ python tools\eposta_gonder.py gonder --takip HEDEF_takip.xlsx --sablon sablon.tx
 5. `gonder` firmalara gönderir. Pencereyi kapatmayın; Ctrl+C ile durdurabilirsiniz.
 
 Yanıtları ve geri dönen e-postaları takip dosyasının Yanıt ve Not sütunlarına siz işleyin. "İstemiyorum" diyen firmaları ret listesine ekleyin.
+
+## 9. Müşteri adayı listesi (hizmet firmaları)
+
+Katılımcı listelerini satacağımız firmaları (hostes, catering, promosyon ve baskı, fotoğraf ve video, lojistik, mobilya ve ekipman kiralama) `tools\hedef_bul.py` ücretsiz arama motorlarıyla bulur:
+
+```powershell
+python tools\hedef_bul.py --ulke TR --aday teslim\hedef\adaylar_TR.xlsx --girdi input\Hedef_TR.xlsx --haric ESKI_takip.xlsx
+```
+
+- Her kategori fuar şehirlerinde aranır (Türkiye: İstanbul, Ankara, İzmir, Antalya; İngiltere: London, Birmingham, Manchester). Bir kategoriyi seçmek için `--kategori "Lojistik"` ekleyin.
+- Rehber ve pazar yeri siteleri, fuar ve haber sayfaları, "en iyi 10" listeleri, kamu ve yabancı siteler, aynı firmanın başka uzantılı sitesi ve `--haric` dosyalarındaki firmalar "hayır" olur.
+- Kalan her sitenin ana sayfası okunur: o hizmet ve fuar ya da etkinlik geçmiyorsa site yine "hayır" olur.
+- Aday dosyasında her site "evet" ya da "hayır" ve nedeniyle yazılır. Girdi dosyası "evet" firmaları taşır (company, website, country); onunla normal ücretsiz koşu yapılır. Koşudan sonra müşteri dosyası (5. bölüm) ve takip dosyası (8. bölüm) aynı yolla hazırlanır.
+- Arama 48 sorgu ve site kontrolü yaklaşık 20 dakika sürer. Ücretsiz arama motorlarının hiçbiri yanıt vermezse araç durur; daha sonra yeniden deneyin.
