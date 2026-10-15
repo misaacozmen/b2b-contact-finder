@@ -756,6 +756,17 @@ COMPANY_CHECK_CACHE_FILE = STATE_DIR / "company_checks.json"
 COMPANY_CHECK_MAX_AGE_DAYS = 30
 # Legal and contact pages read per firm when its home page shows no company number.
 COMPANY_NUMBER_PAGE_CHECKS = 3
+# Cold e-mail sending from the user's own Zoho address (Talimat 45).  Zoho
+# does not allow bulk or burst sending, so the tool sends few e-mails, one at
+# a time, with a pause between them and only in the recipients' office hours.
+OUTREACH_SMTP_HOST = "smtp.zoho.eu"
+OUTREACH_SMTP_PORT = 465
+OUTREACH_SMTP_PASSWORD = os.getenv("OUTREACH_SMTP_PASSWORD", "")
+OUTREACH_DAILY_LIMIT = 20
+OUTREACH_MAX_DAILY_LIMIT = 40
+OUTREACH_DELAY_SEC = (90, 240)
+OUTREACH_OFFICE_HOURS = (9, 17)
+OUTREACH_LOG_FILE = STATE_DIR / "eposta_gonderim_kaydi.jsonl"
 
 SECTOR_GENERIC_WORDS = [
     "demir",

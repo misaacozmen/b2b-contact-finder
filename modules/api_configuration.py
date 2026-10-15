@@ -32,7 +32,8 @@ def prompt_use_saved_key(label: str, input_fn=input) -> bool:
 
 def prompt_api_key(label: str, secret_fn=getpass.getpass) -> str:
     while True:
-        api_key = secret_fn(f"{label} API anahtarı (gizli): ").strip()
+        # Pasting into a terminal can add invisible control characters (Talimat 45).
+        api_key = "".join(ch for ch in secret_fn(f"{label} API anahtarı (gizli): ") if ch.isprintable()).strip()
         if api_key:
             return api_key
         print("API aktifken anahtar boş bırakılamaz.")

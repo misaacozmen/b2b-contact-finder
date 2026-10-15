@@ -1,5 +1,6 @@
-"""Save the API keys once: Bright Data, Google Places, Hunter (Talimat 30) and the
-free Companies House key for British company checks (Talimat 44).
+"""Save the API keys once: Bright Data, Google Places, Hunter (Talimat 30), the
+free Companies House key for British company checks (Talimat 44) and the Zoho
+Mail app password for sending cold e-mails (Talimat 45).
 
 Keys are typed hidden and stored encrypted for this Windows user in
 state/api_keys.json (DPAPI); they never appear on screen, in logs or in git.
@@ -25,6 +26,7 @@ PROVIDERS = (
     ("google_places", "Google Places (Places API - New)"),
     ("hunter", "Hunter"),
     ("companies_house", "Companies House (ücretsiz, İngiltere şirket sicili)"),
+    ("zoho_smtp", "Zoho Mail uygulama şifresi (e-posta gönderimi)"),
 )
 YES = {"e", "evet", "y", "yes"}
 NO = {"h", "hayir", "hayır", "n", "no", ""}

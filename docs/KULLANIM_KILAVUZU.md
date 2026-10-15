@@ -239,3 +239,47 @@ Companies House 5 dakikada en çok 600 sorguya izin verir; araç sorguları buna
 | Çok az site bulundu | `rapor.md` içindeki "Ücretsiz arama canary" satırına bakın. Arama motorlarının çoğu yanıt vermiyorsa daha sonra tekrar deneyin ya da Bright Data kullanın. |
 | Koşu yarıda kaldı | Aynı komutu aynı girdiyle yeniden çalıştırın; kaldığı yerden devam eder. `rapor.md` içinde durum `KISMI_…` ise o ana kadarki sonuçlar `sonuclar.xlsx` içindedir. |
 | Ücretli kaynak çağrılmadı | Anahtar kayıtlı mı bakın: `python tools\api_anahtarlari.py`. Bright Data için zone adının `serp_api1` olduğunu ya da `BRIGHTDATA_ZONE` değişkeninin ayarlandığını kontrol edin. |
+
+## 8. Soğuk e-posta gönderimi
+
+Takip dosyasındaki firmalara e-postayı tek tek değil, `tools\eposta_gonder.py` ile gönderin. Araç yavaş ve kontrollü gönderir:
+
+- Her firmaya bir kez yazılır. Gönderim tarihi ya da sonucu dolu, Yanıt ya da Not sütunu dolu, ret listesinde olan firmaya yazılmaz; aynı firmanın ikinci adresine de yazılmaz.
+- Yalnız genel adreslere yazılır. Kişi adresleri (ad@, ad.soyad@) ve kişisel veri adresleri atlanır.
+- Günde en çok 20 e-posta gider; `--limit` ile en çok 40. Sınır bütün takip dosyalarındaki gönderimleri ve deneme e-postalarını birlikte sayar.
+- İki e-posta arasında 1,5–4 dakika beklenir. Yalnız hafta içi, alıcının saatiyle 09:00–17:00 arasında gönderilir; ülke `--ulke TR`, `--ulke GB` ya da `--ulke PL` ile seçilir.
+- Her gönderim önce `state\eposta_gonderim_kaydi.jsonl` kaydına, sonra takip dosyasına yazılır. Gönderim sürerken takip dosyasını Excel'de açmayın. Açarsanız gönderim durur; gönderilenler bir sonraki çalıştırmada dosyaya işlenir.
+- Zoho bir adresi reddederse o firmanın "Gönderim sonucu" sütununa yazılır. Zoho girişi ya da gönderimi durdurursa araç hemen biter; o gün yeniden denemeyin.
+
+**Bir kez: Zoho uygulama şifresi.**
+
+1. accounts.zoho.eu → **Security** → **App Passwords** → **Generate New Password**; ad olarak `fuar-araci` yazın. Bu bölüm görünmüyorsa önce aynı sayfada iki adımlı doğrulamayı açın.
+2. `python tools\api_anahtarlari.py` komutunda "Zoho Mail uygulama şifresi" sorusuna `e` yazıp şifreyi yapıştırın.
+
+**Şablon:** düz metin dosyası. İlk satırlar gönderen ve konudur; boş bir satırdan sonra metin gelir. `{hitap}` yerine takip dosyasındaki "Hitap adı" yazılır. Gönderen adresi Zoho'daki kendi adresiniz olmalıdır; araç bu adresle giriş yapar. Şablonda köşeli parantezli bir alan (`[Ad Soyad]` gibi) kalırsa araç göndermez.
+
+```text
+Gönderen: Ad Soyad <ad@ozmenworks.com>
+Konu: Stand işleriniz için fuar öncesi müşteri listesi
+
+Merhaba {hitap} ekibi,
+...
+```
+
+**Adımlar:**
+
+```powershell
+python tools\eposta_gonder.py yeni-takip --liste teslim\musteri\LISTE.xlsx --takip HEDEF_takip.xlsx --ulke GB
+python tools\eposta_gonder.py hazirla --takip HEDEF_takip.xlsx
+python tools\eposta_gonder.py onizle --takip HEDEF_takip.xlsx --sablon sablon.txt
+python tools\eposta_gonder.py deneme --takip HEDEF_takip.xlsx --sablon sablon.txt --alici ad@ozmenworks.com
+python tools\eposta_gonder.py gonder --takip HEDEF_takip.xlsx --sablon sablon.txt --ulke TR
+```
+
+1. `yeni-takip` müşteri dosyası aracının yazdığı listeden yeni bir takip dosyası yazar (yalnız e-postası olan firmalar). Eski bir takip dosyası için `hazirla` yeterlidir: eksik "Hitap adı" ve "Gönderim sonucu" sütunlarını ekler ve hitap adlarını doldurur.
+2. Hitap adlarını Excel'de kontrol edip düzeltin; "Merhaba Morex ekibi," gibi okunmalı.
+3. `onizle` ilk e-postaları `HEDEF_takip_onizleme.txt` dosyasına yazar ve kaç firmanın neden atlandığını gösterir. Hiçbir şey göndermez.
+4. `deneme` ilk e-postayı, konusunun başına "[DENEME]" ekleyerek yalnız size gönderir. Gelen kutusunu ve istenmeyen klasörünü kontrol edin.
+5. `gonder` firmalara gönderir. Pencereyi kapatmayın; Ctrl+C ile durdurabilirsiniz.
+
+Yanıtları ve geri dönen e-postaları takip dosyasının Yanıt ve Not sütunlarına siz işleyin. "İstemiyorum" diyen firmaları ret listesine ekleyin.
