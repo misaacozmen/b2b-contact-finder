@@ -69,6 +69,14 @@ FIRST_NAMES = frozenset({
     "sinan", "sinem", "songul", "suat", "sukru", "suleyman", "taner", "tamer", "tarik", "tolga", "tuba",
     "tugba", "tulay", "tuncay", "turgay", "ufuk", "ugur", "umit", "volkan", "yakup", "yasemin", "yasin",
     "yavuz", "yeliz", "yunus", "yusuf", "zafer", "zehra", "zeki", "zeynep",
+    # Turkish (Talimat 49); names that are also everyday words are left out
+    "alparslan", "anil", "asli", "aslihan", "atilla", "ayca", "aysenur", "bekir", "beril", "beyza", "bugra",
+    "burcin", "cagla", "cagri", "cahit", "celal", "cenk", "ecem", "emrah", "ercan", "ergun", "erol",
+    "ertan", "ertugrul", "fahri", "feyza", "fuat", "gulcan", "gulsah", "hayri", "ilkay", "kamil", "kazim",
+    "koray", "korhan", "melis", "mehtap", "muge", "nalan", "neslihan", "nihan", "nilay", "nuray", "nurcan",
+    "nurhan", "nursel", "ozcan", "ozden", "ozer", "ozkan", "oznur", "pelin", "rabia", "rukiye", "sadik",
+    "seckin", "selda", "serhat", "sezgin", "soner", "sumeyye", "tayfun", "tugce", "tugrul", "utku", "vedat",
+    "yalcin", "yasar", "yesim", "yigit", "zerrin", "zuhal",
     # Other common first names in European fair lists
     "alessandro", "alex", "alexander", "alexandra", "andrea", "andreas", "andrei", "anton", "antonio",
     "carlos", "christian", "christoph", "daniel", "david", "dmitry", "elena", "eric", "eva", "francesco",

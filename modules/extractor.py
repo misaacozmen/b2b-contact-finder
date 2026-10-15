@@ -11,6 +11,11 @@ from modules import evidence_ledger, network_guard, redaction, scorer
 
 
 EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+# A page word written straight before a generic mailbox, with the space lost.
+GLUED_LABEL_RE = re.compile(
+    r"(?:adresse|adres|address|e-?mail|e-?posta|mailto|mail|courriel)"
+    r"(info|hello|contact|kontakt|iletisim|bilgi|satis|sales|office|biuro|hallo)"
+)
 PHONE_RE = re.compile(
     r"(?:(?:\+|00)\d{1,3}[\s().-]*)?(?:\(?0?\d{3}\)?[\s().-]*)?\d{3}[\s().-]*\d{2,4}[\s().-]*\d{2,4}"
 )
@@ -402,6 +407,13 @@ def _normalize_obfuscated_email_text(html_text: str) -> str:
     return text
 
 
+def _strip_glued_label(email: str) -> str:
+    """Drop a label word glued to a generic mailbox (``adressehello@`` from "l'adresse hello@")."""
+    local, _, domain = email.rpartition("@")
+    match = GLUED_LABEL_RE.fullmatch(local)
+    return f"{match.group(1)}@{domain}" if match else email
+
+
 def _is_placeholder_email(value: str) -> bool:
     local, domain = value.rsplit("@", 1)
     registrable_label = domain.split(".", 1)[0]
@@ -434,8 +446,10 @@ def extract_emails(html_text: str) -> list[str]:
     email_source = _normalize_obfuscated_email_text(
         " ".join([text, *mailto_values, *cfemail_values, *structured_values])
     )
+    # Turkish capitals (İnfo@) would otherwise cut the address to "nfo@".
+    email_source = email_source.replace("İ", "I").replace("ı", "i").replace("\u0307", "")
     emails = {
-        email.lower().strip(".,;:()[]{}<>")
+        _strip_glued_label(email.lower().strip(".,;:()[]{}<>"))
         for email in EMAIL_RE.findall(email_source)
     }
     typo_suffixes = {

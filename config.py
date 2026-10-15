@@ -972,9 +972,9 @@ METADATA_CONTEXTS = {
 }
 
 FOREIGN_COUNTRY_TLDS = [
-    "ae", "at", "au", "be", "bg", "br", "ca", "ch", "cn", "cz", "de", "dk", "es",
-    "fi", "fr", "gr", "hu", "ie", "il", "in", "ir", "it", "jp", "kr", "nl", "no",
-    "pl", "pt", "qa", "ro", "ru", "sa", "se", "sg", "sk", "uk", "us",
+    "ae", "ar", "at", "au", "be", "bg", "br", "ca", "ch", "cn", "cz", "de", "dk", "es",
+    "fi", "fr", "gr", "hu", "ie", "il", "in", "ir", "it", "jp", "kr", "mx", "nl", "no", "nz",
+    "pl", "pt", "qa", "ro", "ru", "sa", "se", "sg", "sk", "ua", "uk", "us", "za",
 ]
 
 MIN_DISTINCTIVE_DOMAIN_HIT_RATIO = 0.5

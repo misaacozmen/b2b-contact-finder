@@ -33,7 +33,7 @@ def log_file(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("name, country, expected", [
     ("ORNEK REKLAM ORGANİZASYON SANAYİ VE TİCARET LİMİTED ŞİRKETİ", "TR", "Ornek Reklam Organizasyon"),
-    ("ALFA ORNEK GIDA SAN. VE TİC. A.Ş.", "TR", "Alfa Ornek Gida"),
+    ("ALFA ORNEK GIDA SAN. VE TİC. A.Ş.", "TR", "Alfa Ornek Gıda"),
     ("Delta Ornek Ltd. Şti.", "TR", "Delta Ornek"),
     ("İNCİ ORNEK MİMARLIK", "TR", "İnci Ornek Mimarlık"),
     ("AKYA ORNEK HIZMETLERI IC VE DIS TIC.LTD.STI.", "TR", "Akya Ornek Hizmetleri"),
@@ -79,7 +79,7 @@ def test_older_tracker_gets_the_tool_columns_and_greetings(tmp_path):
     sheet = load_workbook(path).active
     header = [cell.value for cell in sheet[1]]
     assert header[-2:] == ["Hitap adı", "Gönderim sonucu"]
-    assert sheet.cell(row=2, column=9).value == "Alfa Ornek Gida"
+    assert sheet.cell(row=2, column=9).value == "Alfa Ornek Gıda"
 
 
 def test_which_firms_may_get_an_e_mail(tmp_path):
@@ -187,7 +187,7 @@ def test_sending_marks_the_workbook_and_the_log_and_respects_the_daily_limit(tmp
     assert [message["To"] for message in server.sent] == [
         "info@alfa-ornek.com.tr", "info@zeta-ornek.com.tr", "info@theta-ornek.com.tr",
     ]
-    assert server.sent[0].get_content().startswith("Merhaba Alfa Ornek Gida ekibi,")
+    assert server.sent[0].get_content().startswith("Merhaba Alfa Ornek Gıda ekibi,")
     assert server.logins[0] == ("satis@ornek-gonderen.example", "synthetic-password")
     sheet = load_workbook(path).active
     columns = {cell.value: cell.column for cell in sheet[1]}
@@ -286,7 +286,7 @@ def test_preview_command_writes_the_e_mails_and_sends_nothing(tmp_path, server, 
     template.write_text(TEMPLATE, encoding="utf-8")
     assert eposta_gonder.main(["onizle", "--takip", str(path), "--sablon", str(template), "--adet", "2"]) == 0
     text = (tmp_path / "takip_onizleme.txt").read_text(encoding="utf-8")
-    assert "Kime: info@alfa-ornek.com.tr" in text and "Merhaba Alfa Ornek Gida ekibi," in text
+    assert "Kime: info@alfa-ornek.com.tr" in text and "Merhaba Alfa Ornek Gıda ekibi," in text
     assert "Gönderilebilecek firma: 4" in capsys.readouterr().out
     assert server.sent == []
 

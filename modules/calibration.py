@@ -147,6 +147,9 @@ def rule_accepts(features: dict, firm_brand_prefix_top3: int, rule: dict) -> boo
         return False
     if scorer.is_excluded_domain(domain):
         return False
+    # A site under another country's domain is not admitted without a reference (Talimat 49).
+    if scorer.is_foreign_country_domain(domain):
+        return False
     try:
         if int(features.get("brand_prefix_len")) < int(rule["L"]):
             return False

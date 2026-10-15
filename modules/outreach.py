@@ -48,6 +48,27 @@ SALUTATION_STOP = frozenset({
     "imalat", "ic", "dis", "plc", "llp", "inc", "gmbh", "co", "company", "sp", "z", "o", "oo", "spolka", "sa",
     "srl", "bv",
 })
+# A site title often follows the firm name after a separator ("Ornek Catering: Fuar İkramı").
+TITLE_CUT_RE = re.compile(r"\s+[-–—|]\s+|[:|,(]")
+DOMAIN_TOKEN_RE = re.compile(r"([a-z0-9-]+)(?:\.(?:com|net|org|info|biz|gen|web|co|online|shop|store|tr|uk|pl))+")
+# Service and city words glued to a brand in a site name (Ornekorganizasyon).
+GLUED_WORDS = {
+    "organizasyon": "Organizasyon", "nakliyat": "Nakliyat", "lojistik": "Lojistik", "logistics": "Logistics",
+    "catering": "Catering", "yemek": "Yemek", "produksiyon": "Prodüksiyon", "production": "Production",
+    "medya": "Medya", "media": "Media", "reklam": "Reklam", "promosyon": "Promosyon", "matbaa": "Matbaa",
+    "baski": "Baskı", "ajans": "Ajans", "fuarcilik": "Fuarcılık", "kiralama": "Kiralama", "mobilya": "Mobilya",
+    "sandalye": "Sandalye", "sandalyesi": "Sandalyesi", "masa": "Masa", "soba": "Soba", "minder": "Minder",
+    "film": "Film", "films": "Films", "studyo": "Stüdyo", "studio": "Studio", "tanitim": "Tanıtım",
+    "dizayn": "Dizayn", "tasarim": "Tasarım", "turizm": "Turizm", "travel": "Travel", "expo": "Expo",
+    "event": "Event", "etkinlik": "Etkinlik", "hostes": "Hostes", "grup": "Grup", "group": "Group",
+    "kargo": "Kargo", "atolyesi": "Atölyesi", "fotograf": "Fotoğraf", "video": "Video",
+    "istanbul": "İstanbul", "ankara": "Ankara", "izmir": "İzmir", "antalya": "Antalya", "bursa": "Bursa",
+}
+TURKISH_LETTERS = frozenset("İŞĞÇÖÜ")
+# Common Turkish words in plain ASCII capitals whose I is the dotless ı.
+TR_DOTLESS_WORDS = frozenset({
+    "tanitim", "baski", "kalip", "ajansi", "yapi", "yapim", "tasarim", "gida", "hali", "kapi", "altin",
+})
 EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"\[[^\]\n]+\]")
 FIELD_RE = re.compile(r"\{([^{}\n]*)\}")
@@ -62,29 +83,64 @@ def _text(value: object) -> str:
 
 
 def _capital(word: str, country: str) -> str:
-    # A dotted capital İ shows Turkish spelling, where I is the dotless ı;
-    # catalogues often write Turkish words in plain ASCII capitals (HIZMETLERI).
-    if country == "TR" and "İ" in word:
+    # A Turkish letter (İ, Ş, Ğ …) or a known Turkish word shows Turkish spelling, where I is the
+    # dotless ı; catalogues often write Turkish words in plain ASCII capitals (HIZMETLERI).
+    if country == "TR" and (TURKISH_LETTERS & set(word) or legal_form._fold(word) in TR_DOTLESS_WORDS):
         lower = word.replace("I", "ı").replace("İ", "i").lower()
         return ("İ" if lower[:1] == "i" else lower[:1].upper()) + lower[1:]
     return word[:1].upper() + word[1:].lower()
 
 
+def _glued(token: str) -> list[str]:
+    """Split known service and city words off the end of a glued site name."""
+    folded = legal_form._fold(token)
+    if not token.isalpha() or len(token) < 7 or len(folded) != len(token):
+        return [token]
+    for word in sorted(GLUED_WORDS, key=len, reverse=True):
+        if folded.endswith(word) and len(folded) > len(word):
+            return _glued(token[:len(token) - len(word)]) + [GLUED_WORDS[word]]
+    return [token]
+
+
+def _head(word: str) -> str:
+    """The first part of a split site name: a short consonant group is an abbreviation (KLT)."""
+    if len(word) <= 2 or (len(word) == 3 and not re.search(r"[aeiouıöü]", word.casefold())):
+        return word.upper()
+    return word[:1].upper() + word[1:]
+
+
 def salutation(name: str, country: str = "TR") -> str:
     """A short firm name for the greeting: the words before the legal form, at most three."""
+    text = _text(name)
+    head = TITLE_CUT_RE.split(text, maxsplit=1)[0].strip()
+    if legal_form._fold(head):
+        text = head
+    if " " not in text and text.count("-") >= 2:
+        text = text.replace("-", " ")
     words = []
-    for token in str(name or "").split():
+    for token in text.split():
+        token = token.strip(",;")
+        domain = DOMAIN_TOKEN_RE.fullmatch(token.casefold())
+        if domain:
+            token = domain.group(1)
         folded = legal_form._fold(token)
         if not folded:
             continue
         if all(part in SALUTATION_STOP for part in folded.split()):
             break
-        letters = re.sub(r"[^\w]", "", token)
-        if letters.isupper() and len(letters) > 3 and not any(ch.isdigit() for ch in letters):
-            token = _capital(token, country)
-        words.append(token.strip(",;"))
-        if len(words) == 3:
+        # Abbreviated trade words (BİLG.MLZ.VE, PROM.) end the name like a legal form.
+        if "." in token.strip(".") or (token.endswith(".") and len(folded) <= 5):
             break
+        pieces = _glued(token)
+        if len(pieces) > 1 or domain:
+            pieces[0] = _head(pieces[0])
+        for piece in pieces:
+            letters = re.sub(r"[^\w]", "", piece)
+            if letters.isupper() and len(letters) > 3 and not any(ch.isdigit() for ch in letters):
+                piece = _capital(piece, country)
+            words.append(piece)
+            if len(words) == 3:
+                return " ".join(words)
     return " ".join(words) or _text(name)
 
 
