@@ -282,7 +282,25 @@ python tools\eposta_gonder.py gonder --takip HEDEF_takip.xlsx --sablon sablon.tx
 4. `deneme` ilk e-postayı, konusunun başına "[DENEME]" ekleyerek yalnız size gönderir. Gelen kutusunu ve istenmeyen klasörünü kontrol edin.
 5. `gonder` firmalara gönderir. Pencereyi kapatmayın; Ctrl+C ile durdurabilirsiniz.
 
-Yanıtları ve geri dönen e-postaları takip dosyasının Yanıt ve Not sütunlarına siz işleyin. "İstemiyorum" diyen firmaları ret listesine ekleyin.
+**Yanıtlar:** araç Zoho gelen kutusunu ve istenmeyen klasörünü yarım saatte bir okur. E-postalar Zoho'da okunmamış kalır.
+
+- Geri dönen e-posta: takip dosyasında "Gönderim sonucu" sütununa "geri döndü", "Not" sütununa "adres geri döndü" yazılır.
+- Otomatik yanıt (ofis dışında, izin): "Not" sütununa "otomatik yanıt" yazılır.
+- Firmanın yanıtı: "Yanıt" ve "Yanıt tarihi" sütunları dolar ve size bir bildirim e-postası gider. Yanıtı Zoho'dan siz verirsiniz.
+- "İstemiyorum", "listeden çıkarın" gibi bir yanıtta adres ayrıca ret listesine eklenir; bildirim yine gider.
+
+Bir kez kurulum: Zoho Mail ayarlarında IMAP erişimini açın (Ayarlar → Posta Hesapları → IMAP erişimi). Uygulama şifresi gönderimdekiyle aynıdır.
+
+```powershell
+python tools\eposta_gonder.py yanit-ayar --hesap ad@ozmenworks.com --bildirim kendi@adresiniz --klasor TAKIP_KLASORU --sessiz 15:20-17:15
+python tools\eposta_gonder.py yanitlar
+python tools\eposta_gonder.py yanit-zamanla
+```
+
+- `yanit-ayar`: Zoho adresi, bildirimlerin gideceği kendi adresiniz, takip dosyalarının klasörü ve hafta içi kontrol yapılmayacak saatler. Kurulum gününden önceki yanıtlar takip dosyasına işlenir ama bildirim gitmez.
+- `yanitlar`: kontrolü bir kez yapar ve özetini yazar.
+- `yanit-zamanla`: kontrolü Windows'ta her gün 08:00–22:00 arası yarım saatte bir, pencere açmadan çalıştırır. `--kaldir` ile kaldırılır. Her kontrolün özeti `state\eposta_yanit\calisma.log` dosyasına yazılır.
+- Takip dosyası Excel'de açıksa yanıt bir sonraki kontrolde yazılır.
 
 ## 9. Müşteri adayı listesi (hizmet firmaları)
 

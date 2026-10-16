@@ -767,6 +767,19 @@ OUTREACH_MAX_DAILY_LIMIT = 40
 OUTREACH_DELAY_SEC = (90, 240)
 OUTREACH_OFFICE_HOURS = (9, 17)
 OUTREACH_LOG_FILE = STATE_DIR / "eposta_gonderim_kaydi.jsonl"
+# Replies read from the same Zoho mailbox over IMAP, read-only (Talimat 50).
+OUTREACH_IMAP_HOST = "imap.zoho.eu"
+OUTREACH_IMAP_PORT = 993
+REPLY_FOLDERS = ("INBOX", "Spam")
+# A subfolder whose files are made once at set-up: the half-hourly check then only
+# rewrites them, so the test suite's guard on the top level of state stays unchanged.
+REPLY_DIR = STATE_DIR / "eposta_yanit"
+REPLY_LOG_FILE = REPLY_DIR / "yanit_kaydi.jsonl"
+REPLY_STATE_FILE = REPLY_DIR / "durum.json"
+REPLY_SETTINGS_FILE = REPLY_DIR / "ayarlar.json"
+REPLY_RUN_LOG_FILE = REPLY_DIR / "calisma.log"
+REPLY_TASK_NAME = "B2B Yanit Kontrolu"
+REPLY_TASK_EVERY_MIN = 30
 
 SECTOR_GENERIC_WORDS = [
     "demir",

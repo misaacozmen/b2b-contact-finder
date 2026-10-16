@@ -7,6 +7,11 @@ Steps:
     python tools\\eposta_gonder.py deneme --takip HEDEF_takip.xlsx --sablon sablon_TR.txt --alici kendi@adresiniz
     python tools\\eposta_gonder.py gonder --takip HEDEF_takip.xlsx --sablon sablon_TR.txt --ulke TR
 
+Replies (Talimat 50), set up once and then checked every half hour:
+    python tools\\eposta_gonder.py yanit-ayar --hesap ad@firmaniz.com --bildirim kendi@adresiniz --klasor TAKIP_KLASORU --sessiz 15:20-17:15
+    python tools\\eposta_gonder.py yanitlar
+    python tools\\eposta_gonder.py yanit-zamanla
+
 Only "gonder" writes to firms.  The Zoho app password is saved once with
 tools\\api_anahtarlari.py and never printed.
 """
@@ -14,7 +19,7 @@ tools\\api_anahtarlari.py and never printed.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 import sys
 
@@ -24,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
-from modules import country_profile, opt_out, outreach  # noqa: E402
+from modules import country_profile, opt_out, outreach, replies  # noqa: E402
 
 
 def _tracker(path: Path, *, write: bool) -> outreach.Tracker:
@@ -49,6 +54,36 @@ def _status(tracker: outreach.Tracker, template: dict | None, country: str, limi
     if template:
         lines.insert(0, f"Gönderen: {template['sender_name']} <{template['sender_address']}>; konu: {template['subject']}")
     return ready, "\n".join(lines)
+
+
+def _check_replies() -> int:
+    """One reply check; it usually runs from the Windows task, so it also writes the run log."""
+    now = datetime.now()
+    settings = replies.load_settings()
+    if not settings.get("hesap") or not settings.get("klasor"):
+        raise outreach.OutreachError("Önce yanit-ayar komutunu çalıştırın.")
+    if replies.quiet_now(settings.get("sessiz", ""), now):
+        print("Sessiz saat: kontrol yapılmadı.")
+        return 0
+    password = outreach.smtp_password()
+    if not password:
+        raise outreach.OutreachError("Zoho uygulama şifresi kayıtlı değil: tools\\api_anahtarlari.py")
+    start = settings.get("baslangic")
+    try:
+        result = replies.check(
+            account=settings["hesap"], password=password, notify_to=settings.get("bildirim", ""),
+            tracker_dir=Path(settings["klasor"]), notify_since=date.fromisoformat(start) if start else None,
+        )
+    except replies.ReplyError as error:
+        replies.write_run_log(now, f"HATA: {error}")
+        raise outreach.OutreachError(str(error)) from None
+    except Exception as error:  # noqa: BLE001 - the window-less task has no other place to report
+        replies.write_run_log(now, f"HATA: {type(error).__name__}: {error}")
+        raise
+    summary = "; ".join(f"{name} {count}" for name, count in result.items() if count) or "yeni ileti yok"
+    replies.write_run_log(now, summary)
+    print(f"Yanıt kontrolü: {summary}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,9 +112,39 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--adet", type=int, default=5)
         if name == "deneme":
             command.add_argument("--alici", required=True)
+
+    reply_setup = commands.add_parser("yanit-ayar", help="yanıt kontrolünün ayarları (bir kez)")
+    reply_setup.add_argument("--hesap", required=True, help="e-postaların gönderildiği Zoho adresi")
+    reply_setup.add_argument("--bildirim", required=True, help="yanıt bildirimlerinin gideceği kendi adresiniz")
+    reply_setup.add_argument("--klasor", required=True, type=Path, help="takip dosyalarının klasörü")
+    reply_setup.add_argument("--sessiz", default="", help="hafta içi kontrol yapılmayacak saatler, örnek 15:20-17:15")
+    commands.add_parser("yanitlar", help="gelen kutusunu oku, yanıtları işle ve bildir")
+    reply_task = commands.add_parser("yanit-zamanla", help="yanıt kontrolünü Windows'ta yarım saatte bir çalıştır")
+    reply_task.add_argument("--kaldir", action="store_true", help="zamanlanmış görevi kaldır")
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "yanit-ayar":
+            if not args.klasor.is_dir():
+                raise outreach.OutreachError(f"Klasör bulunamadı: {args.klasor}")
+            replies.save_settings({
+                "hesap": args.hesap.strip().casefold(), "bildirim": args.bildirim.strip(),
+                "klasor": str(args.klasor.resolve()), "sessiz": args.sessiz.strip(),
+                "baslangic": date.today().isoformat(),
+            })
+            print(f"Ayarlar kaydedildi: {config.REPLY_SETTINGS_FILE}. Bugünden önceki yanıtlar için bildirim gitmez.")
+            return 0
+        if args.command == "yanitlar":
+            return _check_replies()
+        if args.command == "yanit-zamanla":
+            code, output = replies.schedule_task(remove=args.kaldir)
+            print(output)
+            if code:
+                raise outreach.OutreachError("Windows görevi oluşturulamadı ya da kaldırılamadı.")
+            print("Görev kaldırıldı." if args.kaldir else
+                  f"Görev kuruldu: her gün 08:00-22:00 arası {config.REPLY_TASK_EVERY_MIN} dakikada bir. "
+                  f"Sonuçlar: {config.REPLY_RUN_LOG_FILE}")
+            return 0
         if args.command == "yeni-takip":
             count = outreach.new_tracker(args.takip, outreach.read_customer_list(args.liste), args.ulke)
             print(f"Takip dosyası yazıldı: {args.takip} ({count} firma). Hitap adlarını Excel'de kontrol edin.")
