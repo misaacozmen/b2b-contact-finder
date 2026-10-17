@@ -770,7 +770,7 @@ OUTREACH_LOG_FILE = STATE_DIR / "eposta_gonderim_kaydi.jsonl"
 # Replies read from the same Zoho mailbox over IMAP, read-only (Talimat 50).
 OUTREACH_IMAP_HOST = "imap.zoho.eu"
 OUTREACH_IMAP_PORT = 993
-REPLY_FOLDERS = ("INBOX", "Spam")
+REPLY_FOLDERS = ("INBOX", "Spam", "Notification", "Newsletter")
 # A subfolder whose files are made once at set-up: the half-hourly check then only
 # rewrites them, so the test suite's guard on the top level of state stays unchanged.
 REPLY_DIR = STATE_DIR / "eposta_yanit"
@@ -780,6 +780,20 @@ REPLY_SETTINGS_FILE = REPLY_DIR / "ayarlar.json"
 REPLY_RUN_LOG_FILE = REPLY_DIR / "calisma.log"
 REPLY_TASK_NAME = "B2B Yanit Kontrolu"
 REPLY_TASK_EVERY_MIN = 30
+# Reply drafts and the morning summary (Talimat 51).  Nothing is sent to a firm:
+# each draft waits in the Zoho Drafts folder until the user sends it.
+REPLY_DRAFTS_FOLDER = "Drafts"
+REPLY_SENT_FOLDER = "Sent"
+SALES_DB_FILE = REPLY_DIR / "satis.sqlite3"
+TYPESAFE_API_URL = "https://api.typesafe.ai/v1/systemone"
+TYPESAFE_MODEL = "jev-latest"
+TYPESAFE_TIMEOUT_SEC = 30
+# Below this confidence no draft is written; the reply goes to the user.
+INTENT_MIN_CONFIDENCE = 0.6
+# Price per firm by the number of Turkish exhibitors in the order (None = no upper limit).
+PRICE_TIERS = ((150, 6.0), (400, 5.5), (1000, 5.0), (None, 4.0))
+SAMPLE_SIZE = 20
+SUMMARY_HOUR = 8
 
 SECTOR_GENERIC_WORDS = [
     "demir",

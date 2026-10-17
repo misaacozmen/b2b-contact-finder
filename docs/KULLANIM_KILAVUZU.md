@@ -302,6 +302,26 @@ python tools\eposta_gonder.py yanit-zamanla
 - `yanit-zamanla`: kontrolü Windows'ta her gün 08:00–22:00 arası yarım saatte bir, pencere açmadan çalıştırır. `--kaldir` ile kaldırılır. Her kontrolün özeti `state\eposta_yanit\calisma.log` dosyasına yazılır.
 - Takip dosyası Excel'de açıksa yanıt bir sonraki kontrolde yazılır.
 
+**Yanıt taslakları ve sabah özeti:** firmanın yanıtına uygun cevap taslağı Zoho'nun Taslaklar klasörüne konur; siz okuyup gönderirsiniz. Araç hiçbir firmaya kendisi yazmaz.
+
+- Yanıtın ne istediğini TypeSafe'in Jev modeli belirler (ilgi, fiyat, örnek, sipariş, adres ya da KVKK sorusu, şimdi değil, olumsuz, istemiyor, yanlış kişi). Yanıt modele gönderilmeden önce selamlama ve imza satırları silinir; e-posta adresleri, telefonlar ve web adresleri işaretle değiştirilir.
+- Taslak metinleri sizin şablon dosyanızdan gelir. Fiyat sorusunda fuar kayıtlıysa taslakta Türk katılımcı sayısı ve en çok tutar yer alır; örnek istenmişse rastgele 20 firma eklenir.
+- Sipariş, ödeme ve pazarlık, kayıtlı olmayan fuar ve model emin değilse taslak yazılmaz; yanıt size bildirilir.
+- Taslağı Zoho'dan gönderdiğinizde araç bunu Gönderilmiş klasöründen görür ve yanıtı kapatır.
+- Her sabah 08:00'den sonraki ilk kontrolde size özet gider: bekleyen taslaklar, size kalan yanıtlar, dünkü gönderim ve yanıtlar, bugünkü gönderim hakkı.
+
+```powershell
+python tools\eposta_gonder.py taslak-ayar --yanit-sablon yanit_sablonlari_TR.txt --soguk-sablon sablon_TR.txt --ornek ORNEK.xlsx
+python tools\eposta_gonder.py fuar-ekle --ad "Fuar 2026" --diger "kısa adı; konusu" --turk 120 --liste input\FUAR.xlsx --iletisim teslim\musteri\FUAR.xlsx
+python tools\eposta_gonder.py fuar-ekle --ad "Liste yayımlanmamış Fuar 2026" --durum yok
+python tools\eposta_gonder.py fuarlar
+python tools\eposta_gonder.py ozet
+```
+
+- `taslak-ayar` bir kez çalışır; Jev anahtarı `tools\api_anahtarlari.py` ile kaydedilir. Kurulum gününden önceki yanıtlara taslak yazılmaz.
+- `fuar-ekle` teklif verilebilecek fuarı ekler ya da günceller: Türk katılımcı sayısı, katılımcı listesi ve örneğin seçileceği iletişim dosyası. Listesi yayımlanmamış fuar `--durum yok` ile eklenir; böyle bir fuar sorulunca "liste henüz yayımlanmadı" taslağı yazılır.
+- `ozet` sabah özetinin bugünkü halini ekrana yazar, göndermez.
+
 ## 9. Müşteri adayı listesi (hizmet firmaları)
 
 Katılımcı listelerini satacağımız firmaları (hostes, catering, promosyon ve baskı, fotoğraf ve video, lojistik, mobilya ve ekipman kiralama) `tools\hedef_bul.py` ücretsiz arama motorlarıyla bulur:

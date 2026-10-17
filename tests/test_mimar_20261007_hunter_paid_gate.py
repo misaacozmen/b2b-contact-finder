@@ -57,9 +57,9 @@ def test_key_tool_turns_the_hunter_switch_on_but_keeps_a_switch_turned_off(tmp_p
         api_anahtarlari.configure(input_fn=lambda _: next(replies), secret_fn=lambda _: secret)
         return api_configuration.load_resolver_settings().get("hunter_domain_finder")
 
-    assert run(["h", "h", "e", "h", "h"]) is True
+    assert run(["h", "h", "e", "h", "h", "h"]) is True
     config.RESOLVER_SETTINGS_FILE.write_text(json.dumps({"version": 1, "hunter_domain_finder": False}), encoding="utf-8")
-    assert run(["h", "h", "h", "h", "h"]) is False
-    assert run(["h", "h", "e", "h", "h"]) is True
+    assert run(["h", "h", "h", "h", "h", "h"]) is False
+    assert run(["h", "h", "e", "h", "h", "h"]) is True
     config.RESOLVER_SETTINGS_FILE.unlink()
-    assert run(["h", "h", "h", "h", "h"]) is True
+    assert run(["h", "h", "h", "h", "h", "h"]) is True

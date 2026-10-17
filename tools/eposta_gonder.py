@@ -12,6 +12,12 @@ Replies (Talimat 50), set up once and then checked every half hour:
     python tools\\eposta_gonder.py yanitlar
     python tools\\eposta_gonder.py yanit-zamanla
 
+Reply drafts and the morning summary (Talimat 51), set up once:
+    python tools\\eposta_gonder.py taslak-ayar --yanit-sablon yanit_sablonlari_TR.txt --soguk-sablon sablon_TR.txt --ornek ORNEK.xlsx
+    python tools\\eposta_gonder.py fuar-ekle --ad "Fuar 2026" --turk 120 --iletisim teslim\\musteri\\FUAR.xlsx
+    python tools\\eposta_gonder.py fuarlar
+    python tools\\eposta_gonder.py ozet
+
 Only "gonder" writes to firms.  The Zoho app password is saved once with
 tools\\api_anahtarlari.py and never printed.
 """
@@ -29,7 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
-from modules import country_profile, opt_out, outreach, replies  # noqa: E402
+from modules import country_profile, intent, opt_out, outreach, replies, reply_drafts, sales_db  # noqa: E402
 
 
 def _tracker(path: Path, *, write: bool) -> outreach.Tracker:
@@ -56,6 +62,19 @@ def _status(tracker: outreach.Tracker, template: dict | None, country: str, limi
     return ready, "\n".join(lines)
 
 
+def _drafting(settings: dict) -> reply_drafts.Drafting | None:
+    """Draft settings saved by taslak-ayar; None while drafts are not set up."""
+    if not settings.get("yanit_sablon"):
+        return None
+    cold = outreach.load_template(Path(settings["soguk_sablon"])) if settings.get("soguk_sablon") else None
+    return reply_drafts.Drafting(
+        templates=reply_drafts.load_templates(Path(settings["yanit_sablon"])),
+        sender_name=(cold or {}).get("sender_name", ""), since=date.fromisoformat(settings["taslak_baslangic"]),
+        db_path=config.SALES_DB_FILE, jev_key=intent.api_key(), cold_template=cold,
+        fallback_sample=Path(settings["ornek"]) if settings.get("ornek") else None,
+    )
+
+
 def _check_replies() -> int:
     """One reply check; it usually runs from the Windows task, so it also writes the run log."""
     now = datetime.now()
@@ -73,8 +92,9 @@ def _check_replies() -> int:
         result = replies.check(
             account=settings["hesap"], password=password, notify_to=settings.get("bildirim", ""),
             tracker_dir=Path(settings["klasor"]), notify_since=date.fromisoformat(start) if start else None,
+            drafting=_drafting(settings), now=now,
         )
-    except replies.ReplyError as error:
+    except (replies.ReplyError, reply_drafts.ReplyDraftError) as error:
         replies.write_run_log(now, f"HATA: {error}")
         raise outreach.OutreachError(str(error)) from None
     except Exception as error:  # noqa: BLE001 - the window-less task has no other place to report
@@ -121,9 +141,72 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("yanitlar", help="gelen kutusunu oku, yanıtları işle ve bildir")
     reply_task = commands.add_parser("yanit-zamanla", help="yanıt kontrolünü Windows'ta yarım saatte bir çalıştır")
     reply_task.add_argument("--kaldir", action="store_true", help="zamanlanmış görevi kaldır")
+    draft_setup = commands.add_parser("taslak-ayar", help="yanıt taslakları ve sabah özeti (bir kez)")
+    draft_setup.add_argument("--yanit-sablon", required=True, type=Path, help="yanıt şablonları dosyası")
+    draft_setup.add_argument("--soguk-sablon", required=True, type=Path, help="soğuk e-posta şablonu (gönderen adı için)")
+    draft_setup.add_argument("--ornek", type=Path, help="fuar adı verilmeden örnek isteyene eklenecek hazır örnek dosyası")
+    fair = commands.add_parser("fuar-ekle", help="teklif verilebilecek fuarı ekle ya da güncelle")
+    fair.add_argument("--ad", required=True)
+    fair.add_argument("--diger", default="", help="fuarın diğer adları, noktalı virgülle")
+    fair.add_argument("--turk", type=int, default=0, help="fuardaki Türk katılımcı sayısı")
+    fair.add_argument("--liste", type=Path, help="katılımcı listesi (girdi dosyası)")
+    fair.add_argument("--iletisim", type=Path, help="iletişim bilgili müşteri dosyası (örnek buradan seçilir)")
+    fair.add_argument("--durum", choices=sales_db.FAIR_STATES, default="hazir", help="hazir: liste var; yok: yayımlanmadı")
+    commands.add_parser("fuarlar", help="kayıtlı fuarları göster")
+    commands.add_parser("ozet", help="sabah özetinin bugünkü halini ekrana yaz (göndermez)")
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "taslak-ayar":
+            settings = replies.load_settings()
+            if not settings.get("hesap"):
+                raise outreach.OutreachError("Önce yanit-ayar komutunu çalıştırın.")
+            reply_drafts.load_templates(args.yanit_sablon)
+            outreach.load_template(args.soguk_sablon)
+            if args.ornek and not args.ornek.is_file():
+                raise outreach.OutreachError(f"Örnek dosyası bulunamadı: {args.ornek}")
+            sales_db.create(config.SALES_DB_FILE)
+            replies.save_settings({
+                **settings, "yanit_sablon": str(args.yanit_sablon.resolve()),
+                "soguk_sablon": str(args.soguk_sablon.resolve()),
+                "ornek": str(args.ornek.resolve()) if args.ornek else "", "taslak_baslangic": date.today().isoformat(),
+            })
+            key = "kayıtlı" if intent.api_key() else "kayıtlı değil (tools\\api_anahtarlari.py)"
+            print(f"Taslak ayarları kaydedildi; veritabanı: {config.SALES_DB_FILE}. Jev anahtarı {key}. "
+                  "Bugünden önceki yanıtlara taslak yazılmaz.")
+            return 0
+        if args.command in {"fuar-ekle", "fuarlar", "ozet"}:
+            if not config.SALES_DB_FILE.is_file():
+                raise outreach.OutreachError("Önce taslak-ayar komutunu çalıştırın.")
+            connection = sales_db.connect(config.SALES_DB_FILE)
+            try:
+                if args.command == "fuar-ekle":
+                    for path in (args.liste, args.iletisim):
+                        if path and not path.is_file():
+                            raise outreach.OutreachError(f"Dosya bulunamadı: {path}")
+                    sales_db.save_fair(
+                        connection, ad=args.ad.strip(), diger_adlar=args.diger.strip(), turk_firma=args.turk,
+                        liste_dosyasi=str(args.liste.resolve()) if args.liste else "",
+                        iletisim_dosyasi=str(args.iletisim.resolve()) if args.iletisim else "", durum=args.durum,
+                    )
+                    print(f"Fuar kaydedildi: {args.ad.strip()}")
+                    return 0
+                if args.command == "fuarlar":
+                    for row in sales_db.fairs(connection):
+                        price = reply_drafts.quote(row)
+                        print(f"{row['id']}. {row['ad']} | durum {row['durum']} | Türk firma {row['turk_firma']} | "
+                              f"en çok {reply_drafts.money(price['en_cok'])} TL | diğer adlar: {row['diger_adlar'] or '-'}")
+                    return 0
+                settings = replies.load_settings()
+                log = outreach.load_log()
+                message = replies.summary_message(
+                    connection, today=date.today(), log=log, tracker_dir=Path(settings["klasor"]),
+                    account=settings["hesap"], to=settings.get("bildirim", ""),
+                )
+                print(message.get_content())
+                return 0
+            finally:
+                connection.close()
         if args.command == "yanit-ayar":
             if not args.klasor.is_dir():
                 raise outreach.OutreachError(f"Klasör bulunamadı: {args.klasor}")

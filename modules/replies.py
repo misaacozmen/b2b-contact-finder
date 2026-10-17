@@ -15,7 +15,7 @@ as found in the send log and the tracking workbooks.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import email
 from email import policy
 from email.message import EmailMessage
@@ -27,9 +27,11 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
+import time
 
 import config
-from modules import opt_out, outreach, scorer
+from modules import intent, opt_out, outreach, reply_drafts, sales_db, scorer
 
 
 BOUNCE = "geri döndü"
@@ -396,96 +398,238 @@ def add_opt_outs(entries: list[dict]) -> int:
     return len(added)
 
 
-def notice(entry: dict, *, account: str, to: str) -> EmailMessage:
+def notice(entry: dict, *, account: str, to: str, outcome: dict | None = None) -> EmailMessage:
+    """A short notice of a reply; with drafts on, it also says what the reply wants and where the draft is."""
     message = EmailMessage()
     company = entry.get("company") or entry["from"]
     first = "İstemiyor (ret listesine eklendi)" if entry["kind"] == OPT_OUT else "Yanıt geldi"
-    message["From"] = formataddr(("Yanıt bildirimi", account))
-    message["To"] = to
-    message["Subject"] = f"{first}: {company}"
-    message.set_content("\n".join([
+    lines = [
         f"Firma: {company}",
         f"Kimden: {entry['from']}",
         f"Konu: {entry.get('subject', '')}",
         f"Tarih: {entry.get('received', entry['date'])}",
         f"Takip dosyası: {entry.get('tracker') or '-'}",
-        "",
-        (entry.get("text") or "")[:NOTICE_CHARS] or "(metin yok)",
-        "",
-        "Yanıtı Zoho'dan siz verin. Bu e-posta otomatik bildirimdir.",
+    ]
+    last = "Yanıtı Zoho'dan siz verin. Bu e-posta otomatik bildirimdir."
+    if outcome:
+        label = reply_drafts.INTENT_LABELS.get(outcome["niyet"], outcome["niyet"] or "belirlenemedi")
+        lines.append(f"Niyet: {label}")
+        if outcome["sonuc"] == sales_db.DRAFT:
+            first = f"Taslak hazır ({label})"
+            last = "Taslak Zoho'da Taslaklar klasöründe; okuyup gönderin. Bu e-posta otomatik bildirimdir."
+        elif outcome["sonuc"] == sales_db.USER:
+            first = f"Size kalan yanıt ({outcome['neden']})"
+            last = "Taslak yazılmadı; yanıtı Zoho'dan siz verin. Bu e-posta otomatik bildirimdir."
+    message["From"] = formataddr(("Yanıt bildirimi", account))
+    message["To"] = to
+    message["Subject"] = f"{first}: {company}"
+    message.set_content("\n".join([
+        *lines, "", (entry.get("text") or "")[:NOTICE_CHARS] or "(metin yok)", "", last,
     ]) + "\n")
+    return message
+
+
+# --- drafts, answered replies and the morning summary (Talimat 51) ---------------------------------------
+
+def _draft_for(entry: dict, imap, connection, drafting: reply_drafts.Drafting, account: str, result: dict) -> None:
+    """Decide what one reply wants, put a draft in Zoho when a template fits, and record the outcome."""
+    fairs = sales_db.fairs(connection)
+    decision = None
+    if entry["kind"] != OPT_OUT:
+        try:
+            decision = intent.decide(intent.anonymize(entry.get("text", "")), fairs, key=drafting.jev_key,
+                                     opener=drafting.opener)
+        except intent.IntentError as error:
+            result["niyet hatası"] += 1
+            write_run_log(datetime.now(), f"HATA: {error}")
+    message, template, reason = reply_drafts.build(entry, decision, fairs, drafting=drafting, account=account)
+    niyet = "istemiyor" if entry["kind"] == OPT_OUT else (decision.niyet if decision else "")
+    if message is not None:
+        try:
+            status, _data = imap.append(f'"{config.REPLY_DRAFTS_FOLDER}"', r"(\Draft \Seen)",
+                                        imaplib.Time2Internaldate(time.time()), message.as_bytes())
+        except (imaplib.IMAP4.error, OSError):
+            status = "NO"
+        if status != "OK":
+            message, template, reason = None, "", "taslak Zoho'ya yazılamadı"
+    sonuc = sales_db.DRAFT if message is not None else (
+        sales_db.CLOSED if niyet == "olumsuz" and decision and decision.guven >= config.INTENT_MIN_CONFIDENCE
+        else sales_db.USER
+    )
+    result["taslak" if sonuc == sales_db.DRAFT else "size kalan"] += 1
+    sales_db.save_reply(connection, entry, niyet=niyet, guven=decision.guven if decision else None,
+                        fuar=decision.fuar if decision else "", sonuc=sonuc, neden=template or reason)
+    stage = {"istemiyor": "istemiyor", "olumsuz": "kapandı", "simdi_degil": "şimdi değil"}.get(niyet, "yanıt geldi")
+    sales_db.set_stage(connection, eposta=entry["email"], firma=entry.get("company", ""), takip=entry.get("tracker", ""),
+                       asama=stage, sonraki=reply_drafts.next_contact(decision, date.fromisoformat(entry["date"])))
+
+
+def _mark_answered(imap, connection, state: dict, since: date) -> int:
+    """Close the replies the user answered from Zoho (seen in the Sent folder)."""
+    closed = 0
+    for _key, _folder, raw in fetch_new(imap, (config.REPLY_SENT_FOLDER,), state, since):
+        message = email.message_from_bytes(raw, policy=policy.default)
+        ids = set(re.findall(r"<[^<>]+>", f"{message.get('In-Reply-To', '')} {message.get('References', '')}"))
+        try:
+            sent = parsedate_to_datetime(message.get("Date")).astimezone()
+        except (TypeError, ValueError, IndexError):
+            sent = datetime.now().astimezone()
+        closed += sales_db.mark_answered(connection, message_ids=ids, addresses=set(_addresses(message.get("To", ""))),
+                                         sent=sent)
+    return closed
+
+
+def _ready_counts(tracker_dir: Path, log: list[dict]) -> dict[str, int]:
+    counts = {}
+    entries = opt_out.load(config.OPT_OUT_FILE)
+    for path in sorted(Path(tracker_dir).glob("*_takip.xlsx")):
+        try:
+            ready, _reasons = outreach.next_firms(outreach.Tracker(path), opt_out_entries=entries, log=log)
+        except Exception:  # noqa: BLE001 - an unreadable workbook is left out of the summary
+            continue
+        counts[path.stem.removesuffix("_takip")] = len(ready)
+    return counts
+
+
+def summary_message(connection, *, today: date, log: list[dict], tracker_dir: Path, account: str, to: str) -> EmailMessage:
+    yesterday = (today - timedelta(days=1)).isoformat()
+    sent_yesterday: dict[str, int] = {}
+    for entry in log:
+        if entry.get("date") == yesterday and entry.get("result") == outreach.SENT:
+            name = str(entry.get("tracker") or "elle").removesuffix(".xlsx").removesuffix("_takip")
+            sent_yesterday[name] = sent_yesterday.get(name, 0) + 1
+    replies_yesterday: dict[str, int] = {}
+    for entry in load_reply_log():
+        if entry.get("date") != yesterday:
+            continue
+        row = sales_db.reply(connection, entry["key"]) if entry["kind"] in NOTIFY_KINDS else None
+        label = reply_drafts.INTENT_LABELS.get(row["niyet"], entry["kind"]) if row and row["niyet"] else entry["kind"]
+        replies_yesterday[label] = replies_yesterday.get(label, 0) + 1
+    answered = connection.execute("SELECT COUNT(*) FROM yanitlar WHERE yanitlandi = ?", (yesterday,)).fetchone()[0]
+    try:
+        run_lines = config.REPLY_RUN_LOG_FILE.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        run_lines = []
+    problems = sorted({line[17:] for line in run_lines if line.startswith(yesterday) and "HATA" in line})
+    subject, body = reply_drafts.summary(
+        today=today, open_rows=sales_db.open_replies(connection), sent_yesterday=sent_yesterday,
+        replies_yesterday=replies_yesterday, answered_yesterday=answered, ready=_ready_counts(tracker_dir, log),
+        room=outreach.daily_room(log, config.OUTREACH_DAILY_LIMIT, today), problems=problems,
+    )
+    message = EmailMessage()
+    message["From"] = formataddr(("Günlük özet", account))
+    message["To"] = to
+    message["Subject"] = subject
+    message.set_content(body)
     return message
 
 
 # --- one check ----------------------------------------------------------------------------------
 
 def check(*, account: str, password: str, notify_to: str, tracker_dir: Path, notify_since: date | None = None,
-          imap_factory=None, smtp_factory=None) -> dict:
+          imap_factory=None, smtp_factory=None, drafting: reply_drafts.Drafting | None = None,
+          now: datetime | None = None) -> dict:
     """Read the new messages, record them, update the workbooks and the opt-out list, send notices.
 
-    Replies received before ``notify_since`` (the day the checks were set up) get no notice.
+    Replies received before ``notify_since`` (the day the checks were set up) get no notice.  With
+    ``drafting``, each new reply from ``drafting.since`` on also gets a decision and, when a template
+    fits, a draft in Zoho; answers sent from Zoho close the reply, and the first check from 08:00
+    sends the morning summary.
     """
+    now = now or datetime.now()
     account = account.casefold()
     log = outreach.load_log()
     sent = [entry for entry in log if entry.get("result") != outreach.TEST]
-    result = {"yeni": 0, BOUNCE: 0, AUTO: 0, OPT_OUT: 0, REPLY: 0, "bildirim": 0, "bildirim hatası": 0}
+    result = {"yeni": 0, BOUNCE: 0, AUTO: 0, OPT_OUT: 0, REPLY: 0, "bildirim": 0, "bildirim hatası": 0,
+              "taslak": 0, "size kalan": 0, "niyet hatası": 0, "yanıtlanan": 0, "özet": 0, "özet hatası": 0}
     state = _load_state()
     known = {entry["key"] for entry in load_reply_log()}
-    if sent:
-        since = min(date.fromisoformat(entry["date"]) for entry in sent)
-        index = sent_index(log, tracker_dir)
-        factory = imap_factory or (lambda: imaplib.IMAP4_SSL(config.OUTREACH_IMAP_HOST, config.OUTREACH_IMAP_PORT))
-        try:
-            imap = factory()
-            imap.login(account, password)
-        except imaplib.IMAP4.error:
-            raise ReplyError("Zoho IMAP girişi reddedildi: Zoho Mail ayarlarında IMAP erişimini açın ve uygulama şifresini kontrol edin.") from None
-        except OSError as error:
-            raise ReplyError(f"Zoho'ya bağlanılamadı ({type(error).__name__}).") from None
-        try:
-            messages = fetch_new(imap, config.REPLY_FOLDERS, state, since)
-        finally:
+    connection = sales_db.connect(drafting.db_path) if drafting else None
+    try:
+        if sent:
+            since = min(date.fromisoformat(entry["date"]) for entry in sent)
+            index = sent_index(log, tracker_dir)
+            factory = imap_factory or (lambda: imaplib.IMAP4_SSL(config.OUTREACH_IMAP_HOST, config.OUTREACH_IMAP_PORT))
             try:
-                imap.logout()
-            except (imaplib.IMAP4.error, OSError):
-                pass
-        for key, folder, raw in messages:
-            result["yeni"] += 1
-            if key in known:
-                continue
-            message = email.message_from_bytes(raw, policy=policy.default)
-            found = classify(message, index, account)
-            if not found:
-                continue
+                imap = factory()
+                imap.login(account, password)
+            except imaplib.IMAP4.error:
+                raise ReplyError("Zoho IMAP girişi reddedildi: Zoho Mail ayarlarında IMAP erişimini açın ve uygulama şifresini kontrol edin.") from None
+            except OSError as error:
+                raise ReplyError(f"Zoho'ya bağlanılamadı ({type(error).__name__}).") from None
             try:
-                received = parsedate_to_datetime(message.get("Date")).astimezone()
-            except (TypeError, ValueError, IndexError):
-                received = datetime.now().astimezone()
-            entry = {
-                "key": key, "folder": folder, "date": received.date().isoformat(),
-                "received": received.isoformat(timespec="minutes"), "subject": str(message.get("Subject", "")), **found,
-            }
-            _append_reply_log(entry)
-            known.add(key)
-            result[entry["kind"]] += 1
-    _save_state(state)
-    entries = load_reply_log()
-    result.update(sync_trackers(entries, tracker_dir))
-    result["ret listesine eklenen"] = add_opt_outs(entries)
-    notified = set(state["notified"])
-    for entry in entries:
-        if entry["kind"] not in NOTIFY_KINDS or entry["key"] in notified or not notify_to:
-            continue
-        if notify_since and date.fromisoformat(entry["date"]) < notify_since:
-            continue
-        try:
-            outreach.send_one(notice(entry, account=account, to=notify_to), address=account, password=password,
-                              smtp_factory=smtp_factory)
-        except Exception:  # noqa: BLE001 - the notice is sent again on the next run
-            result["bildirim hatası"] += 1
-            continue
-        notified.add(entry["key"])
-        result["bildirim"] += 1
-        state["notified"] = sorted(notified)
+                new_entries = []
+                for key, folder, raw in fetch_new(imap, config.REPLY_FOLDERS, state, since):
+                    result["yeni"] += 1
+                    if key in known:
+                        continue
+                    message = email.message_from_bytes(raw, policy=policy.default)
+                    found = classify(message, index, account)
+                    if not found:
+                        continue
+                    try:
+                        received = parsedate_to_datetime(message.get("Date")).astimezone()
+                    except (TypeError, ValueError, IndexError):
+                        received = datetime.now().astimezone()
+                    entry = {
+                        "key": key, "folder": folder, "date": received.date().isoformat(),
+                        "received": received.isoformat(timespec="minutes"), "subject": str(message.get("Subject", "")),
+                        "message_id": str(message.get("Message-ID", "")).strip(),
+                        "references": " ".join(str(message.get("References", "")).split()), **found,
+                    }
+                    _append_reply_log(entry)
+                    known.add(key)
+                    result[entry["kind"]] += 1
+                    new_entries.append(entry)
+                if drafting:
+                    with tempfile.TemporaryDirectory() as folder:
+                        drafting.attachments_dir = Path(folder)
+                        for entry in new_entries:
+                            if (entry["kind"] in NOTIFY_KINDS and date.fromisoformat(entry["date"]) >= drafting.since
+                                    and not sales_db.has_reply(connection, entry["key"])):
+                                _draft_for(entry, imap, connection, drafting, account, result)
+                    result["yanıtlanan"] = _mark_answered(imap, connection, state, since)
+            finally:
+                try:
+                    imap.logout()
+                except (imaplib.IMAP4.error, OSError):
+                    pass
         _save_state(state)
+        entries = load_reply_log()
+        result.update(sync_trackers(entries, tracker_dir))
+        result["ret listesine eklenen"] = add_opt_outs(entries)
+        notified = set(state["notified"])
+        for entry in entries:
+            if entry["kind"] not in NOTIFY_KINDS or entry["key"] in notified or not notify_to:
+                continue
+            if notify_since and date.fromisoformat(entry["date"]) < notify_since:
+                continue
+            outcome = sales_db.reply(connection, entry["key"]) if connection else None
+            try:
+                outreach.send_one(notice(entry, account=account, to=notify_to, outcome=outcome), address=account,
+                                  password=password, smtp_factory=smtp_factory)
+            except Exception:  # noqa: BLE001 - the notice is sent again on the next run
+                result["bildirim hatası"] += 1
+                continue
+            notified.add(entry["key"])
+            result["bildirim"] += 1
+            state["notified"] = sorted(notified)
+            _save_state(state)
+        today = now.date()
+        if drafting and notify_to and now.hour >= config.SUMMARY_HOUR and state.get("ozet") != today.isoformat():
+            try:
+                outreach.send_one(
+                    summary_message(connection, today=today, log=log, tracker_dir=tracker_dir, account=account,
+                                     to=notify_to),
+                    address=account, password=password, smtp_factory=smtp_factory,
+                )
+            except Exception:  # noqa: BLE001 - the summary is tried again on the next run
+                result["özet hatası"] += 1
+            else:
+                state["ozet"] = today.isoformat()
+                _save_state(state)
+                result["özet"] = 1
+    finally:
+        if connection is not None:
+            connection.close()
     return result
