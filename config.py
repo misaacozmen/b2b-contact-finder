@@ -269,6 +269,19 @@ ENABLE_PAID_CALIBRATED_ACCEPTANCE = os.getenv("ENABLE_PAID_CALIBRATED_ACCEPTANCE
 # Second PAID rule: one Google hit at rank 1-2 is enough (Talimat 20). Fixed on
 # the Talimat 19 measurement; off until an independent fair passes the test.
 ENABLE_PAID_SECOND_RULE = os.getenv("ENABLE_PAID_SECOND_RULE", "0") == "1"
+# Jev as a second judge of the FREE Stage A website (Talimat 52): a pick Jev is
+# sure belongs to another company or a directory goes to review, and a firm
+# without a pick gets the candidate Jev is sure is its own site.  Fixed on the
+# Bioexpo, Boat Show and Data Center truth sets and checked on WoodTech and
+# PETZOO; do not tune it here.  The key comes only from the saved key store, and
+# the check runs only when the run names the fair and its subject (--fuar).
+ENABLE_JEV_SITE_CHECK = os.getenv("ENABLE_JEV_SITE_CHECK", "1") == "1"
+TYPESAFE_API_KEY = ""
+JEV_SITE_FAIR = ""
+JEV_SITE_REJECT_CONFIDENCE = 0.8
+JEV_SITE_ACCEPT_CONFIDENCE = 0.9
+JEV_SITE_MIN_WORDS = 40
+JEV_SITE_MAX_CANDIDATES = 5
 PAID_SECOND_RULE_ID = "L3_R2_H1_Ccontact_N0_U0"
 PAID_SECOND_RULE = {"L": 3, "R": 2, "H": 1, "C": "contact", "N": 0, "U": 0}
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "ddgs").lower()

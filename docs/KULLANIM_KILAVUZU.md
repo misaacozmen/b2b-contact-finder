@@ -66,6 +66,7 @@ python tools\liste_cek.py --url "https://fuar-sitesi/katilimcilar" --name "FUAR"
 
 1. Listeyi çekin ya da hazır Excel'i **Seç…** ile seçin. Dosya `input` klasöründe olmak zorunda değildir. Panel firma sayısını ve hangi sütunların dolu olduğunu gösterir; sorun varsa kırmızı uyarı çıkar.
 2. **Firmaların ülkesini** seçin: **Türkiye**, **Polonya** ya da **Birleşik Krallık**. Seçim aramaların dilini, telefon biçimini ve karar kurallarını ayarlar.
+   - Türkiye fuarlarında **fuarın adını, şehrini ve konusunu** da yazın. Örnek: `Bioexpo Eurasia 2026, İstanbul: biyoteknoloji ve laboratuvar fuarı`. Bu bilgiyle Jev, aramanın bulduğu siteleri ikinci kez kontrol eder (aşağıda "Jev site kontrolü"). Alan boşsa Jev çalışmaz.
 3. **Koşu türünü** seçin:
    - **Ücretsiz (önerilen)**
    - **Ücretli: Places + Hunter**: eksik telefon ve e-posta için
@@ -84,7 +85,13 @@ Panel aynı anda ikinci bir koşu başlatmaz. Koşu sürerken bilgisayar uykuya 
 python main.py --input input\FUAR.xlsx --no-allow-paid --finalize-without-paid --non-interactive
 ```
 
-Polonya fuarında sona `--country PL`, İngiltere fuarında `--country GB` ekleyin.
+Polonya fuarında sona `--country PL`, İngiltere fuarında `--country GB` ekleyin. Türkiye fuarında Jev site kontrolü için sona `--fuar "Fuarın adı, şehri: konusu"` ekleyin.
+
+**Jev site kontrolü:** Jev (TypeSafe) her firmanın bulunan sitesine ve sitesi bulunamayan firmaların aday sitelerine bakar:
+
+- Seçilen sitenin başka bir firmaya ya da bir rehber sitesine ait olduğundan eminse siteyi ve o siteden gelen e-posta ile telefonu çıkarır. Firma kontrol listesine düşer; `reason` sütununda `jev_site_rejected:<alan adı>` yazar.
+- Sitesi bulunamayan firmada adaylardan birinin firmanın kendi sitesi olduğundan eminse onu seçer. Web kaynağı sütununda "Arama (Jev)" yazar.
+- Jev'e sitelerin başlığı, açıklaması ve ilk birkaç yüz kelimesi gider; kişi bilgisi gitmez. Anahtar `tools\api_anahtarlari.py` ile kaydedilir. Anahtar yoksa, fuar bilgisi verilmemişse ya da Jev'e ulaşılamazsa koşu Jev olmadan sürer.
 
 Ücretli, Places + Hunter (bloğun tamamını bir kerede yapıştırın):
 

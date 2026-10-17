@@ -57,6 +57,7 @@ from modules import (
     search,
     selection,
     secrets_store,
+    site_judge,
     stage_a_features,
     tax_identity,
 )
@@ -3326,6 +3327,102 @@ def _apply_calibrated_acceptance(
     return row
 
 
+JEV_CLEARED_FIELDS = (
+    "website", "selected_website", "website_source", "email_source_tier", "phone_source_tier",
+    *publication_policy.CONTACT_PROJECTION_FIELDS["email"], *publication_policy.CONTACT_PROJECTION_FIELDS["phone"],
+)
+
+
+def _jev_entries(entries: list[dict]) -> list[dict]:
+    """One crawled Stage A candidate per registrable domain, best calibrated order first."""
+    seen: set[str] = set()
+    kept = []
+    ordered = sorted(
+        (entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("features"), dict)),
+        key=lambda entry: calibration.acceptance_sort_key(entry["features"]),
+    )
+    for entry in ordered:
+        domain = scorer.registrable_domain(str(entry["features"].get("domain") or ""))
+        pages = ((entry.get("evaluation") or {}).get("crawl_result") or {}).get("pages") or []
+        if not domain or domain in seen or not pages:
+            continue
+        seen.add(domain)
+        kept.append(entry)
+    return kept
+
+
+def _apply_jev_site_check(
+    stage_a_row: dict, entries: list[dict], company: str, blind_metadata: dict | None,
+) -> dict:
+    """Ask Jev about the Stage A pick and, when there is none, about the other candidates (Talimat 52).
+
+    A pick Jev is sure belongs to another company or a directory goes to review
+    without its website and contacts.  A firm without a pick gets the candidate
+    Jev is sure is its own site.  When Jev cannot be asked nothing changes.
+    """
+    if not site_judge.available() or not entries:
+        return stage_a_row
+    if (stage_a_row.get("__evaluation") or {}).get("identity_resolution") == "candidate_resolved_by_tax_id_match":
+        return stage_a_row
+    candidates = _jev_entries(entries)
+    website = str(stage_a_row.get("website", "") or "")
+    row = stage_a_row
+    rejected = ""
+    if str(stage_a_row.get("status", "") or "").startswith("OK_"):
+        if not website:
+            return stage_a_row
+        picked = next((
+            entry for entry in candidates
+            if scorer.same_registrable_domain(str(entry["features"].get("domain") or ""), website)
+        ), None)
+        if picked is None:
+            return stage_a_row
+        verdict = site_judge.judge(company, website, picked["evaluation"]["crawl_result"]["pages"])
+        if not site_judge.rejects(verdict):
+            return stage_a_row
+        rejected = scorer.normalize_domain(website)
+        runtime.record("api.jev_site.rejected")
+        row = dict(stage_a_row)
+        for field in JEV_CLEARED_FIELDS:
+            row[field] = ""
+        row["status"] = "REVIEW_NEEDED"
+        row["website_identity_verified"] = False
+        row["jev_rejected_website"] = rejected
+        row["reason"] = f"jev_site_rejected:{rejected}:{site_judge.note(verdict)}; {row.get('reason', '')}".rstrip()
+    best = None
+    for entry in candidates[:config.JEV_SITE_MAX_CANDIDATES]:
+        features = entry["features"]
+        domain = str(features.get("domain") or "")
+        url = str(features.get("url") or "")
+        if not url or (rejected and scorer.same_registrable_domain(domain, rejected)):
+            continue
+        if features.get("reachable") is not True or features.get("parked"):
+            continue
+        if scorer.is_excluded_domain(domain) or scorer.is_foreign_country_domain(domain):
+            continue
+        verdict = site_judge.judge(company, domain, entry["evaluation"]["crawl_result"]["pages"])
+        if site_judge.accepts(verdict) and (best is None or verdict["own"] > best[1]["own"]):
+            best = (entry, verdict)
+    if best is None:
+        return row
+    entry, verdict = best
+    url = str(entry["features"]["url"])
+    domain = str(entry["features"]["domain"])
+    observation = reference_resolution.observe(entry.get("evaluation") or {}, url, blind_metadata or {})
+    contacts = reference_resolution.select_contacts(observation, domain, "")
+    accepted = dict(row)
+    accepted.update({
+        "website": url,
+        "selected_website": url,
+        "website_source": "OWN_SEARCH_JEV",
+        "status": "OK_MEDIUM_CONFIDENCE",
+        **contacts,
+    })
+    runtime.record("api.jev_site.accepted")
+    accepted["reason"] = f"jev_site_accepted:{site_judge.note(verdict)}; {accepted.get('reason', '')}".rstrip()
+    return accepted
+
+
 def process_company(index: int, company: str, logger, known_website: str = "", metadata: dict | None = None, *, execution_phase: str = "FREE") -> tuple[int, dict]:
     execution_phase = str(execution_phase).upper()
     if execution_phase == "PAID":
@@ -3341,6 +3438,7 @@ def process_company(index: int, company: str, logger, known_website: str = "", m
     finally:
         stage_a_features.end()
     stage_a_row = _apply_calibrated_acceptance(stage_a_row, entries, blind_metadata)
+    stage_a_row = _apply_jev_site_check(stage_a_row, entries, company, blind_metadata)
     row = reference_resolution.complete_with_reference(
         index, company, logger, stage_a_row, metadata,
         evaluate_fn=_evaluate_candidate_with_stage,
@@ -3536,6 +3634,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--country", choices=tuple(country_profile.PROFILES), default="TR",
         help="Target country profile (TR, PL or GB)",
     )
+    parser.add_argument(
+        "--fuar", default="",
+        help="Fair name, city and subject for the Jev website check, e.g. "
+             "\"Bioexpo Eurasia 2026, Istanbul: biotechnology and laboratory fair\"",
+    )
     parser.add_argument("--run-dir", type=Path, default=None, help="Canonical run directory containing output/ and state/")
     parser.add_argument("--resume-run", type=Path, default=None, help="Resume an existing run directory")
     parser.add_argument("--from-run-manifest", type=Path, default=None, help="Verified completed manifest for --only-status selection")
@@ -3585,6 +3688,7 @@ def _apply_cli_options(args: argparse.Namespace) -> None:
     country = str(getattr(args, "country", "TR") or "TR")
     if country != country_profile.current():
         country_profile.apply(country)
+    config.JEV_SITE_FAIR = " ".join(str(getattr(args, "fuar", "") or "").split())
     if args.search_cache is not None:
         config.SEARCH_CACHE_MODE = args.search_cache
     if args.crawl_cache is not None:

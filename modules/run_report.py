@@ -57,6 +57,7 @@ WEBSITE_SOURCE_LABELS = {
     "OWN_SEARCH": "Arama",
     "OWN_SEARCH+REFERENCE": "Arama + fuar listesi",
     "OWN_SEARCH_CALIBRATED": "Arama (kalibre kural)",
+    "OWN_SEARCH_JEV": "Arama (Jev)",
     "REFERENCE_VERIFIED": "Fuar listesi (doğrulandı)",
     "REFERENCE_ACCEPTED": "Fuar listesi (kabul edildi)",
     "REFERENCE_UNREACHABLE": "Fuar listesi (site açılmadı)",

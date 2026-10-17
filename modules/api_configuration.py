@@ -102,6 +102,7 @@ def apply_saved_resolver_configuration(saved: dict[str, str] | None = None) -> d
     config.BRIGHTDATA_API_KEY = config.BRIGHTDATA_API_KEY or saved.get("brightdata", "")
     config.BRANDFETCH_CLIENT_ID = config.BRANDFETCH_CLIENT_ID or saved.get("brandfetch", "")
     config.HUNTER_API_KEY = config.HUNTER_API_KEY or saved.get("hunter", "")
+    config.TYPESAFE_API_KEY = config.TYPESAFE_API_KEY or saved.get("typesafe", "")
 
     brandfetch_requested = settings.get(
         "brandfetch_domain_search", config.ENABLE_BRANDFETCH_DOMAIN_SEARCH,

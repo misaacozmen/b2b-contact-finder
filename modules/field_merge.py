@@ -31,7 +31,7 @@ def _website_confidence(row: dict) -> str:
     source = str(row.get("website_source", "") or "")
     is_known_source = (
         source in {
-            "OWN_SEARCH", "OWN_SEARCH+REFERENCE", "OWN_SEARCH_CALIBRATED",
+            "OWN_SEARCH", "OWN_SEARCH+REFERENCE", "OWN_SEARCH_CALIBRATED", "OWN_SEARCH_JEV",
             "PAID_BRIGHTDATA", "PAID_BRIGHTDATA_CALIBRATED",
         }
         or source.startswith("REFERENCE_")
@@ -47,6 +47,7 @@ def _website_confidence(row: dict) -> str:
     return {
         "OWN_SEARCH+REFERENCE": "HIGH",
         "OWN_SEARCH_CALIBRATED": "MEDIUM",
+        "OWN_SEARCH_JEV": "MEDIUM",
         "PAID_BRIGHTDATA_CALIBRATED": "MEDIUM",
         "REFERENCE_VERIFIED": "HIGH",
         "REFERENCE_ACCEPTED": "MEDIUM",

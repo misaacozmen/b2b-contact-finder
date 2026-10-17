@@ -50,8 +50,8 @@ class Panel:
         self.last_stage = 0
         self.extraction: dict | None = None
         root.title("Fuar koşu paneli")
-        root.geometry("680x710")
-        root.minsize(600, 650)
+        root.geometry("680x760")
+        root.minsize(600, 700)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         frame = ttk.Frame(root, padding=14)
         frame.pack(fill="both", expand=True)
@@ -84,6 +84,10 @@ class Panel:
             button = ttk.Radiobutton(country_row, text=label, value=code, variable=self.country_var)
             button.pack(side="left", padx=(8, 0))
             self.country_buttons.append(button)
+        ttk.Label(frame, text="Fuarın adı, şehri ve konusu (Türkiye fuarlarında Jev site kontrolü için; boşsa Jev çalışmaz):").pack(anchor="w")
+        self.fair_var = tk.StringVar()
+        self.fair_entry = ttk.Entry(frame, textvariable=self.fair_var)
+        self.fair_entry.pack(fill="x", pady=(2, 10))
 
         ttk.Label(frame, text="2. Koşu türü", font=SECTION_FONT).pack(anchor="w")
         self.mode_var = tk.StringVar(value=run_launcher.MODE_FREE)
@@ -238,6 +242,7 @@ class Panel:
         self.saved_button.configure(state=state)
         for button in self.country_buttons:
             button.configure(state=state)
+        self.fair_entry.configure(state=state)
         self.stop_button.configure(state="normal" if running and not extracting else "disabled")
         if running:
             for button in (self.open_results_button, self.open_folder_button, self.archive_button):
@@ -257,7 +262,8 @@ class Panel:
         ):
             return
         country = self.country_var.get()
-        self.session = run_launcher.RunSession(mode, Path(self.input_var.get()), count, country=country)
+        fair = " ".join(self.fair_var.get().split())
+        self.session = run_launcher.RunSession(mode, Path(self.input_var.get()), count, country=country, fair=fair)
         try:
             self.session.start()
         except OSError as exc:
@@ -271,7 +277,7 @@ class Panel:
         self.set_running(True)
         self.log(
             f"Koşu başladı: {Path(self.input_var.get()).name} · {country_profile.LABELS[country]} · "
-            f"{run_launcher.MODE_LABELS[mode]} · {count} firma"
+            f"{run_launcher.MODE_LABELS[mode]} · {count} firma" + (f" · Jev: {fair}" if fair else "")
         )
         self.root.after(POLL_MS, self.poll)
 
