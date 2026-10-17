@@ -1,5 +1,9 @@
 """The sales database: fairs we can quote, replies with their decision and draft, and each firm's stage (Talimat 51).
 
+Talimat 53 numbers each reply (the user's command code), keeps the draft's
+Message-ID, whether the draft may go by itself, who sent our answer, and one
+random command code per day.
+
 SQLite in the reply folder.  The rollback journal is kept between writes
 (journal_mode=PERSIST), so after set-up no file is created or removed there;
 the test suite's guard on the state folder stays unchanged while checks run.
@@ -8,8 +12,9 @@ the test suite's guard on the state folder stays unchanged while checks run.
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+import secrets
 import sqlite3
 
 
@@ -36,7 +41,16 @@ CREATE TABLE IF NOT EXISTS yanitlar (
     fuar TEXT NOT NULL DEFAULT '',
     sonuc TEXT NOT NULL,
     neden TEXT NOT NULL DEFAULT '',
-    yanitlandi TEXT NOT NULL DEFAULT ''
+    yanitlandi TEXT NOT NULL DEFAULT '',
+    kod INTEGER,
+    taslak_id TEXT NOT NULL DEFAULT '',
+    otomatik INTEGER NOT NULL DEFAULT 0,
+    taslak_zamani TEXT NOT NULL DEFAULT '',
+    gonderim TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS komut_kodlari (
+    gun TEXT PRIMARY KEY,
+    kod TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS firmalar (
     eposta TEXT PRIMARY KEY,
@@ -47,11 +61,20 @@ CREATE TABLE IF NOT EXISTS firmalar (
     guncellendi TEXT NOT NULL
 );
 """
+# Columns added by Talimat 53 to a database made before it.
+NEW_COLUMNS = (
+    ("kod", "INTEGER"), ("taslak_id", "TEXT NOT NULL DEFAULT ''"), ("otomatik", "INTEGER NOT NULL DEFAULT 0"),
+    ("taslak_zamani", "TEXT NOT NULL DEFAULT ''"), ("gonderim", "TEXT NOT NULL DEFAULT ''"),
+)
 # The outcome of a reply.
 DRAFT = "taslak hazır"
 USER = "size"
 CLOSED = "kapandı"
 FAIR_STATES = ("hazir", "yok")
+# Who sent our answer: '' the user from Zoho, or the tool on a command or by itself.
+BY_COMMAND = "komut"
+BY_ITSELF = "otomatik"
+CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -59,7 +82,24 @@ def connect(path: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=PERSIST")
     connection.executescript(SCHEMA)
+    _migrate(connection)
     return connection
+
+
+def _migrate(connection) -> None:
+    """Add the Talimat 53 columns to an older database and number its replies in the order they came."""
+    present = {row[1] for row in connection.execute("PRAGMA table_info(yanitlar)")}
+    missing = [(name, kind) for name, kind in NEW_COLUMNS if name not in present]
+    unnumbered = connection.execute("SELECT COUNT(*) FROM yanitlar WHERE kod IS NULL").fetchone()[0] if not missing else 1
+    if not missing and not unnumbered:
+        return
+    with connection:
+        for name, kind in missing:
+            connection.execute(f"ALTER TABLE yanitlar ADD COLUMN {name} {kind}")
+        start = connection.execute("SELECT COALESCE(MAX(kod), 0) FROM yanitlar").fetchone()[0]
+        rows = connection.execute("SELECT anahtar FROM yanitlar WHERE kod IS NULL ORDER BY alindi, anahtar").fetchall()
+        for offset, row in enumerate(rows, start=1):
+            connection.execute("UPDATE yanitlar SET kod = ? WHERE anahtar = ?", (start + offset, row["anahtar"]))
 
 
 def create(path: Path) -> None:
@@ -97,14 +137,85 @@ def has_reply(connection, key: str) -> bool:
     return connection.execute("SELECT 1 FROM yanitlar WHERE anahtar = ?", (key,)).fetchone() is not None
 
 
-def save_reply(connection, entry: dict, *, niyet: str, guven: float | None, fuar: str, sonuc: str, neden: str) -> None:
+def save_reply(connection, entry: dict, *, niyet: str, guven: float | None, fuar: str, sonuc: str, neden: str,
+               taslak_id: str = "", otomatik: bool = False, at: datetime | None = None) -> int:
+    """Record a reply's outcome; each reply keeps one number, shown to the user as T12 (draft) or S12."""
+    written = (at or datetime.now()).isoformat(timespec="seconds") if sonuc == DRAFT else ""
     with connection:
+        old = connection.execute("SELECT kod FROM yanitlar WHERE anahtar = ?", (entry["key"],)).fetchone()
+        kod = old["kod"] if old and old["kod"] else connection.execute(
+            "SELECT COALESCE(MAX(kod), 0) + 1 FROM yanitlar").fetchone()[0]
         connection.execute(
             "INSERT OR REPLACE INTO yanitlar (anahtar, eposta, firma, takip, alindi, message_id, niyet, guven, fuar, "
-            "sonuc, neden) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "sonuc, neden, kod, taslak_id, otomatik, taslak_zamani) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (entry["key"], entry["email"], entry.get("company", ""), entry.get("tracker", ""),
-             entry.get("received", entry["date"]), entry.get("message_id", ""), niyet, guven, fuar, sonuc, neden),
+             entry.get("received", entry["date"]), entry.get("message_id", ""), niyet, guven, fuar, sonuc, neden,
+             kod, taslak_id, int(bool(otomatik)), written),
         )
+    return kod
+
+
+def by_code(connection, number: int) -> dict | None:
+    row = connection.execute("SELECT * FROM yanitlar WHERE kod = ?", (int(number),)).fetchone()
+    return dict(row) if row else None
+
+
+def first_answer(connection, eposta: str, key: str) -> bool:
+    """No other reply of this address is recorded, so our answer would be the first in the conversation."""
+    return connection.execute(
+        "SELECT COUNT(*) FROM yanitlar WHERE eposta = ? AND anahtar <> ?", (eposta, key)).fetchone()[0] == 0
+
+
+def mark_sent(connection, key: str, *, day: date, how: str) -> None:
+    """Our answer to the reply went out from the tool (on a command or by itself)."""
+    with connection:
+        connection.execute("UPDATE yanitlar SET yanitlandi = ?, gonderim = ? WHERE anahtar = ?",
+                           (day.isoformat(), how, key))
+        connection.execute(
+            "UPDATE firmalar SET asama = 'yanıtımız gitti', guncellendi = ? WHERE eposta = "
+            "(SELECT eposta FROM yanitlar WHERE anahtar = ?)", (_now(), key),
+        )
+
+
+def close_reply(connection, key: str, *, neden: str) -> None:
+    with connection:
+        connection.execute("UPDATE yanitlar SET sonuc = ?, neden = ?, otomatik = 0 WHERE anahtar = ?",
+                           (CLOSED, neden, key))
+
+
+def stop_auto(connection, key: str) -> None:
+    with connection:
+        connection.execute("UPDATE yanitlar SET otomatik = 0 WHERE anahtar = ?", (key,))
+
+
+def auto_due(connection, *, before: datetime) -> list[dict]:
+    """Drafts to send by themselves that were written before ``before`` and are still unanswered."""
+    return [dict(row) for row in connection.execute(
+        "SELECT * FROM yanitlar WHERE sonuc = ? AND otomatik = 1 AND yanitlandi = '' AND taslak_zamani <> '' "
+        "AND taslak_zamani <= ? ORDER BY kod", (DRAFT, before.isoformat(timespec="seconds")),
+    )]
+
+
+def sent_by(connection, *, day: date, how: str) -> list[dict]:
+    return [dict(row) for row in connection.execute(
+        "SELECT * FROM yanitlar WHERE yanitlandi = ? AND gonderim = ? ORDER BY kod", (day.isoformat(), how),
+    )]
+
+
+def command_code(connection, day: date) -> str:
+    """The day's command code; e-mails of that day carry it and commands must quote one of the last days."""
+    with connection:
+        row = connection.execute("SELECT kod FROM komut_kodlari WHERE gun = ?", (day.isoformat(),)).fetchone()
+        if row:
+            return row["kod"]
+        code = "".join(secrets.choice(CODE_CHARS) for _ in range(8))
+        connection.execute("INSERT INTO komut_kodlari (gun, kod) VALUES (?, ?)", (day.isoformat(), code))
+        return code
+
+
+def valid_command_codes(connection, today: date, days: int) -> set[str]:
+    first = (today - timedelta(days=days)).isoformat()
+    return {row["kod"] for row in connection.execute("SELECT kod FROM komut_kodlari WHERE gun >= ?", (first,))}
 
 
 def reply(connection, key: str) -> dict | None:

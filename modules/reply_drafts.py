@@ -2,7 +2,8 @@
 
 A draft is only put in the Zoho Drafts folder; the user reads it, may change
 it, and sends it.  Orders, bargaining, unknown fairs and unclear replies get
-no draft: they go to the user.
+no draft: they go to the user.  From Talimat 53 the user may also send a draft
+by an e-mail command, and simple first answers (auto_allowed) go by themselves.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ class Drafting:
     fallback_sample: Path | None = None
     opener: object = None
     attachments_dir: Path | None = None
+    auto_since: date | None = None
 
 
 def load_templates(path: Path) -> dict[str, str]:
@@ -241,14 +243,36 @@ def build(entry: dict, decision: intent.Decision | None, fairs: list[dict], *, d
     return message, template, ""
 
 
+def auto_allowed(template: str, decision: intent.Decision | None) -> bool:
+    """The answer may go without the user: a stop, a later, a list not out yet, an FAQ or a price without a fair."""
+    if template not in config.AUTO_REPLY_TEMPLATES:
+        return False
+    return template != "ilgileniyor" or bool(decision and decision.sss in intent.FAQ and decision.sss != "yok")
+
+
 def next_contact(decision: intent.Decision | None, today: date) -> date | None:
     return today + timedelta(days=LATER_DAYS) if decision and decision.niyet == "simdi_degil" else None
 
 
 # --- morning summary --------------------------------------------------------------------------------
 
+def item_code(row: dict) -> str:
+    """The code the user writes in a command: T for a reply with a draft, S for one left to the user."""
+    if not row.get("kod"):
+        return ""
+    return f"{'T' if row['sonuc'] == 'taslak hazır' else 'S'}{row['kod']}"
+
+
+COMMAND_HELP = (
+    "Komut için bu e-postayı yanıtlayın ya da düğmelere basın: \"T12 gönder\" taslağı gönderir, \"T12 sil\" taslağı "
+    "siler, \"S4 kapat\" yanıtı kapatır. Birden çok komutu ayrı satırlara yazabilirsiniz."
+)
+
+
 def summary(*, today: date, open_rows: list[dict], sent_yesterday: dict[str, int], replies_yesterday: dict[str, int],
-            answered_yesterday: int, ready: dict[str, int], room: int, problems: list[str]) -> tuple[str, str]:
+            answered_yesterday: int, ready: dict[str, int], room: int, problems: list[str],
+            auto_yesterday: list[dict] | None = None, command_yesterday: int = 0,
+            command_code: str = "") -> tuple[str, str]:
     """The subject and text of the morning summary e-mail."""
     drafts = [row for row in open_rows if row["sonuc"] == "taslak hazır"]
     to_user = [row for row in open_rows if row["sonuc"] == "size"]
@@ -256,7 +280,10 @@ def summary(*, today: date, open_rows: list[dict], sent_yesterday: dict[str, int
     def line(row: dict) -> str:
         label = INTENT_LABELS.get(row["niyet"], row["niyet"] or "niyet yok")
         extra = f" — {row['neden']}" if row["neden"] else ""
-        return f"  • {row['firma'] or row['eposta']} — {label}{extra} ({row['alindi'][:16].replace('T', ' ')})"
+        extra += " — kendiliğinden gidecek" if row.get("otomatik") else ""
+        code = item_code(row)
+        tag = f"[{code}] " if code else ""
+        return f"  • {tag}{row['firma'] or row['eposta']} — {label}{extra} ({row['alindi'][:16].replace('T', ' ')})"
 
     out = [f"Günlük özet — {today:%d.%m.%Y}", "", "SİZİ BEKLEYENLER"]
     out.append(f"- Zoho'da gönderilmeyi bekleyen taslak: {len(drafts)}")
@@ -270,7 +297,15 @@ def summary(*, today: date, open_rows: list[dict], sent_yesterday: dict[str, int
     out.append("- Gelen: " + (", ".join(f"{name} {count}" for name, count in sorted(replies_yesterday.items()))
                               if replies_yesterday else "yok"))
     out.append(f"- Gönderdiğiniz yanıt: {answered_yesterday}")
+    if command_code:
+        auto_rows = auto_yesterday or []
+        out.append(f"- Komutunuzla giden yanıt: {command_yesterday}")
+        out.append(f"- Kendiliğinden giden yanıt: {len(auto_rows)}")
+        out += [f"  • {row['firma'] or row['eposta']} — {INTENT_LABELS.get(row['niyet'], row['niyet'] or 'istemiyor')}"
+                for row in auto_rows]
     out += ["", "BUGÜN", f"- Günlük gönderim hakkı: {room}"]
     out += [f"- {name}: gönderilebilecek {count} firma" for name, count in sorted(ready.items())]
     out += ["", "SORUNLAR"] + ([f"- {problem}" for problem in problems] or ["- yok"])
+    if command_code:
+        out += ["", "KOMUTLAR", COMMAND_HELP, f"Komut kodu: {command_code}"]
     return f"Günlük özet — {today:%d.%m.%Y}", "\n".join(out) + "\n"

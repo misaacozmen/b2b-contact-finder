@@ -18,8 +18,14 @@ Reply drafts and the morning summary (Talimat 51), set up once:
     python tools\\eposta_gonder.py fuarlar
     python tools\\eposta_gonder.py ozet
 
-Only "gonder" writes to firms.  The Zoho app password is saved once with
-tools\\api_anahtarlari.py and never printed.
+E-mail commands and answers that go by themselves (Talimat 53):
+    python tools\\eposta_gonder.py otomatik-ayar --baslangic 2026-10-31
+    python tools\\eposta_gonder.py komut-dene
+
+"gonder" writes the cold e-mails.  The reply check writes to a firm only on the
+user's command (T12 gönder) or, from the otomatik-ayar day, with a simple first
+answer.  The Zoho app password is saved once with tools\\api_anahtarlari.py and
+never printed.
 """
 
 from __future__ import annotations
@@ -35,7 +41,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
-from modules import country_profile, intent, opt_out, outreach, replies, reply_drafts, sales_db  # noqa: E402
+from modules import (  # noqa: E402
+    country_profile, intent, opt_out, outreach, replies, reply_commands, reply_drafts, sales_db,
+)
 
 
 def _tracker(path: Path, *, write: bool) -> outreach.Tracker:
@@ -72,6 +80,7 @@ def _drafting(settings: dict) -> reply_drafts.Drafting | None:
         sender_name=(cold or {}).get("sender_name", ""), since=date.fromisoformat(settings["taslak_baslangic"]),
         db_path=config.SALES_DB_FILE, jev_key=intent.api_key(), cold_template=cold,
         fallback_sample=Path(settings["ornek"]) if settings.get("ornek") else None,
+        auto_since=date.fromisoformat(settings["otomatik_baslangic"]) if settings.get("otomatik_baslangic") else None,
     )
 
 
@@ -154,9 +163,40 @@ def main(argv: list[str] | None = None) -> int:
     fair.add_argument("--durum", choices=sales_db.FAIR_STATES, default="hazir", help="hazir: liste var; yok: yayımlanmadı")
     commands.add_parser("fuarlar", help="kayıtlı fuarları göster")
     commands.add_parser("ozet", help="sabah özetinin bugünkü halini ekrana yaz (göndermez)")
+    auto = commands.add_parser("otomatik-ayar", help="basit yanıtların kendiliğinden gideceği başlangıç günü")
+    auto_choice = auto.add_mutually_exclusive_group(required=True)
+    auto_choice.add_argument("--baslangic", type=date.fromisoformat, help="YYYY-AA-GG; o gün ve sonrası gelen yanıtlar")
+    auto_choice.add_argument("--kapat", action="store_true", help="kendiliğinden gönderimi kapat")
+    commands.add_parser("komut-dene", help="kendi adresinize bir deneme taslağını komut yoluyla gönder")
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "komut-dene":
+            settings = replies.load_settings()
+            if not settings.get("hesap") or not settings.get("bildirim"):
+                raise outreach.OutreachError("Önce yanit-ayar komutunu çalıştırın.")
+            password = outreach.smtp_password()
+            if not password:
+                raise outreach.OutreachError("Zoho uygulama şifresi kayıtlı değil: tools\\api_anahtarlari.py")
+            problem = reply_commands.self_test(account=settings["hesap"], password=password, owner=settings["bildirim"])
+            if problem:
+                raise outreach.OutreachError(f"Komut denemesi olmadı: {problem}")
+            print(f"Komut denemesi tamam: deneme taslağı gönderildi ({settings['bildirim']}) ve Çöp kutusuna taşındı.")
+            return 0
+        if args.command == "otomatik-ayar":
+            settings = replies.load_settings()
+            if not settings.get("yanit_sablon"):
+                raise outreach.OutreachError("Önce taslak-ayar komutunu çalıştırın.")
+            if args.kapat:
+                settings.pop("otomatik_baslangic", None)
+                replies.save_settings(settings)
+                print("Kendiliğinden gönderim kapalı; bütün yanıtlar taslak olarak kalır.")
+                return 0
+            replies.save_settings({**settings, "otomatik_baslangic": args.baslangic.isoformat()})
+            print(f"Kendiliğinden gönderim {args.baslangic:%d.%m.%Y} ve sonrası gelen yanıtlar için açık: "
+                  f"{', '.join(config.AUTO_REPLY_TEMPLATES)}; yalnız firmaya ilk yanıtımızsa, mesai saatinde, "
+                  f"günde en çok {config.AUTO_REPLY_DAILY_LIMIT}.")
+            return 0
         if args.command == "taslak-ayar":
             settings = replies.load_settings()
             if not settings.get("hesap"):
@@ -203,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                     connection, today=date.today(), log=log, tracker_dir=Path(settings["klasor"]),
                     account=settings["hesap"], to=settings.get("bildirim", ""),
                 )
-                print(message.get_content())
+                print(message.get_body(preferencelist=("plain",)).get_content())
                 return 0
             finally:
                 connection.close()

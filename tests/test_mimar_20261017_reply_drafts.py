@@ -440,7 +440,7 @@ def test_a_check_writes_drafts_notices_and_one_summary(files, smtp):
     assert (result["yanıtlanan"], result["özet"], result["taslak"]) == (1, 1, 0)
     summary = smtp.sent[-1]
     assert summary["Subject"] == "Günlük özet — 17.10.2026" and summary["To"] == OWNER
-    text = summary.get_content()
+    text = summary.get_body(preferencelist=("plain",)).get_content()
     assert "Zoho'da gönderilmeyi bekleyen taslak: 0" in text
     assert "Taslak yazılmayan, sizin yanıtlayacağınız: 1" in text and "Beta Ornek — sipariş" in text
     assert "Gönderdiğiniz yanıt: 1" in text and "Günlük gönderim hakkı: 20" in text

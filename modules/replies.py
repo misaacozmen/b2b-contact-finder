@@ -31,7 +31,7 @@ import tempfile
 import time
 
 import config
-from modules import intent, opt_out, outreach, reply_drafts, sales_db, scorer
+from modules import intent, opt_out, outreach, reply_commands, reply_drafts, sales_db, scorer
 
 
 BOUNCE = "geri döndü"
@@ -398,8 +398,11 @@ def add_opt_outs(entries: list[dict]) -> int:
     return len(added)
 
 
-def notice(entry: dict, *, account: str, to: str, outcome: dict | None = None) -> EmailMessage:
-    """A short notice of a reply; with drafts on, it also says what the reply wants and where the draft is."""
+def notice(entry: dict, *, account: str, to: str, outcome: dict | None = None, command_code: str = "") -> EmailMessage:
+    """A short notice of a reply; with drafts on, it also says what the reply wants and where the draft is.
+
+    With a command code (Talimat 53) it shows the reply's code, the commands and buttons that write them.
+    """
     message = EmailMessage()
     company = entry.get("company") or entry["from"]
     first = "İstemiyor (ret listesine eklendi)" if entry["kind"] == OPT_OUT else "Yanıt geldi"
@@ -411,27 +414,45 @@ def notice(entry: dict, *, account: str, to: str, outcome: dict | None = None) -
         f"Takip dosyası: {entry.get('tracker') or '-'}",
     ]
     last = "Yanıtı Zoho'dan siz verin. Bu e-posta otomatik bildirimdir."
+    commands = []
     if outcome:
         label = reply_drafts.INTENT_LABELS.get(outcome["niyet"], outcome["niyet"] or "belirlenemedi")
         lines.append(f"Niyet: {label}")
-        if outcome["sonuc"] == sales_db.DRAFT:
+        code = reply_drafts.item_code(outcome)
+        if outcome["sonuc"] == sales_db.DRAFT and outcome.get("otomatik"):
+            first = f"Kendiliğinden gidecek ({label})"
+            last = ("Taslak Zoho'da Taslaklar klasöründe; mesai saatinde kendiliğinden gönderilecek. "
+                    "Bu e-posta otomatik bildirimdir.")
+            help_text = f"Göndermek istemiyorsanız \"{code} sil\" yazıp bu e-postayı yanıtlayın ya da düğmeye basın."
+        elif outcome["sonuc"] == sales_db.DRAFT:
             first = f"Taslak hazır ({label})"
             last = "Taslak Zoho'da Taslaklar klasöründe; okuyup gönderin. Bu e-posta otomatik bildirimdir."
-        elif outcome["sonuc"] == sales_db.USER:
-            first = f"Size kalan yanıt ({outcome['neden']})"
-            last = "Taslak yazılmadı; yanıtı Zoho'dan siz verin. Bu e-posta otomatik bildirimdir."
+            help_text = (f"Taslağı olduğu gibi göndermek için \"{code} gönder\", silmek için \"{code} sil\" yazıp "
+                         "bu e-postayı yanıtlayın ya da düğmeye basın.")
+        else:
+            if outcome["sonuc"] == sales_db.USER:
+                first = f"Size kalan yanıt ({outcome['neden']})"
+                last = "Taslak yazılmadı; yanıtı Zoho'dan siz verin. Bu e-posta otomatik bildirimdir."
+            help_text = f"Yanıt gerekmiyorsa kapatmak için \"{code} kapat\" yazıp bu e-postayı yanıtlayın."
+        if code and command_code and outcome["sonuc"] != sales_db.CLOSED:
+            commands = ["", f"Kod: [{code}]", help_text, f"Komut kodu: {command_code}"]
     message["From"] = formataddr(("Yanıt bildirimi", account))
     message["To"] = to
     message["Subject"] = f"{first}: {company}"
-    message.set_content("\n".join([
-        *lines, "", (entry.get("text") or "")[:NOTICE_CHARS] or "(metin yok)", "", last,
-    ]) + "\n")
+    body = "\n".join([
+        *lines, "", (entry.get("text") or "")[:NOTICE_CHARS] or "(metin yok)", *commands, "", last,
+    ]) + "\n"
+    message.set_content(body)
+    if commands:
+        message.add_alternative(reply_commands.html_version(body, account=account, command_code=command_code),
+                                subtype="html")
     return message
 
 
 # --- drafts, answered replies and the morning summary (Talimat 51) ---------------------------------------
 
-def _draft_for(entry: dict, imap, connection, drafting: reply_drafts.Drafting, account: str, result: dict) -> None:
+def _draft_for(entry: dict, imap, connection, drafting: reply_drafts.Drafting, account: str, result: dict,
+               now: datetime | None = None) -> None:
     """Decide what one reply wants, put a draft in Zoho when a template fits, and record the outcome."""
     fairs = sales_db.fairs(connection)
     decision = None
@@ -456,9 +477,15 @@ def _draft_for(entry: dict, imap, connection, drafting: reply_drafts.Drafting, a
         sales_db.CLOSED if niyet == "olumsuz" and decision and decision.guven >= config.INTENT_MIN_CONFIDENCE
         else sales_db.USER
     )
+    # From the start date, a simple first answer goes by itself (Talimat 53).
+    automatic = bool(
+        message is not None and drafting.auto_since and date.fromisoformat(entry["date"]) >= drafting.auto_since
+        and reply_drafts.auto_allowed(template, decision) and sales_db.first_answer(connection, entry["email"], entry["key"])
+    )
     result["taslak" if sonuc == sales_db.DRAFT else "size kalan"] += 1
     sales_db.save_reply(connection, entry, niyet=niyet, guven=decision.guven if decision else None,
-                        fuar=decision.fuar if decision else "", sonuc=sonuc, neden=template or reason)
+                        fuar=decision.fuar if decision else "", sonuc=sonuc, neden=template or reason,
+                        taslak_id=str(message["Message-ID"]) if message is not None else "", otomatik=automatic, at=now)
     stage = {"istemiyor": "istemiyor", "olumsuz": "kapandı", "simdi_degil": "şimdi değil"}.get(niyet, "yanıt geldi")
     sales_db.set_stage(connection, eposta=entry["email"], firma=entry.get("company", ""), takip=entry.get("tracker", ""),
                        asama=stage, sonraki=reply_drafts.next_contact(decision, date.fromisoformat(entry["date"])))
@@ -505,23 +532,55 @@ def summary_message(connection, *, today: date, log: list[dict], tracker_dir: Pa
         row = sales_db.reply(connection, entry["key"]) if entry["kind"] in NOTIFY_KINDS else None
         label = reply_drafts.INTENT_LABELS.get(row["niyet"], entry["kind"]) if row and row["niyet"] else entry["kind"]
         replies_yesterday[label] = replies_yesterday.get(label, 0) + 1
-    answered = connection.execute("SELECT COUNT(*) FROM yanitlar WHERE yanitlandi = ?", (yesterday,)).fetchone()[0]
+    answered = connection.execute(
+        "SELECT COUNT(*) FROM yanitlar WHERE yanitlandi = ? AND gonderim = ''", (yesterday,)).fetchone()[0]
     try:
         run_lines = config.REPLY_RUN_LOG_FILE.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         run_lines = []
     problems = sorted({line[17:] for line in run_lines if line.startswith(yesterday) and "HATA" in line})
+    command_code = sales_db.command_code(connection, today)
+    day_before = today - timedelta(days=1)
     subject, body = reply_drafts.summary(
         today=today, open_rows=sales_db.open_replies(connection), sent_yesterday=sent_yesterday,
         replies_yesterday=replies_yesterday, answered_yesterday=answered, ready=_ready_counts(tracker_dir, log),
         room=outreach.daily_room(log, config.OUTREACH_DAILY_LIMIT, today), problems=problems,
+        auto_yesterday=sales_db.sent_by(connection, day=day_before, how=sales_db.BY_ITSELF),
+        command_yesterday=len(sales_db.sent_by(connection, day=day_before, how=sales_db.BY_COMMAND)),
+        command_code=command_code,
     )
     message = EmailMessage()
     message["From"] = formataddr(("Günlük özet", account))
     message["To"] = to
     message["Subject"] = subject
     message.set_content(body)
+    message.add_alternative(reply_commands.html_version(body, account=account, command_code=command_code),
+                            subtype="html")
     return message
+
+
+def _run_command(message, *, connection, imap, account: str, password: str, owner: str, now: datetime,
+                 smtp_factory, result: dict) -> None:
+    """Carry out a command e-mail of the user and answer with the result (Talimat 53)."""
+    full = _plain_text(message)
+    subject = str(message.get("Subject", ""))
+    commands, unclear = reply_commands.parse(subject, reply_text(message, account), full)
+    if not commands and not unclear:
+        return  # an ordinary e-mail of the user, not a command
+    codes = sales_db.valid_command_codes(connection, now.date(), config.COMMAND_CODE_DAYS)
+    if not reply_commands.has_valid_code(f"{subject}\n{full}", codes):
+        lines = ["Komut uygulanmadı: e-postada son günlerin komut kodu yok. Bildirimdeki düğmelere basın "
+                 "ya da bildirimi yanıtlayın."]
+    else:
+        lines = reply_commands.run(commands, connection=connection, imap=imap, account=account, password=password,
+                                   today=now.date(), smtp_factory=smtp_factory)
+        lines += [f"Anlaşılamadı, kod ve komutu birlikte yazın (örnek: T12 gönder): {line}" for line in unclear]
+        result["komut"] += len(commands)
+    try:
+        outreach.send_one(reply_commands.result_message(lines, account=account, to=owner), address=account,
+                          password=password, smtp_factory=smtp_factory)
+    except Exception:  # noqa: BLE001 - the command is done; only its receipt is lost
+        result["bildirim hatası"] += 1
 
 
 # --- one check ----------------------------------------------------------------------------------
@@ -534,14 +593,16 @@ def check(*, account: str, password: str, notify_to: str, tracker_dir: Path, not
     Replies received before ``notify_since`` (the day the checks were set up) get no notice.  With
     ``drafting``, each new reply from ``drafting.since`` on also gets a decision and, when a template
     fits, a draft in Zoho; answers sent from Zoho close the reply, and the first check from 08:00
-    sends the morning summary.
+    sends the morning summary.  The user's command e-mails are carried out, and from
+    ``drafting.auto_since`` simple first answers go by themselves (Talimat 53).
     """
     now = now or datetime.now()
     account = account.casefold()
     log = outreach.load_log()
     sent = [entry for entry in log if entry.get("result") != outreach.TEST]
     result = {"yeni": 0, BOUNCE: 0, AUTO: 0, OPT_OUT: 0, REPLY: 0, "bildirim": 0, "bildirim hatası": 0,
-              "taslak": 0, "size kalan": 0, "niyet hatası": 0, "yanıtlanan": 0, "özet": 0, "özet hatası": 0}
+              "taslak": 0, "size kalan": 0, "niyet hatası": 0, "yanıtlanan": 0, "özet": 0, "özet hatası": 0,
+              "komut": 0, "kendiliğinden giden": 0}
     state = _load_state()
     known = {entry["key"] for entry in load_reply_log()}
     connection = sales_db.connect(drafting.db_path) if drafting else None
@@ -559,11 +620,15 @@ def check(*, account: str, password: str, notify_to: str, tracker_dir: Path, not
                 raise ReplyError(f"Zoho'ya bağlanılamadı ({type(error).__name__}).") from None
             try:
                 new_entries = []
+                command_mails = []
                 for key, folder, raw in fetch_new(imap, config.REPLY_FOLDERS, state, since):
                     result["yeni"] += 1
                     if key in known:
                         continue
                     message = email.message_from_bytes(raw, policy=policy.default)
+                    if connection is not None and reply_commands.from_owner(message, notify_to):
+                        command_mails.append(message)
+                        continue
                     found = classify(message, index, account)
                     if not found:
                         continue
@@ -587,8 +652,17 @@ def check(*, account: str, password: str, notify_to: str, tracker_dir: Path, not
                         for entry in new_entries:
                             if (entry["kind"] in NOTIFY_KINDS and date.fromisoformat(entry["date"]) >= drafting.since
                                     and not sales_db.has_reply(connection, entry["key"])):
-                                _draft_for(entry, imap, connection, drafting, account, result)
+                                _draft_for(entry, imap, connection, drafting, account, result, now)
                     result["yanıtlanan"] = _mark_answered(imap, connection, state, since)
+                    for message in command_mails:
+                        _run_command(message, connection=connection, imap=imap, account=account, password=password,
+                                     owner=notify_to, now=now, smtp_factory=smtp_factory, result=result)
+                    if drafting.auto_since and now.date() >= drafting.auto_since:
+                        result["kendiliğinden giden"], problems = reply_commands.send_due(
+                            connection, imap, now=now, account=account, password=password, smtp_factory=smtp_factory,
+                        )
+                        for problem in problems:
+                            write_run_log(now, f"HATA: {problem}")
             finally:
                 try:
                     imap.logout()
@@ -605,9 +679,10 @@ def check(*, account: str, password: str, notify_to: str, tracker_dir: Path, not
             if notify_since and date.fromisoformat(entry["date"]) < notify_since:
                 continue
             outcome = sales_db.reply(connection, entry["key"]) if connection else None
+            command_code = sales_db.command_code(connection, now.date()) if outcome else ""
             try:
-                outreach.send_one(notice(entry, account=account, to=notify_to, outcome=outcome), address=account,
-                                  password=password, smtp_factory=smtp_factory)
+                outreach.send_one(notice(entry, account=account, to=notify_to, outcome=outcome, command_code=command_code),
+                                  address=account, password=password, smtp_factory=smtp_factory)
             except Exception:  # noqa: BLE001 - the notice is sent again on the next run
                 result["bildirim hatası"] += 1
                 continue

@@ -807,6 +807,17 @@ INTENT_MIN_CONFIDENCE = 0.6
 PRICE_TIERS = ((150, 6.0), (400, 5.5), (1000, 5.0), (None, 4.0))
 SAMPLE_SIZE = 20
 SUMMARY_HOUR = 8
+# E-mail commands and automatic answers (Talimat 53).  A command counts only from
+# the user's own address, with Zoho's DKIM and DMARC pass on top and a command
+# code of the last days in the e-mail.  Simple answers go by themselves from the
+# start date in settings, inside office hours, at the earliest one check after
+# the draft was written, and only as the first answer to that firm.
+REPLY_TRASH_FOLDER = "Trash"
+REPLY_AUTH_SERVER = "mx.zohomail"
+COMMAND_CODE_DAYS = 7
+AUTO_REPLY_TEMPLATES = ("istemiyor", "simdi_degil", "liste_yok", "soru_adres", "soru_kvkk", "fiyat_fuarsiz", "ilgileniyor")
+AUTO_REPLY_DELAY_MIN = 25
+AUTO_REPLY_DAILY_LIMIT = 20
 
 SECTOR_GENERIC_WORDS = [
     "demir",

@@ -309,7 +309,7 @@ python tools\eposta_gonder.py yanit-zamanla
 - `yanit-zamanla`: kontrolü Windows'ta her gün 08:00–22:00 arası yarım saatte bir, pencere açmadan çalıştırır. `--kaldir` ile kaldırılır. Her kontrolün özeti `state\eposta_yanit\calisma.log` dosyasına yazılır.
 - Takip dosyası Excel'de açıksa yanıt bir sonraki kontrolde yazılır.
 
-**Yanıt taslakları ve sabah özeti:** firmanın yanıtına uygun cevap taslağı Zoho'nun Taslaklar klasörüne konur; siz okuyup gönderirsiniz. Araç hiçbir firmaya kendisi yazmaz.
+**Yanıt taslakları ve sabah özeti:** firmanın yanıtına uygun cevap taslağı Zoho'nun Taslaklar klasörüne konur; siz okuyup gönderirsiniz. Araç bir firmaya yalnız sizin komutunuzla ya da aşağıdaki "kendiliğinden giden yanıt" kuralıyla yazar.
 
 - Yanıtın ne istediğini TypeSafe'in Jev modeli belirler (ilgi, fiyat, örnek, sipariş, adres ya da KVKK sorusu, şimdi değil, olumsuz, istemiyor, yanlış kişi). Yanıt modele gönderilmeden önce selamlama ve imza satırları silinir; e-posta adresleri, telefonlar ve web adresleri işaretle değiştirilir.
 - Taslak metinleri sizin şablon dosyanızdan gelir. Fiyat sorusunda fuar kayıtlıysa taslakta Türk katılımcı sayısı ve en çok tutar yer alır; örnek istenmişse rastgele 20 firma eklenir.
@@ -328,6 +328,31 @@ python tools\eposta_gonder.py ozet
 - `taslak-ayar` bir kez çalışır; Jev anahtarı `tools\api_anahtarlari.py` ile kaydedilir. Kurulum gününden önceki yanıtlara taslak yazılmaz.
 - `fuar-ekle` teklif verilebilecek fuarı ekler ya da günceller: Türk katılımcı sayısı, katılımcı listesi ve örneğin seçileceği iletişim dosyası. Listesi yayımlanmamış fuar `--durum yok` ile eklenir; böyle bir fuar sorulunca "liste henüz yayımlanmadı" taslağı yazılır.
 - `ozet` sabah özetinin bugünkü halini ekrana yazar, göndermez.
+
+**E-postayla komut:** bildirimlerde ve sabah özetinde her yanıtın bir kodu vardır: taslağı olan yanıt `T12`, size kalan yanıt `S12`.
+
+- **Nasıl verilir:** Gmail'den bildirimi yanıtlayıp `T12 gönder`, `T12 sil` ya da `S12 kapat` yazın, ya da e-postadaki düğmeye basın. Düğme bu metni hazır açar. Bir bildirimi yanıtlarken yalnız `gönder` ya da `sil` yazmanız da yeter. Birden çok komutu ayrı satırlara yazabilirsiniz.
+- **Ne zaman uygulanır:** Komut, en geç yarım saat sonraki kontrolde uygulanır. Sonuç size "Komut sonucu" e-postasıyla gelir.
+- **Gönder:** Taslak, Zoho'da o anki hâliyle gider; Zoho'da yaptığınız değişiklikler de gider. Ardından taslak Çöp kutusuna taşınır.
+- **Sil:** Taslak Çöp kutusuna taşınır ve yanıt kapatılır.
+- **Kapat:** Yanıt, taslak gönderilmeden kapatılır.
+- **Kabul koşulu:** Komut yalnız `yanit-ayar` ile kaydettiğiniz adresten gelirse kabul edilir. Zoho'nun DKIM ve DMARC doğrulamasından geçmesi ve e-postada son 7 günün komut kodu bulunması gerekir. Bu kod her bildirim ve özetin altında yazar.
+
+**Kendiliğinden giden yanıt:** `otomatik-ayar --baslangic` ile verilen günden sonra gelen basit yanıtlar, taslak beklemeden gönderilir. Bunlar: istemiyor, şimdi değil, liste henüz yayımlanmadı, sık sorulan soru, KVKK ve "adresimi nereden buldunuz" cevapları, fuar adı vermeden fiyat sorusu.
+
+- Yalnız o firmaya ilk yanıtımızsa gider.
+- Türkiye mesai saatinde (hafta içi 09:00–17:00) gider.
+- Taslak yazıldıktan en az 25 dakika sonra gider; bu sürede `T12 sil` ile durdurabilirsiniz.
+- Günde en çok 20 yanıt gider.
+- Bildirimin konusu "Kendiliğinden gidecek" olur. Gidenler ertesi sabahın özetinde listelenir.
+
+```powershell
+python tools\eposta_gonder.py otomatik-ayar --baslangic 2026-10-31
+python tools\eposta_gonder.py otomatik-ayar --kapat
+python tools\eposta_gonder.py komut-dene
+```
+
+- `komut-dene` kendi adresinize bir deneme taslağı koyar, komutların yoluyla gönderir ve Çöp kutusuna taşır. Gmail'inize "[DENEME] B2B komut denemesi" gelirse komutlar çalışıyor demektir.
 
 ## 9. Müşteri adayı listesi (hizmet firmaları)
 
